@@ -1,0 +1,41 @@
+title: "[idea]: "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por compartir una idea para CestaPlan. Este espacio es para debate
+        abierto; para bugs o peticiones concretas usa los *issues*.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema o necesidad
+      description: ¿Qué problema resolvería? ¿A quién afecta?
+      placeholder: Cuando planifico la compra, me gustaría que...
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Tu idea
+      description: Describe la propuesta con el detalle que quieras.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas
+      description: Otras formas de abordarlo que hayas pensado.
+    validations:
+      required: false
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Encaje con los principios
+      description: Marca lo que aplique (ver README y CONTRIBUTING).
+      options:
+        - label: No requiere inventar precios (fuente + tienda + fecha).
+        - label: No requiere scraping ni eludir anti-bot.
+        - label: Respeta que el LLM propone y el núcleo determinista valida y calcula.
+        - label: Mantiene el dinero exacto (Decimal/numeric/string, nunca float).
+        - label: Funciona o degrada con elegancia sin OpenAI.

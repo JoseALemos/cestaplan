@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Preguntas y debate (GitHub Discussions)
+    url: https://github.com/cestaplan/cestaplan/discussions
+    about: Para preguntas, ideas y debate abierto. Los issues son para bugs y peticiones concretas.
+  - name: 🔒 Reportar una vulnerabilidad de seguridad
+    url: https://github.com/cestaplan/cestaplan/security/advisories/new
+    about: No abras un issue público. Usa el canal privado de seguridad (ver SECURITY.md).

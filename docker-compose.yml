@@ -1,0 +1,62 @@
+# Local development stack for CestaPlan.
+# NOTE: Docker is optional. Native targets (see Makefile) work without it.
+# This file mirrors the Railway service model: web, api, worker, postgres.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cestaplan
+      POSTGRES_PASSWORD: cestaplan
+      POSTGRES_DB: cestaplan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cestaplan"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://cestaplan:cestaplan@postgres:5432/cestaplan
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >-
+      sh -c "alembic upgrade head &&
+             uvicorn cestaplan_api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://cestaplan:cestaplan@postgres:5432/cestaplan
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m cestaplan_worker.main
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

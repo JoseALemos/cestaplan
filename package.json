@@ -1,0 +1,21 @@
+{
+  "name": "cestaplan",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Open-source PWA for personalised, store-aware, budget-aware meal planning.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0"
+  }
+}
