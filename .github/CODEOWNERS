@@ -1,6 +1,5 @@
 # CestaPlan — CODEOWNERS
 #
 # Propietarios por defecto de todo el repositorio.
-# TODO: sustituir @OWNER por el handle real de GitHub del mantenedor
-#       (p. ej. @tu-usuario o @tu-organizacion/equipo) antes de publicar.
-* @OWNER
+# Cambia el handle si publicas bajo una organización o equipo.
+* @JoseALemos
