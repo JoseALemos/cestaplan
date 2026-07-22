@@ -59,8 +59,11 @@ export default function ComidasPage() {
         meal_type: meal.meal_type,
         requested_count: meal.requested_count,
         default_servings: meal.default_servings,
+        // Empty, undefined, or 0/non-positive all mean "sin límite" (null).
         maximum_preparation_minutes:
-          meal.maximum_preparation_minutes === "" || meal.maximum_preparation_minutes === undefined
+          meal.maximum_preparation_minutes === "" ||
+          meal.maximum_preparation_minutes === undefined ||
+          Number(meal.maximum_preparation_minutes) <= 0
             ? null
             : Number(meal.maximum_preparation_minutes),
         requires_tupper: meal.requires_tupper,

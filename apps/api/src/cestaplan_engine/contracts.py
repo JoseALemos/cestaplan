@@ -15,7 +15,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 # --- Decimal that serializes as a string in JSON mode, stays Decimal in Python.
 DecimalStr = Annotated[
@@ -72,6 +72,13 @@ class MealRequirementDTO(_Base):
     maximum_preparation_minutes: int | None = None
     requires_tupper: bool = False
     reheating_available: bool = True
+
+    @field_validator("maximum_preparation_minutes")
+    @classmethod
+    def _zero_means_no_limit(cls, value: int | None) -> int | None:
+        # A max prep time of 0 (or negative) is not a real constraint — it would
+        # silently reject every recipe. Treat it as "no limit" (None).
+        return value if value and value > 0 else None
 
 
 class BudgetDTO(_Base):

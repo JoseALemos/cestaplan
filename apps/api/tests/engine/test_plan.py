@@ -232,3 +232,30 @@ def test_reproducible_same_seed_same_output():
     first = run()
     second = run()
     assert first.model_dump_json() == second.model_dump_json()
+
+
+def test_zero_max_prep_means_no_limit_dto():
+    """maximum_preparation_minutes=0 must be coerced to None (no limit), never a 0-min cap."""
+    from cestaplan_engine.contracts import MealRequirementDTO
+
+    req = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=0)
+    assert req.maximum_preparation_minutes is None
+    neg = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=-5)
+    assert neg.maximum_preparation_minutes is None
+    ok = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=20)
+    assert ok.maximum_preparation_minutes == 20
+
+
+def test_zero_max_prep_still_generates_plan():
+    """Regression: a requirement with max prep 0 previously zeroed all candidates
+    (infeasible no_candidate_for). 0 now means 'no limit' and the plan generates."""
+    res = generate_plan(
+        plan_input(
+            members=[member("A")],
+            requirements=[requirement("lunch", 1, maximum_preparation_minutes=0)],
+            catalog=[CHICKEN],
+            candidates=[_chicken_lunch()],
+        )
+    )
+    assert isinstance(res, PlanResult)
+    assert len(res.planned_meals) == 1
