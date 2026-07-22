@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -36,11 +37,14 @@ from cestaplan_api.ingestion import (
     ConnectorStatus,
     JobStatus,
     LegalStatus,
+    PriceScope,
+    PriceType,
     RunStatus,
 )
 from cestaplan_api.ingestion.audit import SourceAuditService
 from cestaplan_api.ingestion.coverage import PriceCoverageService
 from cestaplan_api.ingestion.health import ConnectorHealthService
+from cestaplan_api.ingestion.manual_entry import ManualPriceError, record_manual_price
 from cestaplan_api.ingestion.queue import cancel_job
 from cestaplan_api.ingestion.run_service import CrawlRunService, JobSpec
 from cestaplan_api.models import (
@@ -51,6 +55,7 @@ from cestaplan_api.models import (
     DataSource,
     PriceAnomaly,
     PriceObservation,
+    Product,
     Retailer,
     Store,
 )
@@ -670,6 +675,129 @@ def reject_anomaly(
         anomaly_id,
         new_status=AnomalyStatus.REJECTED,
         message="Anomalía rechazada. No se modifica ningún precio.",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Manual price entry (spec §17)
+# --------------------------------------------------------------------------- #
+class ManualPriceRequest(BaseModel):
+    """An operator-typed price for a product at a retailer (optionally a specific store)."""
+
+    retailer_code: str
+    amount: str
+    currency: str = "EUR"
+    store_id: uuid.UUID | None = None
+    product_id: uuid.UUID | None = None
+    barcode: str | None = None
+    unit: str | None = None
+    price_scope: str | None = None
+    observed_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ManualPriceResponse(BaseModel):
+    """The manual :class:`PriceObservation` that was created (money as strings)."""
+
+    id: str
+    retailer_code: str
+    store_id: str | None
+    product_variant_id: str
+    amount: str
+    currency: str
+    unit_amount: str | None
+    unit_code: str | None
+    price_scope: str
+    price_type: str
+    observed_at: datetime
+    valid_from: datetime
+    confidence_score: str
+
+
+@router.post(
+    "/prices/manual",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(verify_csrf)],
+)
+def create_manual_price(
+    body: ManualPriceRequest, admin: AdminUser, db: DbSession
+) -> ManualPriceResponse:
+    """Record an operator-typed price as a ``manual`` PriceObservation (append-only, audited).
+
+    Resolves the retailer (by code) and the optional store/product (by public id, checked to
+    belong to the retailer — no IDOR), then delegates to
+    :func:`~cestaplan_api.ingestion.manual_entry.record_manual_price`. A bad amount/currency/scope
+    or a missing target is a 422; the price is never fabricated.
+    """
+    retailer = _get_retailer_by_code(db, body.retailer_code)
+
+    store: Store | None = None
+    if body.store_id is not None:
+        store = db.execute(
+            select(Store).where(
+                Store.public_id == body.store_id,
+                Store.retailer_id == retailer.id,
+            )
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+
+    product: Product | None = None
+    if body.product_id is not None:
+        product = db.execute(
+            select(Product).where(
+                Product.public_id == body.product_id,
+                Product.retailer_id == retailer.id,
+            )
+        ).scalar_one_or_none()
+        if product is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+
+    scope: PriceScope | None = None
+    if body.price_scope is not None:
+        try:
+            scope = PriceScope(body.price_scope)
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Ámbito de precio inválido: {body.price_scope!r}",
+            ) from exc
+
+    try:
+        obs = record_manual_price(
+            db,
+            retailer=retailer,
+            amount=body.amount,
+            store=store,
+            product=product,
+            barcode=body.barcode,
+            currency=body.currency,
+            unit=body.unit,
+            price_scope=scope,
+            price_type=PriceType.MANUAL,
+            observed_at=body.observed_at,
+            note=body.note,
+            user_id=admin.id,
+        )
+    except ManualPriceError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    return ManualPriceResponse(
+        id=str(obs.public_id),
+        retailer_code=retailer.slug,
+        store_id=_store_public_id(db, obs.store_id),
+        product_variant_id=str(obs.product_variant_id),
+        amount=str(obs.amount),
+        currency=obs.currency,
+        unit_amount=_dec(obs.unit_amount),
+        unit_code=obs.unit_code,
+        price_scope=obs.price_scope,
+        price_type=obs.price_type,
+        observed_at=obs.observed_at,
+        valid_from=obs.valid_from,
+        confidence_score=str(obs.confidence_score),
     )
 
 

@@ -26,9 +26,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.adapters.openprices import OpenPricesAdapter
+from cestaplan_api.config import get_settings
 from cestaplan_api.ingestion import LegalStatus, RetailerConnector
 from cestaplan_api.ingestion.connectors.demo import DemoFixtureConnector
 from cestaplan_api.ingestion.connectors.feed import CsvFeedConnector
+from cestaplan_api.ingestion.connectors.offers import (
+    AldiOffersConnector,
+    DezaOffersConnector,
+    LidlOffersConnector,
+)
 from cestaplan_api.ingestion.connectors.openprices import OpenPricesConnector
 from cestaplan_api.ingestion.crawl_worker import ConnectorRegistry, JobOutcome
 from cestaplan_api.ingestion.http_fetcher import HttpFetcher
@@ -75,6 +81,46 @@ register_connector(OpenPricesConnector.retailer_code, OpenPricesConnector)
 #: flowing through the *same* pipeline. Registered under its retailer code; a runtime build is
 #: gated by the feed's ``DataSource.is_enabled`` flag (see :func:`build_csv_feed_connector`).
 register_connector(CsvFeedConnector.retailer_code, CsvFeedConnector)
+
+#: FASE E — three PARTIAL / OFFER connectors (Lidl, Aldi, Deza). They are honest and legal:
+#: never scrape (their live paths return a controlled permission_required/unsupported result),
+#: offers-only (not a full catalogue), and DISABLED by default. Each factory reads its feature
+#: flag so the registry shows the connector disabled unless an operator opts in; even enabled,
+#: the live path is not permitted — only a synthetic/authorized offers ``offers`` fixture yields
+#: observations. The ``scenario`` kwarg the worker may pass (demo only) is accepted and ignored.
+
+
+def build_lidl_offers_connector(
+    *, offers: list[dict[str, object]] | None = None, enabled: bool | None = None, **_: object
+) -> LidlOffersConnector:
+    """Build the Lidl offers connector, gated by ``LIDL_OFFERS_CONNECTOR_ENABLED`` (off default)."""
+    flag = get_settings().lidl_offers_connector_enabled if enabled is None else enabled
+    return LidlOffersConnector(offers=offers, enabled=flag)
+
+
+def build_aldi_offers_connector(
+    *, offers: list[dict[str, object]] | None = None, enabled: bool | None = None, **_: object
+) -> AldiOffersConnector:
+    """Build the Aldi offers connector, gated by ``ALDI_OFFERS_CONNECTOR_ENABLED`` (off default)."""
+    flag = get_settings().aldi_offers_connector_enabled if enabled is None else enabled
+    return AldiOffersConnector(offers=offers, enabled=flag)
+
+
+def build_deza_connector(
+    *, offers: list[dict[str, object]] | None = None, enabled: bool | None = None, **_: object
+) -> DezaOffersConnector:
+    """Build the Deza connector, gated by ``DEZA_CONNECTOR_ENABLED`` (off by default).
+
+    Deza scraping is ``unsupported`` (its real path is an admin import); the live path never
+    fetches. An authorized ``offers`` fixture is the only way this connector yields observations.
+    """
+    flag = get_settings().deza_connector_enabled if enabled is None else enabled
+    return DezaOffersConnector(offers=offers, enabled=flag)
+
+
+register_connector(LidlOffersConnector.retailer_code, build_lidl_offers_connector)
+register_connector(AldiOffersConnector.retailer_code, build_aldi_offers_connector)
+register_connector(DezaOffersConnector.retailer_code, build_deza_connector)
 
 
 def build_csv_feed_connector(
@@ -180,7 +226,10 @@ __all__ = [
     "CONNECTOR_FACTORIES",
     "DEMO_ALWAYS_ENABLED",
     "ConnectorFactory",
+    "build_aldi_offers_connector",
     "build_csv_feed_connector",
+    "build_deza_connector",
+    "build_lidl_offers_connector",
     "build_open_prices_connector",
     "build_worker_registry",
     "get_connector",
