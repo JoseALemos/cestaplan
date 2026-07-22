@@ -20,16 +20,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.adapters.openprices import OpenPricesAdapter
-from cestaplan_api.ingestion import RetailerConnector
+from cestaplan_api.ingestion import LegalStatus, RetailerConnector
 from cestaplan_api.ingestion.connectors.demo import DemoFixtureConnector
+from cestaplan_api.ingestion.connectors.feed import CsvFeedConnector
 from cestaplan_api.ingestion.connectors.openprices import OpenPricesConnector
 from cestaplan_api.ingestion.crawl_worker import ConnectorRegistry, JobOutcome
+from cestaplan_api.ingestion.http_fetcher import HttpFetcher
 from cestaplan_api.ingestion.orchestration import run_crawl_job
-from cestaplan_api.models import CrawlJob, CrawlRun, Retailer, Store
+from cestaplan_api.models import CrawlJob, CrawlRun, DataSource, Retailer, Store
 from cestaplan_api.services.open_prices_sync import (
     open_prices_enabled,
     parse_osm_from_external_code,
@@ -65,6 +69,52 @@ if DEMO_ALWAYS_ENABLED:
 #: under its retailer code; runtime use stays gated by the Open Prices DataSource.is_enabled flag
 #: (see :func:`build_open_prices_connector`).
 register_connector(OpenPricesConnector.retailer_code, OpenPricesConnector)
+
+#: The second real connector (FASE D): an operator-provided CSV/JSON price feed. It has zero
+#: coupling to Open Prices/Demo — a different source shape (batch feed vs paginated HTTP API)
+#: flowing through the *same* pipeline. Registered under its retailer code; a runtime build is
+#: gated by the feed's ``DataSource.is_enabled`` flag (see :func:`build_csv_feed_connector`).
+register_connector(CsvFeedConnector.retailer_code, CsvFeedConnector)
+
+
+def build_csv_feed_connector(
+    db: Session,
+    *,
+    feed: str | bytes | None = None,
+    feed_path: str | Path | None = None,
+    feed_url: str | None = None,
+    feed_format: str = "csv",
+    mapping: dict[str, str] | None = None,
+    legal_status: LegalStatus = LegalStatus.AUTHORIZED,
+    source_slug: str = "operator-feed",
+    data_source_slug: str | None = None,
+    fetcher: HttpFetcher | None = None,
+) -> CsvFeedConnector:
+    """Build a :class:`CsvFeedConnector` for a given feed source, gated by a ``DataSource`` flag.
+
+    The feed source (``feed`` content, ``feed_path`` or ``feed_url``) is operator-provided, so it
+    is passed in by the caller — there is no coupling to Open Prices or the demo. When
+    ``data_source_slug`` names a registered :class:`~cestaplan_api.models.DataSource`, its
+    ``is_enabled`` flag decides whether the connector is active (a disabled/absent source yields a
+    disabled connector that discovers nothing). Absent a slug, the feed is treated as enabled.
+    """
+    enabled = True
+    if data_source_slug is not None:
+        source = db.execute(
+            select(DataSource).where(DataSource.slug == data_source_slug)
+        ).scalar_one_or_none()
+        enabled = bool(source is not None and source.is_enabled)
+    return CsvFeedConnector(
+        feed=feed,
+        feed_path=feed_path,
+        feed_url=feed_url,
+        feed_format=feed_format,
+        mapping=mapping,
+        enabled=enabled,
+        legal_status=legal_status,
+        source_slug=source_slug,
+        fetcher=fetcher,
+    )
 
 
 def build_open_prices_connector(
@@ -130,6 +180,7 @@ __all__ = [
     "CONNECTOR_FACTORIES",
     "DEMO_ALWAYS_ENABLED",
     "ConnectorFactory",
+    "build_csv_feed_connector",
     "build_open_prices_connector",
     "build_worker_registry",
     "get_connector",
