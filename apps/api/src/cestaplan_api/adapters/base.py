@@ -45,6 +45,10 @@ CANONICAL_COLUMNS: tuple[str, ...] = (
     "expires_at",
     "confidence_score",
     "verification_status",
+    # Optional: canonical ingredient this product maps to (case-insensitive match on
+    # Ingredient.canonical_name). When present + matched, the importer also creates an
+    # IngredientProductMapping. Absent/unmatched leaves import behaviour unchanged.
+    "canonical_name",
 )
 
 # A raw parsed row: canonical column name -> raw string value (mapping already applied).
@@ -145,6 +149,8 @@ class NormalizedRecord:
     expires_at: datetime | None = None
     confidence_score: Decimal | None = None
     verification_status: str = "unverified"
+    # Optional canonical ingredient link (drives IngredientProductMapping on commit).
+    canonical_name: str | None = None
 
     def to_json(self) -> dict[str, str | None]:
         """Serialise to JSON-safe primitives (Decimals/dates as strings) for storage."""
@@ -177,6 +183,7 @@ class NormalizedRecord:
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "confidence_score": s(self.confidence_score),
             "verification_status": self.verification_status,
+            "canonical_name": self.canonical_name,
         }
 
     @classmethod
@@ -212,6 +219,7 @@ class NormalizedRecord:
             expires_at=datetime.fromisoformat(expires_raw) if expires_raw else None,
             confidence_score=dec(data.get("confidence_score")),
             verification_status=str(data.get("verification_status") or "unverified"),
+            canonical_name=data.get("canonical_name") or None,
         )
 
 

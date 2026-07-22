@@ -7,7 +7,14 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import Product, ProductBarcode, ProductPrice, Retailer
+from cestaplan_api.models import (
+    Ingredient,
+    IngredientProductMapping,
+    Product,
+    ProductBarcode,
+    ProductPrice,
+    Retailer,
+)
 from cestaplan_api.services import importer
 
 _HEADER = (
@@ -246,6 +253,128 @@ def test_cannot_commit_twice(db_session: Session) -> None:
         assert "committed" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("committing an already-committed import should raise")
+
+
+# --------------------------------------------------------------------------- #
+# Explicit canonical_name -> IngredientProductMapping
+# --------------------------------------------------------------------------- #
+_CANON_HEADER = _HEADER + ",canonical_name"
+
+
+def _canon_row(*, canonical_name: str, observed_at: str = "2026-07-20T08:00:00Z") -> str:
+    return _row(observed_at=observed_at) + f",{canonical_name}"
+
+
+def _canon_csv(*rows: str) -> str:
+    return "\n".join([_CANON_HEADER, *rows]) + "\n"
+
+
+def _make_ingredient(db: Session, canonical_name: str) -> Ingredient:
+    ingredient = Ingredient(
+        canonical_name=canonical_name,
+        display_name=canonical_name.replace("_", " ").title(),
+        default_unit="g",
+    )
+    db.add(ingredient)
+    db.flush()
+    return ingredient
+
+
+def _mapping_count(db: Session, ingredient_id: int) -> int:
+    return db.execute(
+        select(func.count(IngredientProductMapping.id)).where(
+            IngredientProductMapping.ingredient_id == ingredient_id
+        )
+    ).scalar_one()
+
+
+def test_canonical_name_creates_ingredient_mapping(db_session: Session) -> None:
+    ingredient = _make_ingredient(db_session, "test_canon_pollo")
+    # Uppercase in the CSV: matching is case-insensitive.
+    di = importer.create_import(
+        db_session,
+        content=_canon_csv(_canon_row(canonical_name="TEST_CANON_POLLO")),
+        fmt="csv",
+        dry_run=False,
+    )
+    assert di.error_count == 0
+    assert di.summary is not None
+    assert not di.summary["warnings"]
+    importer.commit_import(db_session, di)
+    db_session.flush()
+
+    mapping = db_session.execute(
+        select(IngredientProductMapping).where(
+            IngredientProductMapping.ingredient_id == ingredient.id
+        )
+    ).scalar_one()
+    assert mapping.confidence_score == Decimal("1.0000")
+    assert mapping.retailer_id is not None
+    assert mapping.is_active is True
+    # The mapped product is the imported one.
+    product = db_session.get(Product, mapping.product_id)
+    assert product is not None and product.external_id == "ACME-CHK-500"
+    assert di.summary["commit"]["mapped"] == 1
+
+
+def test_unmatched_canonical_name_warns_but_imports_product(db_session: Session) -> None:
+    di = importer.create_import(
+        db_session,
+        content=_canon_csv(_canon_row(canonical_name="no_such_ingredient_zzz")),
+        fmt="csv",
+        dry_run=False,
+    )
+    # Not a hard failure: the row is valid and the product still imports.
+    assert di.error_count == 0
+    assert di.created_count == 1
+    assert di.summary is not None
+    warnings = di.summary["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["field"] == "canonical_name"
+    assert "no_such_ingredient_zzz" in warnings[0]["message"]
+
+    importer.commit_import(db_session, di)
+    db_session.flush()
+    # Product imported, but no mapping was created for the unmatched name.
+    assert (
+        db_session.execute(
+            select(func.count(Product.id)).where(Product.external_id == "ACME-CHK-500")
+        ).scalar_one()
+        == 1
+    )
+    assert di.summary is not None
+    assert di.summary["commit"]["mapped"] == 0
+
+
+def test_canonical_name_mapping_is_idempotent(db_session: Session) -> None:
+    ingredient = _make_ingredient(db_session, "test_canon_arroz")
+    di1 = importer.create_import(
+        db_session,
+        content=_canon_csv(_canon_row(canonical_name="test_canon_arroz")),
+        fmt="csv",
+        dry_run=False,
+    )
+    importer.commit_import(db_session, di1)
+    db_session.flush()
+    assert _mapping_count(db_session, ingredient.id) == 1
+
+    # A later observation of the same product with the same canonical_name -> no duplicate.
+    di2 = importer.create_import(
+        db_session,
+        content=_canon_csv(
+            _canon_row(
+                canonical_name="test_canon_arroz",
+                observed_at="2026-07-27T08:00:00Z",
+            )
+        ),
+        fmt="csv",
+        dry_run=False,
+    )
+    importer.commit_import(db_session, di2)
+    db_session.flush()
+    assert _mapping_count(db_session, ingredient.id) == 1
+    assert di2.summary is not None
+    assert di2.summary["commit"]["mapped"] == 0
 
 
 def test_json_import_same_fields(db_session: Session) -> None:

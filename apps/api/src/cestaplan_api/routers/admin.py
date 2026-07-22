@@ -94,6 +94,7 @@ def _import_detail(di: DataImport) -> dict[str, Any]:
             "skipped": di.skipped_count,
         },
         "errors": summary.get("errors", []),
+        "warnings": summary.get("warnings", []),
         "would_change": summary.get("sample", []),
         "created_at": di.created_at,
         "committed_at": di.committed_at,

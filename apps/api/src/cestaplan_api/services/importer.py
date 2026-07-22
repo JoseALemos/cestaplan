@@ -30,6 +30,8 @@ from cestaplan_api.adapters.files import CsvRetailerAdapter, JsonRetailerAdapter
 from cestaplan_api.models import (
     DataImport,
     DataSource,
+    Ingredient,
+    IngredientProductMapping,
     Product,
     ProductBarcode,
     ProductPrice,
@@ -83,6 +85,9 @@ _CONFIDENCE_Q = Decimal("0.0001")
 _UNIT_PRICE_TOLERANCE_REL = Decimal("0.02")
 _UNIT_PRICE_TOLERANCE_ABS = Decimal("0.02")
 _SAMPLE_LIMIT = 25
+# Confidence of an EXPLICIT canonical_name→product link from an import (the operator
+# asserted this product is that ingredient, so it is fully trusted, unlike a heuristic match).
+_EXPLICIT_MAPPING_CONFIDENCE = Decimal("1.0000")
 
 
 # --------------------------------------------------------------------------- #
@@ -123,6 +128,8 @@ class PlanResult:
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    #: IngredientProductMappings created from an explicit ``canonical_name`` column on commit.
+    mapped: int = 0
     entries: list[PlanEntry] = field(default_factory=list)
 
 
@@ -267,6 +274,7 @@ def build_record(row: RawRow, index: int = 0) -> RowValidation:
         expires_at=expires_at,
         confidence_score=confidence,
         verification_status=verification,
+        canonical_name=row.get("canonical_name") or None,
     )
     return RowValidation(record=record)
 
@@ -452,6 +460,82 @@ def _ensure_barcode(db: Session, product: Product, record: NormalizedRecord) -> 
     )
 
 
+def _match_ingredient(db: Session, canonical_name: str) -> Ingredient | None:
+    """Find the canonical :class:`Ingredient` for ``canonical_name`` (case-insensitive).
+
+    Returns ``None`` when no ingredient has that canonical name, so an unmatched value is a
+    per-row warning (never a hard failure) and the product is still imported.
+    """
+    name = canonical_name.strip()
+    if not name:
+        return None
+    return db.execute(
+        select(Ingredient).where(
+            func.lower(Ingredient.canonical_name) == name.lower()
+        )
+    ).scalar_one_or_none()
+
+
+def _canonical_name_warnings(
+    db: Session, pending: list[tuple[int, str]]
+) -> list[RowError]:
+    """Per-row warnings for ``canonical_name`` values that match no canonical ingredient.
+
+    An unmatched ``canonical_name`` is never a hard failure: the product is still imported,
+    but no :class:`IngredientProductMapping` is created for it, so the operator is warned.
+    Matching is case-insensitive; the ingredient vocabulary is loaded once.
+    """
+    if not pending:
+        return []
+    known = {
+        name.lower()
+        for name in db.execute(select(Ingredient.canonical_name)).scalars().all()
+    }
+    warnings: list[RowError] = []
+    for row, canonical_name in pending:
+        if canonical_name.strip().lower() not in known:
+            warnings.append(
+                RowError(
+                    row=row,
+                    field="canonical_name",
+                    message=(
+                        f"canonical_name '{canonical_name}' no coincide con ningún "
+                        "ingrediente canónico; el producto se importa sin mapeo"
+                    ),
+                )
+            )
+    return warnings
+
+
+def _ensure_ingredient_mapping(
+    db: Session, product: Product, ingredient: Ingredient, retailer: Retailer
+) -> bool:
+    """Idempotently link ``product`` to ``ingredient`` with a high-confidence mapping.
+
+    Returns ``True`` when a new :class:`IngredientProductMapping` was created, ``False`` when
+    one already existed (skip). The mapping is the operator-asserted, fully-trusted link that
+    lets the planner cost recipes on this product's chain.
+    """
+    exists = db.execute(
+        select(IngredientProductMapping.id).where(
+            IngredientProductMapping.ingredient_id == ingredient.id,
+            IngredientProductMapping.product_id == product.id,
+        )
+    ).first()
+    if exists is not None:
+        return False
+    db.add(
+        IngredientProductMapping(
+            ingredient_id=ingredient.id,
+            product_id=product.id,
+            retailer_id=retailer.id,
+            confidence_score=_EXPLICIT_MAPPING_CONFIDENCE,
+            is_active=True,
+        )
+    )
+    return True
+
+
 def commit_records(
     db: Session, records: list[NormalizedRecord], *, import_id: int, now: datetime
 ) -> PlanResult:
@@ -466,6 +550,13 @@ def commit_records(
         store = _get_or_create_store(db, retailer, record)
         product, created = _get_or_create_product(db, retailer, record)
         _ensure_barcode(db, product, record)
+
+        if record.canonical_name:
+            ingredient = _match_ingredient(db, record.canonical_name)
+            if ingredient is not None and _ensure_ingredient_mapping(
+                db, product, ingredient, retailer
+            ):
+                result.mapped += 1
 
         duplicate = db.execute(
             select(ProductPrice.id).where(
@@ -574,6 +665,7 @@ def create_import(
     records: list[NormalizedRecord] = []
     seen_obs: set[tuple[str, str, str, str]] = set()
     error_rows = 0
+    pending_canonical: list[tuple[int, str]] = []
 
     for index, raw in enumerate(parsed.rows, start=1):
         validation = build_record(raw, index)
@@ -591,6 +683,10 @@ def create_import(
             continue
         seen_obs.add(key)
         records.append(record)
+        if record.canonical_name:
+            pending_canonical.append((index, record.canonical_name))
+
+    warnings = _canonical_name_warnings(db, pending_canonical)
 
     plan = plan_changes(db, records)
     row_count = len(parsed.rows)
@@ -622,6 +718,9 @@ def create_import(
             "duplicates_in_batch": duplicate_count,
         },
         "errors": [{"row": e.row, "field": e.field, "message": e.message} for e in errors],
+        "warnings": [
+            {"row": w.row, "field": w.field, "message": w.message} for w in warnings
+        ],
         "sample": [
             {
                 "row": e.row,
@@ -704,6 +803,7 @@ def commit_import(
         "created": plan.created,
         "updated": plan.updated,
         "skipped": plan.skipped,
+        "mapped": plan.mapped,
         "committed_at": now.isoformat(),
     }
     data_import.summary = new_summary
