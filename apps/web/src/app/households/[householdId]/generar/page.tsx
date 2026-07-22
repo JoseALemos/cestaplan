@@ -26,7 +26,7 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 const formSchema = z.object({
-  budget: budgetSchema.pick({ amount: true, currency: true }),
+  budget: budgetSchema.pick({ amount: true, currency: true, priority: true }),
   meals: z.array(mealRequirementFormSchema),
 });
 
@@ -83,7 +83,7 @@ export default function GenerarPlanPage() {
     resolver: zodResolver(formSchema),
     values: householdQuery.data
       ? {
-          budget: { amount: "", currency: householdQuery.data.currency },
+          budget: { amount: "", currency: householdQuery.data.currency, priority: "waste" },
           meals: MEAL_TYPE_ORDER.map((mealType) => ({
             meal_type: mealType,
             requested_count: 0,
@@ -123,6 +123,7 @@ export default function GenerarPlanPage() {
       end_date: addDaysIso(start, 6),
       budget_amount: values.budget.amount,
       currency: values.budget.currency,
+      priority: values.budget.priority,
       store_id: storeId || undefined,
       requirements,
     });
@@ -255,6 +256,16 @@ export default function GenerarPlanPage() {
                 {...register("budget.currency")}
               />
             </div>
+
+            <Select
+              label="¿Qué priorizamos?"
+              hint="Más variedad: aprovecha el presupuesto para maximizar variedad y aprovechamiento. Menor precio: busca el plan más barato posible."
+              options={[
+                { value: "waste", label: "Más variedad (aprovecha el presupuesto)" },
+                { value: "price", label: "Menor precio (lo más barato)" },
+              ]}
+              {...register("budget.priority")}
+            />
 
             {fields.map((field, index) => (
               <div key={field.id} className="flex flex-col gap-3 rounded-md border border-border p-4">

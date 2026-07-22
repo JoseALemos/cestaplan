@@ -44,6 +44,46 @@ def _recipe_allergens(db: Session, recipe_id: int) -> set[str]:
     return allergens
 
 
+def test_budget_priority_threads_to_engine(db_session: Session) -> None:
+    """priority="price" persists on the plan and reaches the engine's BudgetDTO."""
+    from cestaplan_api.services.planning_context import build_plan_input
+
+    _user, household, member = make_household(db_session, allergen=None)
+    meal_plan, run, _job = enqueue_plan(
+        db_session, household, member, budget="500", budget_priority="price"
+    )
+    assert meal_plan.budget_priority == "price"
+
+    plan_input = build_plan_input(db_session, meal_plan, seed=run.seed)
+    assert plan_input.budget.priority == "price"
+
+
+def test_price_priority_is_not_more_expensive_than_waste(db_session: Session) -> None:
+    """On the same input + seed, "price" minimizes cost vs the "waste" envelope."""
+    _user, household, member = make_household(db_session, allergen=None)
+
+    _waste_plan, waste_run, waste_job = enqueue_plan(
+        db_session, household, member, budget="500", budget_priority="waste"
+    )
+    _price_plan, price_run, price_job = enqueue_plan(
+        db_session, household, member, budget="500", budget_priority="price"
+    )
+    # Same seed so the only difference is the budget priority.
+    price_run.seed = waste_run.seed
+    db_session.flush()
+
+    process_job(waste_job, db_session)
+    process_job(price_job, db_session)
+
+    assert waste_run.status == "completed"
+    assert price_run.status == "completed"
+    assert waste_run.result_summary is not None
+    assert price_run.result_summary is not None
+    waste_total = Decimal(waste_run.result_summary["cost_total"]["total"])
+    price_total = Decimal(price_run.result_summary["cost_total"]["total"])
+    assert price_total <= waste_total
+
+
 def test_process_job_produces_valid_plan(db_session: Session) -> None:
     _user, household, member = make_household(db_session, allergen="gluten")
     meal_plan, run, job = enqueue_plan(db_session, household, member, budget="500")

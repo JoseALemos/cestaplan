@@ -29,6 +29,7 @@ export default function PresupuestoPage() {
       currency: state.household?.currency ?? "EUR",
       mode: "strict",
       marginPercent: 10,
+      priority: "waste",
     },
   });
 
@@ -66,6 +67,15 @@ export default function PresupuestoPage() {
             />
           </div>
           <Select
+            label="¿Qué priorizamos?"
+            hint="Más variedad: aprovecha el presupuesto para maximizar variedad y aprovechamiento. Menor precio: busca el plan más barato posible."
+            options={[
+              { value: "waste", label: "Más variedad (aprovecha el presupuesto)" },
+              { value: "price", label: "Menor precio (lo más barato)" },
+            ]}
+            {...register("priority")}
+          />
+          <Select
             label="Modo"
             hint="Estricto: nunca supera el presupuesto. Flexible: permite un margen si hace falta para cubrir el resto de restricciones."
             options={[
@@ -84,7 +94,7 @@ export default function PresupuestoPage() {
             {...register("marginPercent")}
           />
           <Alert tone="info">
-            El presupuesto y la moneda son lo único que hoy envía la API al generar el plan; el
+            El presupuesto, la moneda y la prioridad se envían a la API al generar el plan; el
             modo y el margen ayudan a fijar tus expectativas y se usan si el plan resulta
             inviable con el importe exacto.
           </Alert>

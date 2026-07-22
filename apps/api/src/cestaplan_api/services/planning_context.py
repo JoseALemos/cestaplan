@@ -82,6 +82,7 @@ def build_plan_input(
     budget = BudgetDTO(
         amount=meal_plan.budget_amount or Decimal("0"),
         currency=meal_plan.currency,
+        priority=meal_plan.budget_priority or "waste",  # type: ignore[arg-type]
     )
 
     equipment = _build_equipment(db, household_id)

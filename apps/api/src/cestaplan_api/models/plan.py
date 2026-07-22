@@ -87,6 +87,11 @@ class MealPlan(BaseModel):
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     budget_amount: Mapped[Decimal | None] = mapped_column(money())
+    # How the engine should use the budget: "waste" (default) treats it as an envelope
+    # and maximizes variety/preference fit; "price" minimizes cost (cheapest plan).
+    budget_priority: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="waste"
+    )
     currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="EUR")
     status: Mapped[str] = mapped_column(
         enum_col(*MEAL_PLAN_STATUS, name="meal_plan_status"),

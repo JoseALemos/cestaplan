@@ -57,6 +57,9 @@ class GenerateRequest(BaseModel):
     start_date: date
     end_date: date
     budget_amount: Decimal = Field(ge=0, le=1_000_000)
+    # How to use the budget: "waste" (default) maximizes variety within the budget;
+    # "price" minimizes cost (the cheapest plan). Preserves current behavior by default.
+    priority: Literal["price", "waste"] = "waste"
     currency: str = Field(default="EUR", min_length=3, max_length=3)
     # The store whose catalogue/prices this plan is costed against. When omitted the
     # household's default store (or the first available demo store) is used, so

@@ -40,12 +40,15 @@ export interface OnboardingStore {
 }
 
 export type BudgetMode = "strict" | "flexible";
+export type BudgetPriority = "waste" | "price";
 
 export interface OnboardingBudget {
   amount: string;
   currency: string;
   mode: BudgetMode;
   marginPercent: number;
+  /** "waste" (default) maximizes variety within the budget; "price" minimizes cost. */
+  priority: BudgetPriority;
 }
 
 export interface OnboardingState {

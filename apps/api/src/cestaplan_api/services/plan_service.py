@@ -151,6 +151,7 @@ def create_generation(
     currency: str,
     requirements: list[dict[str, Any]],
     store: Store | None = None,
+    budget_priority: str = "waste",
 ) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
     """Create the plan, its requirements, a queued run and a queued job (async).
 
@@ -169,6 +170,7 @@ def create_generation(
         start_date=start_date,
         end_date=end_date,
         budget_amount=budget_amount,
+        budget_priority=budget_priority,
         currency=currency,
         status="generating",
     )
@@ -503,6 +505,7 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
         "budget": {
             "amount": _s(meal_plan.budget_amount),
             "currency": meal_plan.currency,
+            "priority": meal_plan.budget_priority,
         },
         "store": _store_summary(db, meal_plan),
         "run": None,

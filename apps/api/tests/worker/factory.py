@@ -89,6 +89,7 @@ def enqueue_plan(
     member: HouseholdMember,
     *,
     budget: str = "500",
+    budget_priority: str = "waste",
     requirements: tuple[tuple[str, int], ...] = _DEFAULT_REQUIREMENTS,
 ) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
     """Create a plan + requirements + queued run/job (2 bf / 4 lunch / 1 snack / 3 dinner)."""
@@ -107,4 +108,5 @@ def enqueue_plan(
         budget_amount=Decimal(budget),
         currency="EUR",
         requirements=rows,
+        budget_priority=budget_priority,
     )

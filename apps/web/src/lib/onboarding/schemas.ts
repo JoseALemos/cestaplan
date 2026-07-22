@@ -40,6 +40,7 @@ export const budgetSchema = z.object({
   currency: z.string().length(3),
   mode: z.enum(["strict", "flexible"]),
   marginPercent: z.coerce.number().min(0).max(50),
+  priority: z.enum(["waste", "price"]),
 });
 export type BudgetFormValues = z.infer<typeof budgetSchema>;
 

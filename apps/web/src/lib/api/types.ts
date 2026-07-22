@@ -265,12 +265,21 @@ export interface MealRequirementIn {
   reheating_available?: boolean;
 }
 
+/**
+ * How the engine should use the budget:
+ * - "waste" (default): budget is an envelope — maximize variety and low waste within it.
+ * - "price": minimize cost — the cheapest plan that still meets every constraint.
+ */
+export type BudgetPriority = "waste" | "price";
+
 export interface GenerateRequest {
   household_id: Uuid;
   start_date: IsoDate;
   end_date: IsoDate;
   budget_amount: MoneyString;
   currency?: string;
+  /** Budget strategy. Omitted -> backend defaults to "waste" (current behavior). */
+  priority?: BudgetPriority;
   /** Store to cost the plan against. Omitted -> backend uses the household's default store. */
   store_id?: Uuid | null;
   requirements: MealRequirementIn[];

@@ -81,6 +81,7 @@ def generate_plan_endpoint(
         currency=payload.currency,
         requirements=[r.to_row() for r in payload.requirements],
         store=store,
+        budget_priority=payload.priority,
     )
     record_audit(
         db, action="plan.generate", actor_user_id=user.id,
