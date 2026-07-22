@@ -2,21 +2,27 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useParams, useRouter } from "next/navigation";
+import { useMemo, useState } from "react";
 import { useFieldArray, useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { ApiError } from "@/lib/api/client";
 import { MEAL_TYPE_LABELS, MEAL_TYPE_ORDER } from "@/lib/domain/labels";
+import { formatCoveragePercent } from "@/lib/domain/labels";
 import { useHouseholdQuery, useMembersQuery } from "@/lib/query/hooks/use-households";
+import { useRetailersQuery, useStoresQuery } from "@/lib/query/hooks/use-catalog";
 import { useGeneratePlanMutation } from "@/lib/query/hooks/use-plans";
 import { budgetSchema, mealRequirementFormSchema } from "@/lib/onboarding/schemas";
-import { addDaysIso, todayIso } from "@/lib/utils/format";
+import { addDaysIso, formatDate, todayIso } from "@/lib/utils/format";
 import type { MealRequirementIn } from "@/lib/api/types";
 
 import { Alert } from "@/components/ui/Alert";
+import type { BadgeTone } from "@/components/ui/Badge";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 const formSchema = z.object({
@@ -32,6 +38,36 @@ export default function GenerarPlanPage() {
   const householdQuery = useHouseholdQuery(householdId);
   const membersQuery = useMembersQuery(householdId);
   const generateMutation = useGeneratePlanMutation();
+
+  // Store selection: chain -> store. Optional; omitted lets the backend use the
+  // household's default store. Re-generating here always lets the user change it.
+  const retailersQuery = useRetailersQuery();
+  const [retailerId, setRetailerId] = useState<string>("");
+  const storesQuery = useStoresQuery(retailerId || undefined);
+  const [storeId, setStoreId] = useState<string>("");
+  const selectedStore = useMemo(
+    () => storesQuery.data?.find((store) => store.id === storeId),
+    [storesQuery.data, storeId],
+  );
+  const retailerOptions = (retailersQuery.data ?? []).map((retailer) => ({
+    value: retailer.id,
+    label: retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name,
+  }));
+  const storeOptions = (storesQuery.data ?? []).map((store) => ({
+    value: store.id,
+    label: `${store.name} — ${store.locality} (${store.postal_code})`,
+  }));
+  const coverageRatio = selectedStore?.price_coverage
+    ? Number.parseFloat(selectedStore.price_coverage)
+    : null;
+  const coverageBadgeTone: BadgeTone =
+    coverageRatio === null
+      ? "neutral"
+      : coverageRatio >= 0.9
+        ? "success"
+        : coverageRatio >= 0.5
+          ? "warning"
+          : "error";
 
   const eatingMembers = Math.max(
     (membersQuery.data ?? []).filter((member) => member.is_eater).length,
@@ -87,6 +123,7 @@ export default function GenerarPlanPage() {
       end_date: addDaysIso(start, 6),
       budget_amount: values.budget.amount,
       currency: values.budget.currency,
+      store_id: storeId || undefined,
       requirements,
     });
 
@@ -130,6 +167,77 @@ export default function GenerarPlanPage() {
         <form onSubmit={onSubmit} noValidate>
           <CardContent className="flex flex-col gap-5">
             {errorMessage ? <Alert tone="error">{errorMessage}</Alert> : null}
+
+            <div className="flex flex-col gap-3 rounded-md border border-border p-4">
+              <p className="font-display text-display-sm text-ink">Tienda</p>
+              {retailersQuery.isLoading ? (
+                <Skeleton className="h-11 w-full" />
+              ) : retailersQuery.isError ? (
+                <Alert tone="warning">
+                  El catálogo de tiendas no está disponible ahora mismo. Se usará la tienda
+                  por defecto de tu hogar.
+                </Alert>
+              ) : retailerOptions.length === 0 ? (
+                <Alert tone="info">Todavía no hay cadenas dadas de alta.</Alert>
+              ) : (
+                <Select
+                  label="Cadena"
+                  placeholder="Tienda por defecto del hogar"
+                  options={retailerOptions}
+                  value={retailerId}
+                  onChange={(event) => {
+                    setRetailerId(event.target.value);
+                    setStoreId("");
+                  }}
+                />
+              )}
+
+              {retailerId ? (
+                storesQuery.isLoading ? (
+                  <Skeleton className="h-11 w-full" />
+                ) : storesQuery.isError ? (
+                  <Alert tone="warning">No se pudieron cargar las tiendas de esta cadena.</Alert>
+                ) : storeOptions.length === 0 ? (
+                  <Alert tone="info">Esta cadena todavía no tiene tiendas dadas de alta.</Alert>
+                ) : (
+                  <Select
+                    label="Tienda"
+                    placeholder="Selecciona una tienda"
+                    options={storeOptions}
+                    value={storeId}
+                    onChange={(event) => setStoreId(event.target.value)}
+                  />
+                )
+              ) : null}
+
+              {selectedStore ? (
+                <div className="flex flex-col gap-2 rounded-md border border-border px-4 py-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink-muted">Provincia / localidad</span>
+                    <span className="font-medium text-ink">
+                      {selectedStore.province} · {selectedStore.locality}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink-muted">Código postal</span>
+                    <span className="font-medium text-ink">{selectedStore.postal_code}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink-muted">Catálogo actualizado</span>
+                    <span className="font-medium text-ink">
+                      {formatDate(selectedStore.catalog_updated_at)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink-muted">Cobertura de precios</span>
+                    <Badge tone={coverageBadgeTone}>
+                      {formatCoveragePercent(selectedStore.price_coverage)}
+                    </Badge>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
               <Input
                 label="Presupuesto objetivo"

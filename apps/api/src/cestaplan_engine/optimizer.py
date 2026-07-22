@@ -9,6 +9,7 @@ infeasible (over-budget) outcome.
 from __future__ import annotations
 
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -98,8 +99,18 @@ class PlanOptimizer:
             if line.pantry_quantity > 0:
                 pantry_bonus += 1
 
-        distinct = len({r.recipe_id for r in recipes})
-        repetition = Decimal(len(recipes) - distinct)
+        # Variety (anti-repetition): penalize each *reuse* of a recipe
+        # SUPERLINEARLY. For a recipe used k times the penalty is the triangular
+        # number k*(k-1)/2 (the j-th reuse costs j), so the marginal cost of the
+        # 2nd use is 1, the 3rd is 2, the 4th is 3, ... This makes a 4x-repeated
+        # dish (penalty 6) far worse than spreading over 4 distinct recipes
+        # (penalty 0). Because a recipe carries fixed meal_types, reuse is
+        # inherently within meal type, so this also enforces intra-type variety.
+        # With the retuned w.repetition (see contracts.py) one reuse dominates the
+        # small waste/time/preference differences between similar recipes, so a
+        # rich candidate pool yields close to the maximum number of distinct dishes.
+        counts = Counter(r.recipe_id for r in recipes)
+        repetition = Decimal(sum(c * (c - 1) // 2 for c in counts.values()))
         time_minutes = Decimal(
             sum(r.preparation_minutes + r.cooking_minutes for r in recipes)
         ) / Decimal("60")
@@ -108,8 +119,7 @@ class PlanOptimizer:
         soft = Decimal(sum(self._soft.get(r.recipe_id, 0) for r in recipes))
 
         score = (
-            w.cost * cost_total
-            + w.waste * waste_value
+            w.waste * waste_value
             + w.repetition * repetition
             + w.time * time_minutes
             + w.soft * soft
@@ -117,20 +127,34 @@ class PlanOptimizer:
             - w.favorite * favorite_bonus
             + w.rejected * rejected
         )
-        if self._budget.strict and cost_total > self._budget_limit():
-            score += _BUDGET_PENALTY * (cost_total - self._budget_limit())
+        # Cost as an OBJECTIVE only when the household asked for the cheapest plan
+        # (budget.priority == "price"). Under the default "waste" priority the
+        # budget is an ENVELOPE, not something to minimize: within it we optimize
+        # for variety + preferences + low waste + low time, so plans no longer
+        # collapse onto the single cheapest dish repeated.
+        if self._budget.priority == "price":
+            score += w.cost * cost_total
+        # Budget CAP (both priorities): cost above the limit — amount when strict,
+        # amount*(1+max_margin_ratio) when flexible — is penalized so heavily that
+        # the search always steers under budget when any feasible plan exists, and
+        # only reports over-budget (-> InfeasibleResult) when none does.
+        limit = self._budget_limit()
+        if cost_total > limit:
+            score += _BUDGET_PENALTY * (cost_total - limit)
         return score
 
-    def _evaluate(
+    def _provision(
         self, slots: list[MealSlot], recipes: list[CandidateRecipeDTO]
-    ) -> tuple[Decimal, Provision]:
-        prov = self._prov.provision(self._build_meals(slots, recipes))
-        self._track_cheapest(recipes, prov)
-        return self._score(recipes, prov), prov
+    ) -> Provision:
+        return self._prov.provision(self._build_meals(slots, recipes))
 
     def _track_cheapest(
         self, recipes: list[CandidateRecipeDTO], prov: Provision
     ) -> None:
+        # Only whole plans are tracked (the caller passes full assignments): a
+        # partial plan is always cheaper than the full one, so tracking partials
+        # would make ``cheapest_cost`` a meaningless under-count that could report
+        # a sub-budget "min" for an over-budget plan.
         cost = prov.cost_total
         if self._cheapest_cost is None or cost < self._cheapest_cost:
             self._cheapest_cost = cost
@@ -138,6 +162,68 @@ class PlanOptimizer:
             self._cheapest_provision = prov
 
     # -- search ----------------------------------------------------------- #
+    def _greedy(
+        self,
+        slots: list[MealSlot],
+        feasible: dict[int, list[CandidateRecipeDTO]],
+        *,
+        cost_only: bool,
+    ) -> list[CandidateRecipeDTO]:
+        """Fill slots left-to-right. ``cost_only`` seeds a CHEAP plan (minimize
+        partial cost); otherwise seeds a VARIETY-optimal plan (minimize the full
+        score of the partial plan)."""
+        chosen: list[CandidateRecipeDTO] = []
+        for i, slot in enumerate(slots):
+            best_recipe: CandidateRecipeDTO | None = None
+            best_key: tuple[Decimal, str] | None = None
+            for recipe in self._ordered(feasible[slot.index]):
+                trial = [*chosen, recipe]
+                prov = self._provision(slots[: i + 1], trial)
+                metric = prov.cost_total if cost_only else self._score(trial, prov)
+                key = (metric, recipe.recipe_id)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_recipe = recipe
+            assert best_recipe is not None
+            chosen.append(best_recipe)
+        return chosen
+
+    def _local_search(
+        self,
+        slots: list[MealSlot],
+        feasible: dict[int, list[CandidateRecipeDTO]],
+        chosen: list[CandidateRecipeDTO],
+    ) -> tuple[list[CandidateRecipeDTO], Decimal, Provision]:
+        """Bounded single-slot-swap backtracking from ``chosen`` until no swap
+        improves the score. The score's huge over-budget penalty means that while
+        the plan is over budget the search drives cost down; once under budget it
+        improves variety/preferences without crossing back over the cap."""
+        prov = self._provision(slots, chosen)
+        self._track_cheapest(chosen, prov)
+        best_score = self._score(chosen, prov)
+        best_prov = prov
+        for _ in range(self._max_passes):
+            improved = False
+            for i, slot in enumerate(slots):
+                current = chosen[i]
+                for recipe in self._ordered(feasible[slot.index]):
+                    if recipe.recipe_id == current.recipe_id:
+                        continue
+                    trial = list(chosen)
+                    trial[i] = recipe
+                    tprov = self._provision(slots, trial)
+                    self._track_cheapest(trial, tprov)
+                    tscore = self._score(trial, tprov)
+                    if (tscore, recipe.recipe_id) < (best_score, current.recipe_id):
+                        chosen = trial
+                        best_score = tscore
+                        best_prov = tprov
+                        improved = True
+                        break
+            if not improved:
+                break
+        return chosen, best_score, best_prov
+
     def optimize(
         self,
         slots: list[MealSlot],
@@ -151,46 +237,30 @@ class PlanOptimizer:
         if missing:
             return OptimizerOutcome(feasible=False, missing_meal_types=sorted(set(missing)))
 
-        # Greedy: fill slots left-to-right choosing the recipe that minimizes the
-        # score of the partial plan (accounts for leftover reuse via provisioning).
-        chosen: list[CandidateRecipeDTO] = []
-        for i, slot in enumerate(slots):
-            options = self._ordered(feasible[slot.index])
-            best_recipe: CandidateRecipeDTO | None = None
-            best_score = None
-            for recipe in options:
-                trial = [*chosen, recipe]
-                score, _ = self._evaluate(slots[: i + 1], trial)
-                key = (score, recipe.recipe_id)
-                if best_score is None or key < best_score:
-                    best_score = key
-                    best_recipe = recipe
-            assert best_recipe is not None
-            chosen.append(best_recipe)
+        limit = self._budget_limit()
 
-        best_score, best_prov = self._evaluate(slots, chosen)
+        # Pass 1: variety-optimal search (unconstrained). For a comfortable budget
+        # this already lands within the cap and yields the richest plan.
+        chosen, best_score, best_prov = self._local_search(
+            slots, feasible, self._greedy(slots, feasible, cost_only=False)
+        )
 
-        # Bounded backtracking: try single-slot swaps until no improvement.
-        for _ in range(self._max_passes):
-            improved = False
-            for i, slot in enumerate(slots):
-                current = chosen[i]
-                for recipe in self._ordered(feasible[slot.index]):
-                    if recipe.recipe_id == current.recipe_id:
-                        continue
-                    trial = list(chosen)
-                    trial[i] = recipe
-                    score, prov = self._evaluate(slots, trial)
-                    if (score, recipe.recipe_id) < (best_score, current.recipe_id):
-                        chosen = trial
-                        best_score = score
-                        best_prov = prov
-                        improved = True
-                        break
-            if not improved:
-                break
+        over_budget = best_prov.cost_total > limit
+        if over_budget:
+            # The variety-optimal plan overshoots the budget. Because the budget is
+            # a HARD constraint, re-run the search SEEDED from the cheapest plan
+            # (cost-minimizing greedy). Its low starting cost lets backtracking keep
+            # every accepted plan within the cap while it recovers as much variety
+            # as fits. If this finds a within-budget plan we use it — a feasible
+            # plan is never reported infeasible. Only if even this stays over the
+            # cap is the request genuinely infeasible (cheapest_cost > limit then).
+            fit_chosen, fit_score, fit_prov = self._local_search(
+                slots, feasible, self._greedy(slots, feasible, cost_only=True)
+            )
+            if fit_prov.cost_total <= limit:
+                chosen, best_score, best_prov = fit_chosen, fit_score, fit_prov
+                over_budget = False
 
-        over_budget = best_prov.cost_total > self._budget_limit()
         return OptimizerOutcome(
             feasible=True,
             assignment=chosen,

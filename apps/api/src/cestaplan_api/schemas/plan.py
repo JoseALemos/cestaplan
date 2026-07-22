@@ -58,6 +58,10 @@ class GenerateRequest(BaseModel):
     end_date: date
     budget_amount: Decimal = Field(ge=0, le=1_000_000)
     currency: str = Field(default="EUR", min_length=3, max_length=3)
+    # The store whose catalogue/prices this plan is costed against. When omitted the
+    # household's default store (or the first available demo store) is used, so
+    # existing callers keep working. Prices are never mixed across stores.
+    store_id: uuid.UUID | None = None
     requirements: list[MealRequirementIn] = Field(min_length=1, max_length=_MAX_REQUIREMENTS)
 
     @model_validator(mode="after")

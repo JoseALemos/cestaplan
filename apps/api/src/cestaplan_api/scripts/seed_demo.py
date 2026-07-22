@@ -119,7 +119,27 @@ def _seed(session: Session, rng: random.Random, now: datetime) -> dict[str, int]
         is_synthetic=True,
     )
     session.add(store)
-    session.flush()  # assign store.id
+
+    # Second store of the same chain, priced ~15% cheaper on the identical catalogue so
+    # choosing store A vs B changes cost/coverage. Both price every product (satisfiable).
+    store2 = Store(
+        retailer_id=retailer.id,
+        external_code=seed_data.STORE2_EXTERNAL_CODE,
+        name=seed_data.STORE2_NAME,
+        province=seed_data.STORE2_PROVINCE,
+        locality=seed_data.STORE2_LOCALITY,
+        postal_code=seed_data.STORE2_POSTAL_CODE,
+        latitude=_d("40.541400"),
+        longitude=_d("-3.641800"),
+        catalog_updated_at=observed_at,
+        price_coverage_hint=_d("1.0"),
+        is_active=True,
+        is_synthetic=True,
+    )
+    session.add(store2)
+    session.flush()  # assign store.id / store2.id
+
+    store2_factor = _d(seed_data.STORE2_PRICE_FACTOR)
 
     counts = {
         "ingredient": 0,
@@ -172,31 +192,37 @@ def _seed(session: Session, rng: random.Random, now: datetime) -> dict[str, int]
             session.flush()  # assign product.id
             counts["product"] += 1
 
-            session.add(
-                ProductPrice(
-                    retailer_id=retailer.id,
-                    store_id=store.id,
-                    product_id=product.id,
-                    amount=amount,
-                    currency="EUR",
-                    package_quantity=qty,
-                    package_unit=spec["unit"],
-                    unit_price=unit_price,
-                    promotion=None,
-                    availability="in_stock",
-                    source_type="demo",
-                    source_name=seed_data.SOURCE_NAME,
-                    source_url=None,
-                    observed_at=observed_at,
-                    imported_at=now,
-                    expires_at=expires_at,
-                    confidence_score=_d("1.0"),
-                    import_id=None,
-                    verification_status="machine_verified",
-                    is_synthetic=True,
+            store2_amount = (amount * store2_factor).quantize(_d("0.01"))
+            store2_unit_price = (store2_amount / qty).quantize(_UNIT_PRICE_Q)
+            for price_store_id, price_amount, price_unit in (
+                (store.id, amount, unit_price),
+                (store2.id, store2_amount, store2_unit_price),
+            ):
+                session.add(
+                    ProductPrice(
+                        retailer_id=retailer.id,
+                        store_id=price_store_id,
+                        product_id=product.id,
+                        amount=price_amount,
+                        currency="EUR",
+                        package_quantity=qty,
+                        package_unit=spec["unit"],
+                        unit_price=price_unit,
+                        promotion=None,
+                        availability="in_stock",
+                        source_type="demo",
+                        source_name=seed_data.SOURCE_NAME,
+                        source_url=None,
+                        observed_at=observed_at,
+                        imported_at=now,
+                        expires_at=expires_at,
+                        confidence_score=_d("1.0"),
+                        import_id=None,
+                        verification_status="machine_verified",
+                        is_synthetic=True,
+                    )
                 )
-            )
-            counts["product_price"] += 1
+                counts["product_price"] += 1
 
             session.add(
                 ProductNutrition(
@@ -381,6 +407,11 @@ def main() -> None:
     print(
         f"  store    : {seed_data.STORE_NAME} — {seed_data.STORE_LOCALITY} "
         f"({seed_data.STORE_POSTAL_CODE}), cod. {seed_data.STORE_EXTERNAL_CODE}"
+    )
+    print(
+        f"  store    : {seed_data.STORE2_NAME} — {seed_data.STORE2_LOCALITY} "
+        f"({seed_data.STORE2_POSTAL_CODE}), cod. {seed_data.STORE2_EXTERNAL_CODE} "
+        f"[~{seed_data.STORE2_PRICE_FACTOR}x precio]"
     )
     print("  inserted this run:")
     for key in sorted(counts):

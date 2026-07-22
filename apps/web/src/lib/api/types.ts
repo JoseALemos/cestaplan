@@ -271,6 +271,8 @@ export interface GenerateRequest {
   end_date: IsoDate;
   budget_amount: MoneyString;
   currency?: string;
+  /** Store to cost the plan against. Omitted -> backend uses the household's default store. */
+  store_id?: Uuid | null;
   requirements: MealRequirementIn[];
 }
 

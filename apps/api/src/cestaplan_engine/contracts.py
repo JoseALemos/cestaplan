@@ -90,7 +90,11 @@ class BudgetDTO(_Base):
     max_margin_ratio: DecimalStr = Decimal("0")
     includes_pantry_staples: bool = False
     includes_condiments: bool = False
-    priority: Literal["price", "waste"] = "price"
+    # "waste" (default): budget is an ENVELOPE — within it the optimizer maximizes
+    # variety + preference fit + low waste, and does NOT drive cost to the minimum.
+    # "price": the household wants the cheapest plan, so cost re-enters the score as
+    # an active minimization term (see optimizer._score).
+    priority: Literal["price", "waste"] = "waste"
 
 
 class PackageOptionDTO(_Base):
@@ -186,10 +190,28 @@ class IngredientConversionDTO(_Base):
 
 
 class ScoringWeights(_Base):
-    """Configurable weights for the plan score. Lower score is better."""
+    """Configurable weights for the plan score. Lower score is better.
+
+    Roles after the FASE 3 variety/budget retune (see optimizer._score):
+    - ``waste``: euro-valued leftover penalty — avoid opening packs used little.
+    - ``repetition``: the VARIETY driver. Multiplies a superlinear per-recipe reuse
+      penalty (triangular in reuse count). Raised from 0.6 to 12 so that a single
+      reuse (+12) dominates the small waste/time/preference gaps between similar
+      recipes; a rich pool therefore yields near-maximum distinct dishes and no
+      dish repeats more than a couple of times.
+    - ``cost``: ONLY active when ``budget.priority == "price"`` (cheapest plan).
+      Under the default "waste" priority the budget is an envelope, not an
+      objective, so this term is not applied.
+    - ``time``: prefer faster recipes.
+    - ``nutrition_deviation``: reserved for nutritional-target fitting.
+    - ``soft``: unmet soft dietary preferences.
+    - ``pantry`` / ``favorite``: bonuses (subtracted) for using pantry items and
+      favorite recipes.
+    - ``rejected``: effectively a hard block (1e9) per rejected dish included.
+    """
 
     waste: DecimalStr = Decimal("1.0")
-    repetition: DecimalStr = Decimal("0.6")
+    repetition: DecimalStr = Decimal("12")
     cost: DecimalStr = Decimal("1.5")
     time: DecimalStr = Decimal("0.8")
     nutrition_deviation: DecimalStr = Decimal("1.2")

@@ -145,8 +145,19 @@ def requirement(
     )
 
 
-def budget(amount: str, *, strict: bool = True, margin: str = "0") -> BudgetDTO:
-    return BudgetDTO(amount=D(amount), strict=strict, max_margin_ratio=D(margin))
+def budget(
+    amount: str,
+    *,
+    strict: bool = True,
+    margin: str = "0",
+    priority: str = "waste",
+) -> BudgetDTO:
+    return BudgetDTO(
+        amount=D(amount),
+        strict=strict,
+        max_margin_ratio=D(margin),
+        priority=priority,  # type: ignore[arg-type]
+    )
 
 
 def plan_input(
@@ -157,6 +168,7 @@ def plan_input(
     candidates: list[CandidateRecipeDTO],
     budget_amount: str = "100",
     strict: bool = True,
+    priority: str = "waste",
     pantry: list[PantryItemDTO] | None = None,
     favorites: set[str] | None = None,
     conversions=None,
@@ -172,7 +184,7 @@ def plan_input(
     return PlanInput(
         members=members,
         meal_requirements=requirements,
-        budget=budget(budget_amount, strict=strict),
+        budget=budget(budget_amount, strict=strict, priority=priority),
         date_range=date_range,
         available_equipment=equipment or set(),
         catalog=catalog,

@@ -30,6 +30,16 @@ STORE_NAME: Final = "MercaEjemplo Centro"
 STORE_PROVINCE: Final = "Madrid"
 STORE_LOCALITY: Final = "Madrid"
 STORE_POSTAL_CODE: Final = "28013"
+# A SECOND fictional store of the same chain, priced ~15% cheaper on the identical
+# catalogue so choosing store A vs B yields a different total cost/coverage. This makes
+# switching stores in the wizard meaningful. Both stores price every product, so both
+# catalogues stay fully satisfiable for planning.
+STORE2_EXTERNAL_CODE: Final = "ME-002"
+STORE2_NAME: Final = "MercaEjemplo Norte"
+STORE2_PROVINCE: Final = "Madrid"
+STORE2_LOCALITY: Final = "Alcobendas"
+STORE2_POSTAL_CODE: Final = "28100"
+STORE2_PRICE_FACTOR: Final = "0.85"
 DATA_SOURCE_SLUG: Final = "demo-mercaejemplo"
 DATA_SOURCE_NAME: Final = "MercaEjemplo (supermercado demo ficticio)"
 SOURCE_NAME: Final = "MercaEjemplo demo"

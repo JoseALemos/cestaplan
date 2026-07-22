@@ -85,7 +85,7 @@ def build_plan_input(
     )
 
     equipment = _build_equipment(db, household_id)
-    catalog = _build_catalog(db)
+    catalog = _build_catalog(db, meal_plan.store_id)
 
     provider = get_candidate_provider(settings)
     bundle = provider.get_candidates(
@@ -223,10 +223,19 @@ def _build_requirements(meal_plan: MealPlan) -> list[MealRequirementDTO]:
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
-def _latest_prices(db: Session) -> dict[int, ProductPrice]:
-    """Most recent :class:`ProductPrice` per product (append-only history)."""
+def _latest_prices(db: Session, store_id: int | None) -> dict[int, ProductPrice]:
+    """Most recent :class:`ProductPrice` per product for a single store.
+
+    History is append-only per store, so we take the newest observation. Prices are
+    scoped to ``store_id`` and never mixed across stores: a product with no price in the
+    chosen store is simply absent (the catalog/coverage then reflect it as without_price).
+    When ``store_id`` is ``None`` (no store resolved) the unscoped latest price is used.
+    """
+    stmt = select(ProductPrice)
+    if store_id is not None:
+        stmt = stmt.where(ProductPrice.store_id == store_id)
     rows = db.execute(
-        select(ProductPrice).order_by(
+        stmt.order_by(
             ProductPrice.product_id,
             ProductPrice.observed_at.desc(),
             ProductPrice.id.desc(),
@@ -238,8 +247,8 @@ def _latest_prices(db: Session) -> dict[int, ProductPrice]:
     return latest
 
 
-def _build_catalog(db: Session) -> list[CatalogProductDTO]:
-    latest = _latest_prices(db)
+def _build_catalog(db: Session, store_id: int | None) -> list[CatalogProductDTO]:
+    latest = _latest_prices(db, store_id)
     rows = db.execute(
         select(IngredientProductMapping, Product)
         .join(Product, Product.id == IngredientProductMapping.product_id)

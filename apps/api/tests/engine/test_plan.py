@@ -238,11 +238,17 @@ def test_zero_max_prep_means_no_limit_dto():
     """maximum_preparation_minutes=0 must be coerced to None (no limit), never a 0-min cap."""
     from cestaplan_engine.contracts import MealRequirementDTO
 
-    req = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=0)
+    req = MealRequirementDTO(
+        meal_type="breakfast", requested_count=1, maximum_preparation_minutes=0
+    )
     assert req.maximum_preparation_minutes is None
-    neg = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=-5)
+    neg = MealRequirementDTO(
+        meal_type="breakfast", requested_count=1, maximum_preparation_minutes=-5
+    )
     assert neg.maximum_preparation_minutes is None
-    ok = MealRequirementDTO(meal_type="breakfast", requested_count=1, maximum_preparation_minutes=20)
+    ok = MealRequirementDTO(
+        meal_type="breakfast", requested_count=1, maximum_preparation_minutes=20
+    )
     assert ok.maximum_preparation_minutes == 20
 
 

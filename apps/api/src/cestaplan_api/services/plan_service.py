@@ -35,6 +35,7 @@ from cestaplan_api.models import (
     Product,
     ProductPrice,
     Recipe,
+    Store,
 )
 from cestaplan_engine import InfeasibleResult, PlanResult
 
@@ -104,6 +105,40 @@ def _require_member(
 
 
 # --------------------------------------------------------------------------- #
+# Store resolution (never mix prices across stores)
+# --------------------------------------------------------------------------- #
+def resolve_plan_store(
+    db: Session, household: Household, store_public_id: uuid.UUID | None
+) -> Store | None:
+    """Resolve the store a plan is priced against.
+
+    An explicit ``store_public_id`` must reference a real, active store (404 if it does
+    not exist, 422 if it is inactive). When omitted, fall back to the household's default
+    store, and failing that to the first active store so existing callers keep working.
+    Returns ``None`` only when no active store exists at all.
+    """
+    if store_public_id is not None:
+        store = db.execute(
+            select(Store).where(Store.public_id == store_public_id)
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+        if not store.is_active:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="La tienda seleccionada no está disponible",
+            )
+        return store
+    if household.default_store_id is not None:
+        store = db.get(Store, household.default_store_id)
+        if store is not None and store.is_active:
+            return store
+    return db.execute(
+        select(Store).where(Store.is_active.is_(True)).order_by(Store.id)
+    ).scalars().first()
+
+
+# --------------------------------------------------------------------------- #
 # Create + enqueue
 # --------------------------------------------------------------------------- #
 def create_generation(
@@ -115,12 +150,22 @@ def create_generation(
     budget_amount: Decimal,
     currency: str,
     requirements: list[dict[str, Any]],
+    store: Store | None = None,
 ) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
-    """Create the plan, its requirements, a queued run and a queued job (async)."""
+    """Create the plan, its requirements, a queued run and a queued job (async).
+
+    ``store`` is the resolved target store (see :func:`resolve_plan_store`); when not
+    provided the household's default/first active store is used so the plan is always
+    costed against a single store's catalogue.
+    """
+    if store is None:
+        store = resolve_plan_store(db, ctx.household, None)
     meal_plan = MealPlan(
         household_id=ctx.household.id,
-        retailer_id=ctx.household.default_retailer_id,
-        store_id=ctx.household.default_store_id,
+        retailer_id=(
+            store.retailer_id if store is not None else ctx.household.default_retailer_id
+        ),
+        store_id=store.id if store is not None else ctx.household.default_store_id,
         start_date=start_date,
         end_date=end_date,
         budget_amount=budget_amount,
@@ -294,7 +339,7 @@ def _persist_grocery_list(
     db.add(grocery)
     db.flush()
 
-    resolver = _LineResolver(db)
+    resolver = _LineResolver(db, meal_plan.store_id)
     for line in result.grocery_lines:
         product_id, price_id, unit_price = resolver.resolve(line)
         db.add(
@@ -339,12 +384,12 @@ class _LineResolver:
     stored item carries a concrete product and its price provenance.
     """
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, store_id: int | None) -> None:
         self._ingredient_id: dict[str, int] = {}
         # (canonical, unit, normalized_qty) -> (product_id, price_id, unit_price)
         self._by_package: dict[tuple[str, str, str], tuple[int, int | None, Decimal | None]] = {}
 
-        latest = _latest_price_by_product(db)
+        latest = _latest_price_by_product(db, store_id)
         rows = db.execute(
             select(Ingredient, Product)
             .join(IngredientProductMapping, IngredientProductMapping.ingredient_id == Ingredient.id)
@@ -377,9 +422,15 @@ class _LineResolver:
         return product_id, None, None
 
 
-def _latest_price_by_product(db: Session) -> dict[int, ProductPrice]:
+def _latest_price_by_product(
+    db: Session, store_id: int | None
+) -> dict[int, ProductPrice]:
+    """Most recent price per product, scoped to a single store (never mixed)."""
+    stmt = select(ProductPrice)
+    if store_id is not None:
+        stmt = stmt.where(ProductPrice.store_id == store_id)
     rows = db.execute(
-        select(ProductPrice).order_by(
+        stmt.order_by(
             ProductPrice.product_id,
             ProductPrice.observed_at.desc(),
             ProductPrice.id.desc(),
@@ -453,6 +504,7 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
             "amount": _s(meal_plan.budget_amount),
             "currency": meal_plan.currency,
         },
+        "store": _store_summary(db, meal_plan),
         "run": None,
         "planned_meals": [],
         "totals": None,
@@ -510,6 +562,24 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     base["explanations"] = summary.get("explanations", [])
     base["grocery_summary"] = _grocery_summary(db, meal_plan)
     return base
+
+
+def _store_summary(db: Session, meal_plan: MealPlan) -> dict[str, Any] | None:
+    """The store this plan is priced against (surfaced so the UI can show/change it)."""
+    if meal_plan.store_id is None:
+        return None
+    store = db.get(Store, meal_plan.store_id)
+    if store is None:
+        return None
+    return {
+        "id": str(store.public_id),
+        "name": store.name,
+        "province": store.province,
+        "locality": store.locality,
+        "postal_code": store.postal_code,
+        "catalog_updated_at": store.catalog_updated_at,
+        "price_coverage": _s(store.price_coverage_hint),
+    }
 
 
 def _recipe_public_ids(db: Session, recipe_ids: list[int]) -> dict[int, str]:

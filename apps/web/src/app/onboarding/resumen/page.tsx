@@ -106,6 +106,7 @@ export default function ResumenPage() {
         end_date: addDaysIso(start, 6),
         budget_amount: state.budget.amount,
         currency: state.budget.currency,
+        store_id: state.store?.storeId ?? undefined,
         requirements: state.mealRequirements,
       });
 
