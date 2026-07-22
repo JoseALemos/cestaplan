@@ -206,6 +206,50 @@ export interface Store {
   catalog_updated_at: IsoDateTime | null;
   /** Decimal ratio (0–1) as a string, e.g. `"1.0000"` — a coverage *ratio*, not the coarse status label used on plans/grocery lists. */
   price_coverage: string | null;
+  /** Count of distinct products with at least one real price at this store. */
+  priced_product_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// "Precios reales" viewer — real Open Prices (ODbL) observations for a store.
+// Read-only; never feeds the planner (which uses the synthetic demo catalogue
+// or a household's own imports). Money/quantities are `string`, as always.
+// ---------------------------------------------------------------------------
+
+export interface StorePriceItem {
+  product_id: Uuid;
+  product_name: string;
+  brand: string | null;
+  barcode: string | null;
+  amount: MoneyString;
+  currency: string;
+  unit_price: MoneyString | null;
+  package_quantity: string | null;
+  package_unit: string | null;
+  observed_at: IsoDate;
+  source_type: string;
+  source_name: string;
+  source_url: string | null;
+  is_synthetic: boolean;
+}
+
+export interface StorePricesStoreSummary {
+  id: Uuid;
+  name: string | null;
+  locality: string | null;
+  postal_code: string | null;
+  catalog_updated_at: IsoDateTime | null;
+}
+
+export interface StorePricesResponse {
+  store: StorePricesStoreSummary;
+  page: number;
+  size: number;
+  count: number;
+  items: StorePriceItem[];
+  /** ODbL attribution text for the Open Prices data source — must be shown wherever these prices are displayed. */
+  attribution: string | null;
+  license_code: string | null;
 }
 
 export interface RecipeIngredient {

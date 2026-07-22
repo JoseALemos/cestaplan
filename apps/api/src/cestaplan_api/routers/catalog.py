@@ -11,18 +11,21 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
+    Product,
+    ProductBarcode,
     ProductPrice,
     Recipe,
     Retailer,
     Store,
 )
+from cestaplan_api.services.open_prices_sync import ensure_open_prices_data_source
 
 router = APIRouter(prefix="/api/v1", tags=["catalog"])
 
@@ -102,6 +105,118 @@ def list_stores(
         }
         for s in stores
     ]
+
+
+@router.get("/retailers/{retailer_id}/stores/{store_id}/prices")
+def list_store_prices(
+    retailer_id: uuid.UUID,
+    store_id: uuid.UUID,
+    user: CurrentUser,
+    db: DbSession,
+    search: str | None = None,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Real Open Prices observations for one store — the "Precios reales" viewer.
+
+    For each product priced at this store, returns only the *latest* observation
+    (append-only history is never collapsed elsewhere). Restricted to real, community
+    data (``source_type='open_dataset'``, ``is_synthetic=False``) — this never reflects
+    the synthetic demo catalogue and never feeds the planner. IDOR-safe: the store must
+    belong to the given retailer, both addressed by public UUID. A store with zero real
+    prices (e.g. seeded but not yet synced) is a valid 200 with an empty ``items`` list —
+    it is simply hidden from the store picker (see :func:`list_stores`), not an error.
+    """
+    retailer = db.execute(
+        select(Retailer).where(Retailer.public_id == retailer_id)
+    ).scalar_one_or_none()
+    if retailer is None or not retailer.is_active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Distribuidor no encontrado")
+
+    store = db.execute(
+        select(Store).where(Store.public_id == store_id, Store.retailer_id == retailer.id)
+    ).scalar_one_or_none()
+    if store is None or not store.is_active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+
+    # One row per product: DISTINCT ON keeps only the latest observation (ties broken by
+    # the highest id, i.e. the most recently inserted row).
+    query = (
+        select(ProductPrice, Product)
+        .distinct(ProductPrice.product_id)
+        .join(Product, Product.id == ProductPrice.product_id)
+        .where(
+            ProductPrice.store_id == store.id,
+            ProductPrice.source_type == "open_dataset",
+            ProductPrice.is_synthetic.is_(False),
+        )
+    )
+    search = (search or "").strip()
+    if search:
+        query = query.where(Product.name.ilike(f"%{search}%"))
+    query = query.order_by(
+        ProductPrice.product_id, ProductPrice.observed_at.desc(), ProductPrice.id.desc()
+    )
+    rows = list(db.execute(query).all())
+
+    # Paginate in Python: per-store real-price counts are sparse (tens of rows), and the
+    # DISTINCT ON above already collapsed history, so this stays cheap.
+    rows.sort(key=lambda row: (row[1].name or "", row[1].id))
+    total = len(rows)
+    start = (page - 1) * size
+    page_rows = rows[start : start + size]
+
+    product_ids = [product.id for _, product in page_rows]
+    primary_barcode: dict[int, str] = {}
+    if product_ids:
+        for product_id, barcode in db.execute(
+            select(ProductBarcode.product_id, ProductBarcode.barcode)
+            .where(ProductBarcode.product_id.in_(product_ids))
+            .order_by(
+                ProductBarcode.product_id,
+                ProductBarcode.is_primary.desc(),
+                ProductBarcode.id,
+            )
+        ).all():
+            primary_barcode.setdefault(product_id, barcode)
+
+    data_source = ensure_open_prices_data_source(db)
+
+    items = [
+        {
+            "product_id": str(product.public_id),
+            "product_name": product.name,
+            "brand": product.brand,
+            "barcode": primary_barcode.get(product.id),
+            "amount": _s(price.amount),
+            "currency": price.currency,
+            "unit_price": _s(price.unit_price),
+            "package_quantity": _s(price.package_quantity),
+            "package_unit": price.package_unit,
+            "observed_at": price.observed_at.date().isoformat(),
+            "source_type": price.source_type,
+            "source_name": price.source_name,
+            "source_url": price.source_url,
+            "is_synthetic": price.is_synthetic,
+        }
+        for price, product in page_rows
+    ]
+
+    return {
+        "store": {
+            "id": str(store.public_id),
+            "name": store.name,
+            "locality": store.locality,
+            "postal_code": store.postal_code,
+            "catalog_updated_at": store.catalog_updated_at,
+        },
+        "page": page,
+        "size": size,
+        "count": total,
+        "items": items,
+        "attribution": data_source.attribution_text,
+        "license_code": data_source.license_code,
+    }
 
 
 # --------------------------------------------------------------------------- #

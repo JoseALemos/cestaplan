@@ -7,6 +7,8 @@ export const queryKeys = {
   equipment: (householdId: string) => ["households", householdId, "equipment"] as const,
   retailers: () => ["retailers"] as const,
   stores: (retailerId: string) => ["retailers", retailerId, "stores"] as const,
+  storePrices: (retailerId: string, storeId: string, page: number, search: string) =>
+    ["retailers", retailerId, "stores", storeId, "prices", { page, search }] as const,
   recipe: (recipeId: string) => ["recipes", recipeId] as const,
   runStatus: (runId: string) => ["plans", "runs", runId] as const,
   plan: (mealPlanId: string) => ["plans", mealPlanId] as const,

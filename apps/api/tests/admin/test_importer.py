@@ -136,9 +136,15 @@ def test_commit_writes_prices_and_tags_import_id(db_session: Session) -> None:
     ).scalars().all()
     assert len(prices) == 1
     assert prices[0].amount == Decimal("3.49")
-    # Barcode captured.
+    # Barcode captured for the imported product (scoped, not a global count, so the
+    # assertion holds regardless of other real/demo data committed in the dev DB).
     assert (
-        db_session.execute(select(func.count(ProductBarcode.id))).scalar_one() == 1
+        db_session.execute(
+            select(func.count(ProductBarcode.id)).where(
+                ProductBarcode.product_id == prices[0].product_id
+            )
+        ).scalar_one()
+        == 1
     )
 
 

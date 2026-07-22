@@ -33,6 +33,7 @@ import type {
   RegisterRequest,
   Retailer,
   Store,
+  StorePricesResponse,
   SubstituteRequest,
   UserResponse,
   Uuid,
@@ -138,6 +139,28 @@ export function listStores(retailerId: Uuid): Promise<Store[]> {
 
 export function getRecipe(recipeId: Uuid): Promise<Recipe> {
   return apiFetch<Recipe>(`/api/v1/recipes/${recipeId}`);
+}
+
+export interface ListStorePricesParams {
+  search?: string;
+  page?: number;
+  size?: number;
+}
+
+/** Real (ODbL, Open Prices) price observations for one store — the "Precios reales" viewer. */
+export function listStorePrices(
+  retailerId: Uuid,
+  storeId: Uuid,
+  params: ListStorePricesParams = {},
+): Promise<StorePricesResponse> {
+  const query = new URLSearchParams();
+  if (params.search) query.set("search", params.search);
+  if (params.page) query.set("page", String(params.page));
+  if (params.size) query.set("size", String(params.size));
+  const qs = query.toString();
+  return apiFetch<StorePricesResponse>(
+    `/api/v1/retailers/${retailerId}/stores/${storeId}/prices${qs ? `?${qs}` : ""}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
