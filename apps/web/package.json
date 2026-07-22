@@ -1,0 +1,37 @@
+{
+  "name": "@cestaplan/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CestaPlan — PWA mobile-first de planificación de comidas consciente del presupuesto y de la tienda.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.4.0",
+    "@tanstack/react-query": "5.101.4",
+    "next": "16.2.11",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-hook-form": "7.82.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@tailwindcss/postcss": "4.3.3",
+    "@tanstack/react-query-devtools": "5.101.4",
+    "@types/node": "^22.15.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.2.11",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

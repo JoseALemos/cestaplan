@@ -1,0 +1,11 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CestaPlan">
+  <rect x="0" y="0" width="512" height="512" rx="115" fill="#7A2E5C" />
+  <path d="M176 220 L336 220 L296 380 L216 380 Z" fill="#FAF9FC" />
+  <rect x="110" y="198" width="292" height="30" rx="15" fill="#FAF9FC" />
+  <path d="M176 220 Q 256 100 336 220" stroke="#FAF9FC" stroke-width="26" fill="none" stroke-linecap="round" />
+  <line x1="222" y1="248" x2="214" y2="356" stroke="#7A2E5C" stroke-width="11" stroke-linecap="round" />
+  <line x1="256" y1="248" x2="256" y2="360" stroke="#7A2E5C" stroke-width="11" stroke-linecap="round" />
+  <line x1="290" y1="248" x2="298" y2="356" stroke="#7A2E5C" stroke-width="11" stroke-linecap="round" />
+  <circle cx="374" cy="168" r="58" fill="#FF6B4A" />
+  <path d="M349 168 L367 186 L400 148" stroke="#FAF9FC" stroke-width="17" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
