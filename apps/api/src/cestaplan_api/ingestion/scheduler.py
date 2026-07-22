@@ -78,6 +78,10 @@ class SchedulerConfig:
 
     default: FrequencyConfig = field(default_factory=FrequencyConfig)
     per_retailer: dict[str, FrequencyConfig] = field(default_factory=dict)
+    # Advisory-lock key for the scheduler mutex. Defaults to the global key (one scheduler
+    # at a time in production). Tests may set a unique key so concurrent, pooled-connection
+    # test transactions never contend on the same lock.
+    advisory_lock_key: int = SCHEDULER_ADVISORY_LOCK_KEY
 
     def for_retailer(self, slug: str) -> FrequencyConfig:
         return self.per_retailer.get(slug, self.default)
@@ -282,7 +286,7 @@ class CrawlScheduler:
 
         acquired = db.execute(
             text("SELECT pg_try_advisory_xact_lock(:key)"),
-            {"key": SCHEDULER_ADVISORY_LOCK_KEY},
+            {"key": self.config.advisory_lock_key},
         ).scalar()
         return bool(acquired)
 

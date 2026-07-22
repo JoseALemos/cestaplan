@@ -21,14 +21,26 @@ from cestaplan_api.ingestion.scheduler import (
 )
 from cestaplan_api.models import ConnectorState, CrawlJob, CrawlRun, Retailer, Store
 
+# Each scheduler gets a UNIQUE advisory-lock key so pooled-connection test transactions
+# never contend on the shared scheduler mutex (flaky under parallel runs otherwise).
+_LOCK_KEY_SEQ = [0x43505F5343484431]
+
+
+def _next_key() -> int:
+    _LOCK_KEY_SEQ[0] += 1
+    return _LOCK_KEY_SEQ[0]
+
+
 # A daily-cadence config for every run type so "twice the same day" is a clean idempotency
 # check for all four run types.
-_DAILY = SchedulerConfig(
-    default=FrequencyConfig(
-        cadence_days=dict.fromkeys(RunType, 1),
-        default_cadence_days=1,
+def _daily() -> SchedulerConfig:
+    return SchedulerConfig(
+        default=FrequencyConfig(
+            cadence_days=dict.fromkeys(RunType, 1),
+            default_cadence_days=1,
+        ),
+        advisory_lock_key=_next_key(),
     )
-)
 
 
 def _make_retailer_store(db: Session, slug: str) -> tuple[Retailer, Store]:
@@ -57,7 +69,7 @@ def _run_count(db: Session, retailer_id: int) -> int:
 
 def test_schedule_daily_creates_runs_and_jobs(db_session: Session) -> None:
     retailer, _store = _make_retailer_store(db_session, "sched-basic")
-    scheduler = CrawlScheduler(_DAILY)
+    scheduler = CrawlScheduler(_daily())
 
     report = scheduler.schedule_daily(db_session)
     assert report.acquired_lock is True
@@ -69,7 +81,7 @@ def test_schedule_daily_creates_runs_and_jobs(db_session: Session) -> None:
 
 def test_schedule_daily_is_idempotent(db_session: Session) -> None:
     retailer, _store = _make_retailer_store(db_session, "sched-idem")
-    scheduler = CrawlScheduler(_DAILY)
+    scheduler = CrawlScheduler(_daily())
 
     scheduler.schedule_daily(db_session)
     jobs_after_first = _job_count(db_session, retailer.id)
@@ -86,7 +98,7 @@ def test_schedule_daily_is_idempotent(db_session: Session) -> None:
 
 def test_schedule_retailer_force_ignores_freshness(db_session: Session) -> None:
     retailer, _store = _make_retailer_store(db_session, "sched-force")
-    scheduler = CrawlScheduler(_DAILY)
+    scheduler = CrawlScheduler(_daily())
 
     scheduler.schedule_daily(db_session)
     first = _run_count(db_session, retailer.id)
@@ -98,7 +110,7 @@ def test_schedule_retailer_force_ignores_freshness(db_session: Session) -> None:
 
 def test_schedule_store_force(db_session: Session) -> None:
     retailer, store = _make_retailer_store(db_session, "sched-store")
-    scheduler = CrawlScheduler(_DAILY)
+    scheduler = CrawlScheduler(_daily())
 
     report = scheduler.schedule_store(db_session, store, force=True)
     assert report.runs_created == 4
@@ -124,7 +136,7 @@ def test_schedule_daily_skips_blocked_connector(db_session: Session) -> None:
     )
     db_session.flush()
 
-    report = CrawlScheduler(_DAILY).schedule_daily(db_session)
+    report = CrawlScheduler(_daily()).schedule_daily(db_session)
     assert report.skipped_retailers >= 1
     assert _run_count(db_session, retailer.id) == 0
 
@@ -166,7 +178,8 @@ def test_run_service_coverage_none_without_discovery(db_session: Session) -> Non
 def test_frequency_config_limits_run_types(db_session: Session) -> None:
     retailer, _store = _make_retailer_store(db_session, "sched-freq")
     config = SchedulerConfig(
-        default=FrequencyConfig(run_types=(RunType.PRICES,), default_cadence_days=1)
+        default=FrequencyConfig(run_types=(RunType.PRICES,), default_cadence_days=1),
+        advisory_lock_key=_next_key(),
     )
     CrawlScheduler(config).schedule_daily(db_session)
     assert _run_count(db_session, retailer.id) == 1

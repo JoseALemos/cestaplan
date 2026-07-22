@@ -13,9 +13,11 @@ from cestaplan_api.routers import (
     catalog,
     grocery,
     households,
+    ingestion_admin,
     invitations,
     pantry,
     plans,
+    prices,
     usage,
 )
 from cestaplan_api.routers import auth as auth_router
@@ -45,6 +47,8 @@ app.include_router(catalog.router)
 app.include_router(admin.router)
 app.include_router(usage.router)
 app.include_router(pantry.router)
+app.include_router(prices.router)
+app.include_router(ingestion_admin.router)
 
 
 @app.get("/health", tags=["system"])
