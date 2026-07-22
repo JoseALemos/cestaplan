@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from cestaplan_api.db import engine, get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
 from cestaplan_api.models import Recipe
-from cestaplan_api.routers import auth, households
+from cestaplan_api.routers import auth, catalog, households, pantry
 from cestaplan_api.scripts.seed_demo import main as seed_demo_main
 from cestaplan_api.security import login_rate_limiter
 
@@ -72,6 +72,8 @@ def client(db_session: Session) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(households.router)
+    app.include_router(pantry.router)
+    app.include_router(catalog.router)
 
     def _override_get_db() -> Iterator[Session]:
         try:

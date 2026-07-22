@@ -14,13 +14,16 @@ import type {
   CreateAdminImportInput,
   EquipmentResponse,
   EquipmentSet,
+  FavoriteRecipeListItem,
   FeedbackRequest,
+  FeedbackSentiment,
   GenerateRequest,
   GeneratePlanAccepted,
   GroceryItemIn,
   GroceryList,
   HouseholdCreate,
   HouseholdResponse,
+  IngredientSuggestion,
   LoginRequest,
   LoginResponse,
   MealPlanDetail,
@@ -28,8 +31,12 @@ import type {
   MemberResponse,
   MemberUpdate,
   OptimizationRunStatusResponse,
+  PantryItemCreate,
+  PantryItemResponse,
+  PantryItemUpdate,
   PasswordRecoveryRequest,
   Recipe,
+  RecipeFeedbackListItem,
   RegisterRequest,
   Retailer,
   Store,
@@ -123,6 +130,52 @@ export function putEquipment(
     method: "PUT",
     body,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Pantry (despensa) — household stock; reduces the next plan's shopping list.
+// ---------------------------------------------------------------------------
+
+export function listPantry(householdId: Uuid): Promise<PantryItemResponse[]> {
+  return apiFetch<PantryItemResponse[]>(`/api/v1/households/${householdId}/pantry`);
+}
+
+export function addPantryItem(
+  householdId: Uuid,
+  body: PantryItemCreate,
+): Promise<PantryItemResponse> {
+  return apiFetch<PantryItemResponse>(`/api/v1/households/${householdId}/pantry`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function updatePantryItem(
+  householdId: Uuid,
+  itemId: Uuid,
+  body: PantryItemUpdate,
+): Promise<PantryItemResponse> {
+  return apiFetch<PantryItemResponse>(
+    `/api/v1/households/${householdId}/pantry/${itemId}`,
+    { method: "PATCH", body },
+  );
+}
+
+export function deletePantryItem(householdId: Uuid, itemId: Uuid): Promise<void> {
+  return apiFetch<void>(`/api/v1/households/${householdId}/pantry/${itemId}`, {
+    method: "DELETE",
+  });
+}
+
+/** Canonical ingredients for the pantry autocomplete. Optional case-insensitive search. */
+export function listIngredients(
+  search?: string,
+  limit = 20,
+): Promise<IngredientSuggestion[]> {
+  const query = new URLSearchParams();
+  if (search) query.set("search", search);
+  query.set("limit", String(limit));
+  return apiFetch<IngredientSuggestion[]>(`/api/v1/ingredients?${query.toString()}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +274,30 @@ export function submitFeedback(
   return apiFetch(
     `/api/v1/plans/recipes/${recipeId}/feedback?household_id=${householdId}`,
     { method: "POST", body },
+  );
+}
+
+export function clearFeedback(recipeId: Uuid, householdId: Uuid): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/plans/recipes/${recipeId}/feedback?household_id=${householdId}`,
+    { method: "DELETE" },
+  );
+}
+
+export function listFavorites(householdId: Uuid): Promise<FavoriteRecipeListItem[]> {
+  return apiFetch<FavoriteRecipeListItem[]>(
+    `/api/v1/plans/recipes/favorites?household_id=${householdId}`,
+  );
+}
+
+export function listRecipeFeedback(
+  householdId: Uuid,
+  sentiment?: FeedbackSentiment,
+): Promise<RecipeFeedbackListItem[]> {
+  const query = new URLSearchParams({ household_id: householdId });
+  if (sentiment) query.set("sentiment", sentiment);
+  return apiFetch<RecipeFeedbackListItem[]>(
+    `/api/v1/plans/recipes/feedback?${query.toString()}`,
   );
 }
 

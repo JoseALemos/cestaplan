@@ -3,17 +3,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  clearFeedback,
   favoriteRecipe,
   generatePlan,
   getPlan,
   getRunStatus,
+  listFavorites,
+  listRecipeFeedback,
   regenerateMeal,
   regeneratePlan,
   submitFeedback,
   unfavoriteRecipe,
 } from "@/lib/api/endpoints";
 import { queryKeys } from "@/lib/query/keys";
-import type { FeedbackRequest, GenerateRequest, Uuid } from "@/lib/api/types";
+import type { FeedbackRequest, FeedbackSentiment, GenerateRequest, Uuid } from "@/lib/api/types";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
@@ -61,9 +64,13 @@ export function useRegenerateMealMutation(mealPlanId: string) {
 }
 
 export function useFavoriteRecipeMutation(householdId: string) {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ recipeId, favorite }: { recipeId: Uuid; favorite: boolean }) =>
       favorite ? favoriteRecipe(recipeId, householdId) : unfavoriteRecipe(recipeId, householdId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.favorites(householdId) });
+    },
   });
 }
 
@@ -76,6 +83,39 @@ export function useRecipeFeedbackMutation(householdId: string, mealPlanId?: stri
       if (mealPlanId) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.plan(mealPlanId) });
       }
+      void queryClient.invalidateQueries({ queryKey: queryKeys.feedback(householdId) });
+    },
+  });
+}
+
+/** The household's favorite recipes (♥), newest first. Backs the `/favoritos` page. */
+export function useFavoritesQuery(householdId: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.favorites(householdId ?? ""),
+    queryFn: () => listFavorites(householdId as string),
+    enabled: Boolean(householdId),
+  });
+}
+
+/** The household's recipe feedback, optionally filtered by sentiment. Backs `/favoritos`. */
+export function useFeedbackQuery(
+  householdId: string | null | undefined,
+  sentiment?: FeedbackSentiment,
+) {
+  return useQuery({
+    queryKey: queryKeys.feedback(householdId ?? "", sentiment),
+    queryFn: () => listRecipeFeedback(householdId as string, sentiment),
+    enabled: Boolean(householdId),
+  });
+}
+
+/** Clears a household member's feedback on a recipe (un-reject / un-no_show). */
+export function useClearFeedbackMutation(householdId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (recipeId: Uuid) => clearFeedback(recipeId, householdId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.feedback(householdId) });
     },
   });
 }

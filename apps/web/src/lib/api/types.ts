@@ -175,6 +175,44 @@ export interface EquipmentSet {
 }
 
 // ---------------------------------------------------------------------------
+// Pantry (despensa) — household stock that reduces the next plan's shopping list.
+// Units are the engine's known mass/volume/count units; quantity is a string.
+// ---------------------------------------------------------------------------
+
+export const PANTRY_UNITS = ["g", "kg", "mg", "ml", "l", "cl", "unit", "ud"] as const;
+
+export type PantryUnit = (typeof PANTRY_UNITS)[number];
+
+export interface PantryItemResponse {
+  id: Uuid;
+  canonical_name: string;
+  display: string;
+  quantity: string;
+  unit: string;
+  expires_at: IsoDate | null;
+}
+
+export interface PantryItemCreate {
+  name: string;
+  quantity: string;
+  unit: string;
+  expires_at?: IsoDate | null;
+}
+
+export interface PantryItemUpdate {
+  quantity?: string;
+  unit?: string;
+  expires_at?: IsoDate | null;
+}
+
+export interface IngredientSuggestion {
+  canonical_name: string;
+  display_name: string;
+  default_unit: string | null;
+  category_code: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Catalog — retailers / stores / recipes.
 // NOT present in the live openapi.json yet ("may be added concurrently" per
 // the brief). Typed against the documented shape so call sites are ready;
@@ -439,6 +477,26 @@ export type FeedbackSentiment = "like" | "reject" | "no_show";
 
 export interface FeedbackRequest {
   sentiment: FeedbackSentiment;
+}
+
+/** Row shape shared by the favorites/feedback list endpoints (brief recipe info). */
+interface RecipeListItemBase {
+  recipe_id: Uuid;
+  title: string;
+  meal_types: string[];
+  cuisine: string | null;
+  preparation_minutes: number | null;
+  cooking_minutes: number | null;
+  tags: string[];
+}
+
+export interface FavoriteRecipeListItem extends RecipeListItemBase {
+  favorited_at: IsoDateTime;
+}
+
+export interface RecipeFeedbackListItem extends RecipeListItemBase {
+  sentiment: FeedbackSentiment;
+  updated_at: IsoDateTime;
 }
 
 // ---------------------------------------------------------------------------

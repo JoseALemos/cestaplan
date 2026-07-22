@@ -20,7 +20,7 @@ from cestaplan_api.deps import (
     verify_csrf,
 )
 from cestaplan_api.models import FavoriteRecipe, PlannedMeal, Recipe, RecipeFeedback
-from cestaplan_api.schemas.plan import FeedbackRequest, GenerateRequest
+from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
 from cestaplan_api.services.audit import record_audit
 from cestaplan_api.services.plan_service import (
     build_regenerate_meal_payload,
@@ -48,6 +48,19 @@ def _resolve_recipe(db: DbSession, recipe_id: uuid.UUID) -> Recipe:
     if recipe is None or recipe.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Receta no encontrada")
     return recipe
+
+
+def _serialize_recipe_brief(recipe: Recipe) -> dict:
+    """Minimal recipe info for favorites/feedback list rows (not the full detail)."""
+    return {
+        "recipe_id": str(recipe.public_id),
+        "title": recipe.title,
+        "meal_types": list(recipe.meal_types or []),
+        "cuisine": recipe.cuisine,
+        "preparation_minutes": recipe.preparation_minutes,
+        "cooking_minutes": recipe.cooking_minutes,
+        "tags": list(recipe.preference_tags or []),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -257,3 +270,68 @@ def submit_feedback(
         existing.sentiment = payload.sentiment
     db.flush()
     return {"recipe_id": str(recipe.public_id), "sentiment": payload.sentiment}
+
+
+@router.delete(
+    "/recipes/{recipe_id}/feedback",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(verify_csrf)],
+)
+def clear_feedback(
+    recipe_id: uuid.UUID, ctx: HouseholdCtx, user: CurrentUser, db: DbSession
+) -> None:
+    """Clear a household member's feedback on a recipe. Needs ``?household_id=``."""
+    recipe = _resolve_recipe(db, recipe_id)
+    existing = db.execute(
+        select(RecipeFeedback).where(
+            RecipeFeedback.household_id == ctx.household.id,
+            RecipeFeedback.recipe_id == recipe.id,
+            RecipeFeedback.user_id == user.id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        db.delete(existing)
+        db.flush()
+
+
+@router.get("/recipes/favorites")
+def list_favorites(ctx: HouseholdCtx, user: CurrentUser, db: DbSession) -> list[dict]:
+    """List the household's favorite recipes, newest first. Needs ``?household_id=``."""
+    rows = db.execute(
+        select(FavoriteRecipe, Recipe)
+        .join(Recipe, Recipe.id == FavoriteRecipe.recipe_id)
+        .where(FavoriteRecipe.household_id == ctx.household.id)
+        .order_by(FavoriteRecipe.created_at.desc())
+    ).all()
+    return [
+        {**_serialize_recipe_brief(recipe), "favorited_at": favorite.created_at}
+        for favorite, recipe in rows
+    ]
+
+
+@router.get("/recipes/feedback")
+def list_feedback(
+    ctx: HouseholdCtx,
+    user: CurrentUser,
+    db: DbSession,
+    sentiment: FeedbackSentiment | None = None,
+) -> list[dict]:
+    """List the household's recipe feedback, newest first, optionally filtered by
+    ``sentiment`` (``like``/``reject``/``no_show``). Needs ``?household_id=``."""
+    query = (
+        select(RecipeFeedback, Recipe)
+        .join(Recipe, Recipe.id == RecipeFeedback.recipe_id)
+        .where(RecipeFeedback.household_id == ctx.household.id)
+    )
+    if sentiment is not None:
+        query = query.where(RecipeFeedback.sentiment == sentiment)
+    query = query.order_by(RecipeFeedback.updated_at.desc())
+    rows = db.execute(query).all()
+    return [
+        {
+            **_serialize_recipe_brief(recipe),
+            "sentiment": feedback.sentiment,
+            "updated_at": feedback.updated_at,
+        }
+        for feedback, recipe in rows
+    ]

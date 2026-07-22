@@ -67,6 +67,11 @@ function AuthActions({ onNavigate, layout }: { onNavigate?: () => void; layout: 
             Mis hogares
           </Button>
         </Link>
+        <Link href="/despensa" onClick={onNavigate}>
+          <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
+            Despensa
+          </Button>
+        </Link>
         <Link href="/precios" onClick={onNavigate}>
           <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
             Precios reales

@@ -220,6 +220,43 @@ def list_store_prices(
 
 
 # --------------------------------------------------------------------------- #
+# Ingredients (canonical list, for pantry autocomplete)
+# --------------------------------------------------------------------------- #
+@router.get("/ingredients")
+def list_ingredients(
+    user: CurrentUser,
+    db: DbSession,
+    search: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    """Canonical ingredients for the pantry autocomplete.
+
+    Optional case-insensitive ``search`` matches the canonical or display name. Returns the
+    same catalogue the planner and pantry resolution use, so any offered item can be stocked.
+    """
+    query = select(Ingredient)
+    search = (search or "").strip()
+    if search:
+        pattern = f"%{search}%"
+        query = query.where(
+            Ingredient.display_name.ilike(pattern)
+            | Ingredient.canonical_name.ilike(pattern)
+        )
+    rows = db.execute(
+        query.order_by(Ingredient.display_name).limit(limit)
+    ).scalars().all()
+    return [
+        {
+            "canonical_name": ing.canonical_name,
+            "display_name": ing.display_name,
+            "default_unit": ing.default_unit,
+            "category_code": ing.category_code,
+        }
+        for ing in rows
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Recipe detail
 # --------------------------------------------------------------------------- #
 @router.get("/recipes/{recipe_id}")
