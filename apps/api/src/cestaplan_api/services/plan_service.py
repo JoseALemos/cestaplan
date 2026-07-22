@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
@@ -35,6 +35,7 @@ from cestaplan_api.models import (
     Product,
     ProductPrice,
     Recipe,
+    Retailer,
     Store,
 )
 from cestaplan_engine import InfeasibleResult, PlanResult
@@ -105,12 +106,12 @@ def _require_member(
 
 
 # --------------------------------------------------------------------------- #
-# Store resolution (never mix prices across stores)
+# Chain (retailer) resolution (never mix prices across chains)
 # --------------------------------------------------------------------------- #
 def resolve_plan_store(
     db: Session, household: Household, store_public_id: uuid.UUID | None
 ) -> Store | None:
-    """Resolve the store a plan is priced against.
+    """Resolve a single store (used for backward compat and as a representative store).
 
     An explicit ``store_public_id`` must reference a real, active store (404 if it does
     not exist, 422 if it is inactive). When omitted, fall back to the household's default
@@ -138,6 +139,72 @@ def resolve_plan_store(
     ).scalars().first()
 
 
+def _representative_store(
+    db: Session, retailer: Retailer, household: Household
+) -> Store | None:
+    """Pick one active store of ``retailer`` for display / catalog-date only.
+
+    Prices are aggregated across the whole chain, so this store never scopes pricing; it
+    only gives the UI a concrete location/catalog date. Prefer the household's default store
+    when it belongs to the chosen chain, else the chain's first active store (or ``None``).
+    """
+    if household.default_store_id is not None:
+        store = db.get(Store, household.default_store_id)
+        if store is not None and store.is_active and store.retailer_id == retailer.id:
+            return store
+    return db.execute(
+        select(Store)
+        .where(Store.retailer_id == retailer.id, Store.is_active.is_(True))
+        .order_by(Store.id)
+    ).scalars().first()
+
+
+def resolve_plan_retailer(
+    db: Session,
+    household: Household,
+    retailer_public_id: uuid.UUID | None,
+    store_public_id: uuid.UUID | None = None,
+) -> tuple[Retailer | None, Store | None]:
+    """Resolve the chain a plan is priced against (+ a representative store for display).
+
+    Selection is by chain: the specific store is irrelevant to pricing (prices are taken
+    from all of the chain's stores). Resolution order:
+
+    * explicit ``retailer_public_id`` -> that chain (404 if missing, 422 if inactive);
+    * else explicit ``store_public_id`` (backward compat) -> derive its chain;
+    * else the household's default chain, falling back to the default/first active store's
+      chain so existing callers keep working.
+
+    Chains are never mixed: the returned retailer fully determines the prices used.
+    """
+    if retailer_public_id is not None:
+        retailer = db.execute(
+            select(Retailer).where(Retailer.public_id == retailer_public_id)
+        ).scalar_one_or_none()
+        if retailer is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Cadena no encontrada")
+        if not retailer.is_active:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="La cadena seleccionada no está disponible",
+            )
+        return retailer, _representative_store(db, retailer, household)
+
+    if store_public_id is not None:
+        store = resolve_plan_store(db, household, store_public_id)
+        retailer = db.get(Retailer, store.retailer_id) if store is not None else None
+        return retailer, store
+
+    if household.default_retailer_id is not None:
+        retailer = db.get(Retailer, household.default_retailer_id)
+        if retailer is not None and retailer.is_active:
+            return retailer, _representative_store(db, retailer, household)
+
+    store = resolve_plan_store(db, household, None)
+    retailer = db.get(Retailer, store.retailer_id) if store is not None else None
+    return retailer, store
+
+
 # --------------------------------------------------------------------------- #
 # Create + enqueue
 # --------------------------------------------------------------------------- #
@@ -150,22 +217,31 @@ def create_generation(
     budget_amount: Decimal,
     currency: str,
     requirements: list[dict[str, Any]],
+    retailer: Retailer | None = None,
     store: Store | None = None,
     budget_priority: str = "waste",
 ) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
     """Create the plan, its requirements, a queued run and a queued job (async).
 
-    ``store`` is the resolved target store (see :func:`resolve_plan_store`); when not
-    provided the household's default/first active store is used so the plan is always
-    costed against a single store's catalogue.
+    ``retailer`` is the resolved chain the plan is priced against (see
+    :func:`resolve_plan_retailer`) and fully determines the prices used. ``store`` is only a
+    representative store surfaced for display/catalog-date. When neither is provided the
+    chain is resolved from the household's defaults so existing callers keep working. The
+    plan's ``retailer_id`` is derived from ``retailer`` (or the ``store``'s chain for
+    backward-compatible callers that only pass a store).
     """
-    if store is None:
-        store = resolve_plan_store(db, ctx.household, None)
+    if retailer is None and store is None:
+        retailer, store = resolve_plan_retailer(db, ctx.household, None)
+    retailer_id = (
+        retailer.id
+        if retailer is not None
+        else store.retailer_id
+        if store is not None
+        else ctx.household.default_retailer_id
+    )
     meal_plan = MealPlan(
         household_id=ctx.household.id,
-        retailer_id=(
-            store.retailer_id if store is not None else ctx.household.default_retailer_id
-        ),
+        retailer_id=retailer_id,
         store_id=store.id if store is not None else ctx.household.default_store_id,
         start_date=start_date,
         end_date=end_date,
@@ -341,7 +417,7 @@ def _persist_grocery_list(
     db.add(grocery)
     db.flush()
 
-    resolver = _LineResolver(db, meal_plan.store_id)
+    resolver = _LineResolver(db, meal_plan.retailer_id)
     for line in result.grocery_lines:
         product_id, price_id, unit_price = resolver.resolve(line)
         db.add(
@@ -386,12 +462,12 @@ class _LineResolver:
     stored item carries a concrete product and its price provenance.
     """
 
-    def __init__(self, db: Session, store_id: int | None) -> None:
+    def __init__(self, db: Session, retailer_id: int | None) -> None:
         self._ingredient_id: dict[str, int] = {}
         # (canonical, unit, normalized_qty) -> (product_id, price_id, unit_price)
         self._by_package: dict[tuple[str, str, str], tuple[int, int | None, Decimal | None]] = {}
 
-        latest = _latest_price_by_product(db, store_id)
+        latest = _latest_price_by_product(db, retailer_id)
         rows = db.execute(
             select(Ingredient, Product)
             .join(IngredientProductMapping, IngredientProductMapping.ingredient_id == Ingredient.id)
@@ -425,12 +501,12 @@ class _LineResolver:
 
 
 def _latest_price_by_product(
-    db: Session, store_id: int | None
+    db: Session, retailer_id: int | None
 ) -> dict[int, ProductPrice]:
-    """Most recent price per product, scoped to a single store (never mixed)."""
+    """Most recent price per product across a whole chain (chains never mixed)."""
     stmt = select(ProductPrice)
-    if store_id is not None:
-        stmt = stmt.where(ProductPrice.store_id == store_id)
+    if retailer_id is not None:
+        stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
     rows = db.execute(
         stmt.order_by(
             ProductPrice.product_id,
@@ -570,20 +646,35 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
 
 
 def _store_summary(db: Session, meal_plan: MealPlan) -> dict[str, Any] | None:
-    """The store this plan is priced against (surfaced so the UI can show/change it)."""
-    if meal_plan.store_id is None:
+    """The chain this plan is priced against (prices aggregated across all its stores).
+
+    Selection is by chain (retailer), not by a single store: the plan's prices are the most
+    recent observation per product taken from every store of the chain. We surface the chain
+    name plus, for context, a representative store and the chain's most recent catalog date.
+    """
+    if meal_plan.retailer_id is None:
         return None
-    store = db.get(Store, meal_plan.store_id)
-    if store is None:
+    retailer = db.get(Retailer, meal_plan.retailer_id)
+    if retailer is None:
         return None
+    store = db.get(Store, meal_plan.store_id) if meal_plan.store_id is not None else None
+    catalog_updated_at = db.execute(
+        select(func.max(Store.catalog_updated_at)).where(
+            Store.retailer_id == retailer.id
+        )
+    ).scalar_one_or_none()
     return {
-        "id": str(store.public_id),
-        "name": store.name,
-        "province": store.province,
-        "locality": store.locality,
-        "postal_code": store.postal_code,
-        "catalog_updated_at": store.catalog_updated_at,
-        "price_coverage": _s(store.price_coverage_hint),
+        "retailer_id": str(retailer.public_id),
+        "retailer_name": retailer.name,
+        # Prices are aggregated across the whole chain, not a single store.
+        "prices_scope": "chain",
+        # Representative store (display only; does not scope pricing). May be None.
+        "id": str(store.public_id) if store is not None else None,
+        "name": store.name if store is not None else None,
+        "province": store.province if store is not None else None,
+        "locality": store.locality if store is not None else None,
+        "postal_code": store.postal_code if store is not None else None,
+        "catalog_updated_at": catalog_updated_at,
     }
 
 

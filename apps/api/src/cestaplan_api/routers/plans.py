@@ -27,7 +27,7 @@ from cestaplan_api.services.plan_service import (
     create_generation,
     enqueue_regeneration,
     resolve_plan,
-    resolve_plan_store,
+    resolve_plan_retailer,
     resolve_run,
     serialize_plan,
     serialize_run,
@@ -82,8 +82,12 @@ def generate_plan_endpoint(
     # Cloud-mode quota (server-side); no-op in self_hosted mode.
     check_generation_quota(db, household_id=ctx.household.id, user_id=user.id)
 
-    # Resolve the chosen store (404/422 if invalid); defaults to the household's store.
-    store = resolve_plan_store(db, ctx.household, payload.store_id)
+    # Resolve the chosen chain (404/422 if invalid). ``retailer_id`` wins; a bare
+    # ``store_id`` is accepted for backward compat and resolves the chain it belongs to.
+    # Defaults to the household's chain. Prices are aggregated across the whole chain.
+    retailer, store = resolve_plan_retailer(
+        db, ctx.household, payload.retailer_id, payload.store_id
+    )
 
     meal_plan, run, _job = create_generation(
         db,
@@ -93,6 +97,7 @@ def generate_plan_endpoint(
         budget_amount=payload.budget_amount,
         currency=payload.currency,
         requirements=[r.to_row() for r in payload.requirements],
+        retailer=retailer,
         store=store,
         budget_priority=payload.priority,
     )

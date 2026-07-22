@@ -107,7 +107,7 @@ export default function ResumenPage() {
         budget_amount: state.budget.amount,
         currency: state.budget.currency,
         priority: state.budget.priority,
-        store_id: state.store?.storeId ?? undefined,
+        retailer_id: state.store?.retailerId ?? undefined,
         requirements: state.mealRequirements,
       });
 
@@ -153,11 +153,11 @@ export default function ResumenPage() {
         </section>
 
         <section className="flex flex-col gap-1.5 rounded-md border border-border p-4">
-          <p className="text-sm font-semibold text-ink">Tienda</p>
+          <p className="text-sm font-semibold text-ink">Cadena</p>
           <p className="text-sm text-ink-muted">
-            {state.store?.storeLabel
-              ? `${state.store.storeLabel} · ${state.store.province ?? ""} ${state.store.postalCode ?? ""}`
-              : "Sin seleccionar (podrás elegirla más adelante)"}
+            {state.store?.retailerLabel
+              ? `${state.store.retailerLabel} · usaremos sus precios (de todas sus tiendas)`
+              : "Sin seleccionar (usaremos la cadena por defecto de tu hogar)"}
           </p>
         </section>
 

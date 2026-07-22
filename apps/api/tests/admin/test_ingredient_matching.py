@@ -207,7 +207,9 @@ def test_map_real_products_idempotent_and_priced_catalog(db_session: Session) ->
     assert second.mapped == 0
 
     # planning_context now yields a real-priced catalog line for the mapped ingredient.
-    catalog = _build_catalog(db_session, store.id)
+    # Catalog pricing is chain-scoped (per retailer, aggregating all its stores), so the
+    # catalog is built for the chain the priced store belongs to.
+    catalog = _build_catalog(db_session, retailer.id)
     oil_line = next((c for c in catalog if c.canonical_name == "aceite_oliva"), None)
     assert oil_line is not None
     assert oil_line.packages and oil_line.packages[0].has_price

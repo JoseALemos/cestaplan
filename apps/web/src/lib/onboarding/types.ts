@@ -31,12 +31,18 @@ export interface OnboardingHousehold {
   currency: string;
 }
 
+/**
+ * The supermarket CHAIN (retailer) a plan is priced against. Product decision: "la tienda
+ * da igual" — prices come from the whole chain, so we only capture the chain here. The
+ * legacy per-store fields remain optional for backward compatibility but are unused.
+ */
 export interface OnboardingStore {
   retailerId: string | null;
-  storeId: string | null;
-  storeLabel: string | null;
-  province: string | null;
-  postalCode: string | null;
+  retailerLabel: string | null;
+  storeId?: string | null;
+  storeLabel?: string | null;
+  province?: string | null;
+  postalCode?: string | null;
 }
 
 export type BudgetMode = "strict" | "flexible";

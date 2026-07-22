@@ -3,14 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
-import { formatDate } from "@/lib/utils/format";
-import { formatCoveragePercent } from "@/lib/domain/labels";
-import type { BadgeTone } from "@/components/ui/Badge";
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 import { useRetailersQuery, useStoresQuery } from "@/lib/query/hooks/use-catalog";
 
 import { Alert } from "@/components/ui/Alert";
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Select } from "@/components/ui/Select";
@@ -22,38 +18,25 @@ export default function TiendaPage() {
 
   const retailersQuery = useRetailersQuery();
   const [retailerId, setRetailerId] = useState<string>(state.store?.retailerId ?? "");
-  const storesQuery = useStoresQuery(retailerId || undefined);
-
-  const [storeId, setStoreId] = useState<string>(state.store?.storeId ?? "");
-  const selectedStore = useMemo(
-    () => storesQuery.data?.find((store) => store.id === storeId),
-    [storesQuery.data, storeId],
+  const selectedRetailer = useMemo(
+    () => retailersQuery.data?.find((retailer) => retailer.id === retailerId),
+    [retailersQuery.data, retailerId],
   );
+
+  // Read-only context: how many of the chain's stores we aggregate prices from. The specific
+  // store is irrelevant to pricing ("la tienda da igual"); this is purely informational.
+  const storesQuery = useStoresQuery(retailerId || undefined);
+  const storeCount = storesQuery.data?.length ?? null;
 
   const retailerOptions = (retailersQuery.data ?? []).map((retailer) => ({
     value: retailer.id,
     label: retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name,
   }));
-  const storeOptions = (storesQuery.data ?? []).map((store) => ({
-    value: store.id,
-    label: `${store.name} — ${store.locality} (${store.postal_code})`,
-  }));
-
-  const continueDisabled = false; // el vínculo hogar↔tienda todavía no existe en la API; nunca bloquea el alta.
-
-  const coverageRatio = selectedStore?.price_coverage
-    ? Number.parseFloat(selectedStore.price_coverage)
-    : null;
-  const coverageBadgeTone: BadgeTone =
-    coverageRatio === null ? "neutral" : coverageRatio >= 0.9 ? "success" : coverageRatio >= 0.5 ? "warning" : "error";
 
   const onContinue = () => {
     setStore({
       retailerId: retailerId || null,
-      storeId: storeId || null,
-      storeLabel: selectedStore?.name ?? null,
-      province: selectedStore?.province ?? null,
-      postalCode: selectedStore?.postal_code ?? null,
+      retailerLabel: selectedRetailer?.name ?? null,
     });
     router.push("/onboarding/miembros");
   };
@@ -61,18 +44,18 @@ export default function TiendaPage() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Selección de tienda</CardTitle>
+        <CardTitle>Selección de cadena</CardTitle>
         <CardDescription>
-          Cadena y tienda concreta. Verás la cobertura de precios antes de continuar.
+          Elige la cadena; usaremos sus precios (de todas sus tiendas).
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {retailersQuery.isLoading ? (
           <Skeleton className="h-11 w-full" />
         ) : retailersQuery.isError ? (
-          <Alert tone="warning" title="Catálogo de tiendas no disponible todavía">
+          <Alert tone="warning" title="Catálogo de cadenas no disponible todavía">
             Esta parte de la API aún no está publicada. Puedes continuar el alta sin elegir
-            tienda; te lo pediremos más adelante.
+            cadena; te lo pediremos más adelante.
           </Alert>
         ) : retailerOptions.length === 0 ? (
           <Alert tone="info">Todavía no hay cadenas dadas de alta.</Alert>
@@ -82,53 +65,25 @@ export default function TiendaPage() {
             placeholder="Selecciona una cadena"
             options={retailerOptions}
             value={retailerId}
-            onChange={(event) => {
-              setRetailerId(event.target.value);
-              setStoreId("");
-            }}
+            onChange={(event) => setRetailerId(event.target.value)}
           />
         )}
 
-        {retailerId ? (
-          storesQuery.isLoading ? (
-            <Skeleton className="h-11 w-full" />
-          ) : storesQuery.isError ? (
-            <Alert tone="warning">No se pudieron cargar las tiendas de esta cadena.</Alert>
-          ) : storeOptions.length === 0 ? (
-            <Alert tone="info">Esta cadena todavía no tiene tiendas dadas de alta.</Alert>
-          ) : (
-            <Select
-              label="Tienda"
-              placeholder="Selecciona una tienda"
-              options={storeOptions}
-              value={storeId}
-              onChange={(event) => setStoreId(event.target.value)}
-            />
-          )
-        ) : null}
-
-        {selectedStore ? (
+        {selectedRetailer ? (
           <div className="flex flex-col gap-2 rounded-md border border-border px-4 py-3 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-ink-muted">Provincia / localidad</span>
-              <span className="font-medium text-ink">
-                {selectedStore.province} · {selectedStore.locality}
-              </span>
+              <span className="text-ink-muted">Cadena seleccionada</span>
+              <span className="font-medium text-ink">{selectedRetailer.name}</span>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-ink-muted">Código postal</span>
-              <span className="font-medium text-ink">{selectedStore.postal_code}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-ink-muted">Catálogo actualizado</span>
-              <span className="font-medium text-ink">
-                {formatDate(selectedStore.catalog_updated_at)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-ink-muted">Cobertura de precios</span>
-              <Badge tone={coverageBadgeTone}>{formatCoveragePercent(selectedStore.price_coverage)}</Badge>
-            </div>
+            <p className="text-ink-muted">
+              {storesQuery.isLoading
+                ? "Cargando cobertura de la cadena…"
+                : storeCount && storeCount > 0
+                  ? `Tomaremos los precios más recientes de sus ${storeCount} ${
+                      storeCount === 1 ? "tienda" : "tiendas"
+                    } con datos. La tienda concreta da igual.`
+                  : "Usaremos los precios más recientes de la cadena. La tienda concreta da igual."}
+            </p>
           </div>
         ) : null}
       </CardContent>
@@ -136,7 +91,7 @@ export default function TiendaPage() {
         <Button type="button" variant="ghost" size="sm" onClick={() => router.push("/onboarding/hogar")}>
           Atrás
         </Button>
-        <Button type="button" size="sm" disabled={continueDisabled} onClick={onContinue}>
+        <Button type="button" size="sm" onClick={onContinue}>
           Continuar
         </Button>
       </div>

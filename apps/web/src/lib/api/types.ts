@@ -402,7 +402,16 @@ export interface GenerateRequest {
   currency?: string;
   /** Budget strategy. Omitted -> backend defaults to "waste" (current behavior). */
   priority?: BudgetPriority;
-  /** Store to cost the plan against. Omitted -> backend uses the household's default store. */
+  /**
+   * Chain (retailer) to cost the plan against. Prices are aggregated across ALL of the
+   * chain's stores — the specific store is irrelevant. Omitted -> backend uses the
+   * household's default chain. Never mixed across chains.
+   */
+  retailer_id?: Uuid | null;
+  /**
+   * Deprecated: a specific store. Still accepted for backward compatibility (it only
+   * resolves the chain it belongs to). Prefer `retailer_id`; when both are sent it wins.
+   */
   store_id?: Uuid | null;
   requirements: MealRequirementIn[];
 }

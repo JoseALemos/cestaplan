@@ -87,7 +87,7 @@ def build_plan_input(
     )
 
     equipment = _build_equipment(db, household_id)
-    catalog = _build_catalog(db, meal_plan.store_id)
+    catalog = _build_catalog(db, meal_plan.retailer_id)
 
     provider = get_candidate_provider(settings)
     bundle = provider.get_candidates(
@@ -277,17 +277,19 @@ def _build_requirements(meal_plan: MealPlan) -> list[MealRequirementDTO]:
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
-def _latest_prices(db: Session, store_id: int | None) -> dict[int, ProductPrice]:
-    """Most recent :class:`ProductPrice` per product for a single store.
+def _latest_prices(db: Session, retailer_id: int | None) -> dict[int, ProductPrice]:
+    """Most recent :class:`ProductPrice` per product across a whole retailer (chain).
 
-    History is append-only per store, so we take the newest observation. Prices are
-    scoped to ``store_id`` and never mixed across stores: a product with no price in the
-    chosen store is simply absent (the catalog/coverage then reflect it as without_price).
-    When ``store_id`` is ``None`` (no store resolved) the unscoped latest price is used.
+    History is append-only, so we take the newest observation per product aggregated over
+    ALL of the chain's stores (the specific store is irrelevant: the plan is priced against
+    the selected chain). Prices are scoped to ``retailer_id`` and never mixed across chains:
+    a product with no price anywhere in the chain is simply absent (the catalog/coverage then
+    reflect it as without_price). When ``retailer_id`` is ``None`` (no chain resolved) the
+    unscoped latest price is used.
     """
     stmt = select(ProductPrice)
-    if store_id is not None:
-        stmt = stmt.where(ProductPrice.store_id == store_id)
+    if retailer_id is not None:
+        stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
     rows = db.execute(
         stmt.order_by(
             ProductPrice.product_id,
@@ -301,8 +303,8 @@ def _latest_prices(db: Session, store_id: int | None) -> dict[int, ProductPrice]
     return latest
 
 
-def _build_catalog(db: Session, store_id: int | None) -> list[CatalogProductDTO]:
-    latest = _latest_prices(db, store_id)
+def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductDTO]:
+    latest = _latest_prices(db, retailer_id)
     rows = db.execute(
         select(IngredientProductMapping, Product)
         .join(Product, Product.id == IngredientProductMapping.product_id)

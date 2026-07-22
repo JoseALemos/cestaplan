@@ -61,9 +61,12 @@ class GenerateRequest(BaseModel):
     # "price" minimizes cost (the cheapest plan). Preserves current behavior by default.
     priority: Literal["price", "waste"] = "waste"
     currency: str = Field(default="EUR", min_length=3, max_length=3)
-    # The store whose catalogue/prices this plan is costed against. When omitted the
-    # household's default store (or the first available demo store) is used, so
-    # existing callers keep working. Prices are never mixed across stores.
+    # The chain (retailer) whose prices this plan is costed against. Prices are aggregated
+    # across ALL of the chain's stores (the specific store is irrelevant) and never mixed
+    # across chains. When omitted the household's default chain is used.
+    retailer_id: uuid.UUID | None = None
+    # Deprecated in favour of ``retailer_id`` but still accepted for backward compatibility:
+    # a store only resolves the chain it belongs to. When both are given ``retailer_id`` wins.
     store_id: uuid.UUID | None = None
     requirements: list[MealRequirementIn] = Field(min_length=1, max_length=_MAX_REQUIREMENTS)
 

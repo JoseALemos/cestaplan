@@ -1,9 +1,12 @@
-"""Store-selection tests: prices are scoped to one store, switching changes cost.
+"""Chain-selection tests: prices are scoped to one CHAIN, never mixed across chains.
 
-The demo seed creates two synthetic stores of the same chain on the identical catalogue,
-the second priced ~15% cheaper. These tests assert the plan is costed against exactly the
-chosen store (never mixing prices), that omitting the store falls back to a default, and
-that an invalid store is rejected.
+Product decision: "la tienda da igual" — a plan is priced against the selected supermarket
+CHAIN (retailer), aggregating the latest price observation per product across ALL of that
+chain's stores. The demo seed creates two synthetic stores of the same chain on the identical
+catalogue (the second priced ~15% cheaper); because pricing is now chain-scoped, the plan
+aggregates both and the representative store no longer changes the cost. These tests assert
+prices never cross chain boundaries, that switching the representative store keeps the cost
+stable, that omitting the chain falls back to a default, and that an invalid chain is rejected.
 """
 
 from __future__ import annotations
@@ -18,10 +21,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.deps import HouseholdContext
-from cestaplan_api.models import Store
+from cestaplan_api.models import Retailer, Store
 from cestaplan_api.schemas.plan import MealRequirementIn, MealType
 from cestaplan_api.services.plan_service import (
     create_generation,
+    resolve_plan_retailer,
     resolve_plan_store,
 )
 from cestaplan_api.services.planning_context import _latest_prices
@@ -45,6 +49,12 @@ def _demo_stores(db: Session) -> list[Store]:
     )
 
 
+def _demo_retailer(db: Session) -> Retailer:
+    return db.execute(
+        select(Retailer).where(Retailer.is_synthetic.is_(True)).order_by(Retailer.id)
+    ).scalars().first()
+
+
 def _rows(db: Session, household, member, *, store: Store | None):
     ctx = HouseholdContext(household=household, member=member)
     start = date.today()
@@ -66,39 +76,41 @@ def _rows(db: Session, household, member, *, store: Store | None):
 
 def test_two_stores_seeded_with_different_prices(db_session: Session) -> None:
     stores = _demo_stores(db_session)
-    assert len(stores) >= 2, "demo seed must provide a second store to switch to"
+    assert len(stores) >= 2, "demo seed must provide a second store of the same chain"
 
 
-def test_latest_prices_never_mixes_stores(db_session: Session) -> None:
+def test_latest_prices_never_mixes_chains(db_session: Session) -> None:
+    retailer = _demo_retailer(db_session)
     stores = _demo_stores(db_session)
-    store_a, store_b = stores[0], stores[1]
 
-    prices_a = _latest_prices(db_session, store_a.id)
-    prices_b = _latest_prices(db_session, store_b.id)
+    prices = _latest_prices(db_session, retailer.id)
 
-    # Every returned price belongs to the requested store only.
-    assert prices_a and prices_b
-    assert all(p.store_id == store_a.id for p in prices_a.values())
-    assert all(p.store_id == store_b.id for p in prices_b.values())
+    # Every returned price belongs to the selected chain only (no cross-chain mixing).
+    assert prices
+    assert all(p.retailer_id == retailer.id for p in prices.values())
 
-    # The same product resolves to a different (cheaper) price in the second store.
-    common = set(prices_a) & set(prices_b)
-    assert common
-    sample = next(iter(common))
-    assert prices_b[sample].amount < prices_a[sample].amount
+    # The chain aggregates across ALL its stores: the demo chain's two stores share every
+    # product, and the latest observation per product is taken (ties broken by newest row,
+    # i.e. the second, ~15% cheaper store inserted last). So each product resolves to a price
+    # sourced from one of the chain's stores.
+    store_ids = {s.id for s in stores}
+    assert all(p.store_id in store_ids for p in prices.values())
 
 
-def test_switching_store_changes_plan_cost(db_session: Session) -> None:
+def test_store_choice_does_not_change_chain_cost(db_session: Session) -> None:
     _user, household, member = make_household(db_session, allergen="gluten")
     stores = _demo_stores(db_session)
     store_a, store_b = stores[0], stores[1]
 
     plan_a, run_a, job_a = _rows(db_session, household, member, store=store_a)
     plan_b, run_b, job_b = _rows(db_session, household, member, store=store_b)
+    # Both representative stores belong to the same chain, so both plans price against it.
+    assert plan_a.retailer_id == plan_b.retailer_id == store_a.retailer_id
+    # The representative store is display-only and is still recorded for context.
     assert plan_a.store_id == store_a.id
     assert plan_b.store_id == store_b.id
 
-    # Same seed -> same recipe choices, so any cost delta is purely the store's prices.
+    # Same seed -> same recipe choices, isolating any cost delta to pricing.
     run_b.seed = run_a.seed
     db_session.flush()
 
@@ -111,23 +123,68 @@ def test_switching_store_changes_plan_cost(db_session: Session) -> None:
 
     total_a = Decimal(run_a.result_summary["cost_total"]["total"])
     total_b = Decimal(run_b.result_summary["cost_total"]["total"])
-    # The second store is ~15% cheaper on the identical catalogue.
-    assert total_b < total_a
+    # Pricing is chain-scoped: choosing store A vs B within the same chain yields the SAME
+    # total (both aggregate the identical chain-wide latest prices). This is the intended
+    # behaviour after moving from per-store to per-chain pricing.
+    assert total_a == total_b
+    # And the demo chain prices every product, so the plan is fully costed (real money).
+    assert total_a > 0
 
 
-def test_omitting_store_uses_default_store(db_session: Session) -> None:
+def test_omitting_chain_uses_default(db_session: Session) -> None:
     _user, household, member = make_household(db_session, allergen=None)
+    retailer = _demo_retailer(db_session)
     stores = _demo_stores(db_session)
 
-    # No explicit store and no household default -> first active store is used.
+    # No explicit chain/store and no household default -> first active store's chain is used,
+    # with that chain's first active store as the representative store.
     plan, _run, _job = _rows(db_session, household, member, store=None)
+    assert plan.retailer_id == retailer.id
     assert plan.store_id == stores[0].id
 
-    # An explicit household default is honoured over the first store.
-    household.default_store_id = stores[1].id
+    # An explicit household default chain is honoured.
+    household.default_retailer_id = retailer.id
     db_session.flush()
-    resolved = resolve_plan_store(db_session, household, None)
-    assert resolved is not None and resolved.id == stores[1].id
+    resolved_retailer, _store = resolve_plan_retailer(db_session, household, None, None)
+    assert resolved_retailer is not None and resolved_retailer.id == retailer.id
+
+
+def test_retailer_id_selects_the_chain(db_session: Session) -> None:
+    _user, household, _member = make_household(db_session, allergen=None)
+    retailer = _demo_retailer(db_session)
+    resolved_retailer, store = resolve_plan_retailer(
+        db_session, household, retailer.public_id, None
+    )
+    assert resolved_retailer is not None and resolved_retailer.id == retailer.id
+    # A representative store of the chain is offered for display (may be any of its stores).
+    assert store is not None and store.retailer_id == retailer.id
+
+
+def test_store_id_backward_compat_resolves_its_chain(db_session: Session) -> None:
+    _user, household, _member = make_household(db_session, allergen=None)
+    store_b = _demo_stores(db_session)[1]
+    resolved_retailer, store = resolve_plan_retailer(
+        db_session, household, None, store_b.public_id
+    )
+    assert resolved_retailer is not None and resolved_retailer.id == store_b.retailer_id
+    assert store is not None and store.id == store_b.id
+
+
+def test_invalid_retailer_id_is_rejected(db_session: Session) -> None:
+    _user, household, _member = make_household(db_session, allergen=None)
+    with pytest.raises(HTTPException) as excinfo:
+        resolve_plan_retailer(db_session, household, uuid.uuid4(), None)
+    assert excinfo.value.status_code == 404
+
+
+def test_inactive_retailer_is_rejected(db_session: Session) -> None:
+    _user, household, _member = make_household(db_session, allergen=None)
+    retailer = _demo_retailer(db_session)
+    retailer.is_active = False
+    db_session.flush()
+    with pytest.raises(HTTPException) as excinfo:
+        resolve_plan_retailer(db_session, household, retailer.public_id, None)
+    assert excinfo.value.status_code == 422
 
 
 def test_invalid_store_id_is_rejected(db_session: Session) -> None:
@@ -137,11 +194,11 @@ def test_invalid_store_id_is_rejected(db_session: Session) -> None:
     assert excinfo.value.status_code == 404
 
 
-def test_inactive_store_is_rejected(db_session: Session) -> None:
+def test_inactive_store_id_is_rejected(db_session: Session) -> None:
     _user, household, _member = make_household(db_session, allergen=None)
     store_b = _demo_stores(db_session)[1]
     store_b.is_active = False
     db_session.flush()
     with pytest.raises(HTTPException) as excinfo:
-        resolve_plan_store(db_session, household, store_b.public_id)
+        resolve_plan_retailer(db_session, household, None, store_b.public_id)
     assert excinfo.value.status_code == 422
