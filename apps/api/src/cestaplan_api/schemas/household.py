@@ -13,9 +13,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 Role = Literal["owner", "editor", "viewer"]
+InvitationRole = Literal["editor", "viewer"]
+InvitationStatus = Literal["pending", "accepted", "revoked", "expired"]
 AllergySeverity = Literal["intolerance", "allergy", "anaphylaxis"]
 PreferenceSubject = Literal["ingredient", "cuisine", "tag"]
 PreferenceSentiment = Literal["like", "dislike", "avoid"]
@@ -231,3 +233,66 @@ class EquipmentResponse(BaseModel):
     @classmethod
     def from_model(cls, equipment) -> EquipmentResponse:
         return cls(equipment_code=equipment.equipment_code, available=equipment.available)
+
+
+# --------------------------------------------------------------------------- #
+# Household invitations
+# --------------------------------------------------------------------------- #
+class InvitationCreate(BaseModel):
+    """Invite a real user (by email) to join the household with a non-owner role."""
+
+    email: EmailStr
+    role: InvitationRole = "viewer"
+
+
+class InvitationResponse(BaseModel):
+    """Safe view of a pending invitation. Never carries the raw or hashed token."""
+
+    id: uuid.UUID
+    email: str
+    role: str
+    status: str
+    created_at: datetime
+    expires_at: datetime
+
+    @classmethod
+    def from_model(cls, invitation) -> InvitationResponse:
+        return cls(
+            id=invitation.public_id,
+            email=invitation.email,
+            role=invitation.role,
+            status=invitation.status,
+            created_at=invitation.created_at,
+            expires_at=invitation.expires_at,
+        )
+
+
+class InvitationCreateResponse(BaseModel):
+    """Returned once on creation: carries the raw token so the owner can share the link.
+
+    The raw token is shown a single time and never persisted; only its hash is stored.
+    """
+
+    invitation: InvitationResponse
+    token: str
+    accept_path: str
+
+
+class AcceptInvitationResponse(BaseModel):
+    """Result of accepting an invitation: the household the caller just joined."""
+
+    household_id: uuid.UUID
+    household_name: str
+    role: str
+
+
+class InvitationPreviewResponse(BaseModel):
+    """Read-only view for the accept page: enough to render the invitation without
+    accepting it. Never leaks the token; ``email_matches`` tells the UI whether the
+    logged-in account is the invited one so it can warn before the accept POST."""
+
+    household_name: str
+    email: str
+    role: str
+    status: str
+    email_matches: bool

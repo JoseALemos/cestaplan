@@ -27,6 +27,7 @@ from cestaplan_api.models.household import (
     Equipment,
     FoodPreference,
     Household,
+    HouseholdInvitation,
     HouseholdMember,
 )
 from cestaplan_api.models.imports import DataImport, ProductBarcode
@@ -62,6 +63,7 @@ __all__ = [
     "GroceryListItem",
     # household
     "Household",
+    "HouseholdInvitation",
     "HouseholdMember",
     "Ingredient",
     "IngredientProductMapping",

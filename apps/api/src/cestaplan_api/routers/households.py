@@ -9,8 +9,9 @@ read-only.
 
 from __future__ import annotations
 
+import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, select
@@ -23,16 +24,27 @@ from cestaplan_api.deps import (
     HouseholdCtxOwner,
     verify_csrf,
 )
-from cestaplan_api.models import DietaryProfile, Equipment, Household, HouseholdMember
+from cestaplan_api.models import (
+    DietaryProfile,
+    Equipment,
+    Household,
+    HouseholdInvitation,
+    HouseholdMember,
+    User,
+)
 from cestaplan_api.schemas.household import (
     EquipmentResponse,
     EquipmentSet,
     HouseholdCreate,
     HouseholdResponse,
+    InvitationCreate,
+    InvitationCreateResponse,
+    InvitationResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
 )
+from cestaplan_api.security import hash_token
 from cestaplan_api.services.audit import record_audit
 from cestaplan_api.services.household import (
     apply_nutrition_goal,
@@ -41,6 +53,11 @@ from cestaplan_api.services.household import (
 )
 
 router = APIRouter(prefix="/api/v1/households", tags=["households"])
+
+# An invitation link is valid for this many days after it is created.
+_INVITATION_TTL_DAYS = 14
+# Random bytes behind an invitation token (~43 url-safe chars, same size as a session).
+_INVITATION_TOKEN_BYTES = 32
 
 
 def _member_count(db: DbSession, household_id: int) -> int:
@@ -308,3 +325,121 @@ def update_member(
                  household_id=ctx.household.id, entity_type="household_member",
                  entity_public_id=member.public_id)
     return MemberResponse.from_model(member, profile)
+
+
+# --------------------------------------------------------------------------- #
+# Invitations (owner invites/revokes; the invitee accepts — see routers/invitations.py)
+# --------------------------------------------------------------------------- #
+@router.post(
+    "/{household_id}/invitations",
+    response_model=InvitationCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(verify_csrf)],
+)
+def create_invitation(
+    payload: InvitationCreate,
+    ctx: HouseholdCtxOwner,
+    user: CurrentUser,
+    db: DbSession,
+) -> InvitationCreateResponse:
+    """Invite a user by email to join the household (owner only).
+
+    No email is sent (mirrors the password-recovery stub); the raw token is returned
+    once so the owner can share the accept link (``/invitaciones/{token}``) manually.
+    Only the token's hash is persisted. At most one pending invitation per email.
+    """
+    email = payload.email.strip().lower()
+
+    # If a user with this email already belongs to the household, there is nothing to do.
+    already_member = db.execute(
+        select(HouseholdMember.id)
+        .join(User, User.id == HouseholdMember.user_id)
+        .where(HouseholdMember.household_id == ctx.household.id, User.email == email)
+    ).first()
+    if already_member is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta persona ya es miembro del hogar",
+        )
+
+    # One pending invitation per (household, email) — backed by a partial unique index.
+    existing = db.execute(
+        select(HouseholdInvitation.id).where(
+            HouseholdInvitation.household_id == ctx.household.id,
+            HouseholdInvitation.email == email,
+            HouseholdInvitation.status == "pending",
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe una invitación pendiente para este email",
+        )
+
+    now = datetime.now(UTC)
+    raw_token = secrets.token_urlsafe(_INVITATION_TOKEN_BYTES)
+    invitation = HouseholdInvitation(
+        household_id=ctx.household.id,
+        email=email,
+        role=payload.role,
+        token_hash=hash_token(raw_token),
+        status="pending",
+        invited_by_user_id=user.id,
+        expires_at=now + timedelta(days=_INVITATION_TTL_DAYS),
+    )
+    db.add(invitation)
+    db.flush()
+
+    record_audit(db, action="household.invitation.create", actor_user_id=user.id,
+                 household_id=ctx.household.id, entity_type="household_invitation",
+                 entity_public_id=invitation.public_id, metadata={"role": payload.role})
+    return InvitationCreateResponse(
+        invitation=InvitationResponse.from_model(invitation),
+        token=raw_token,
+        accept_path=f"/invitaciones/{raw_token}",
+    )
+
+
+@router.get("/{household_id}/invitations", response_model=list[InvitationResponse])
+def list_invitations(ctx: HouseholdCtx, db: DbSession) -> list[InvitationResponse]:
+    """List the household's pending invitations (any member). The token is never leaked."""
+    rows = db.execute(
+        select(HouseholdInvitation)
+        .where(
+            HouseholdInvitation.household_id == ctx.household.id,
+            HouseholdInvitation.status == "pending",
+        )
+        .order_by(HouseholdInvitation.created_at)
+    ).scalars().all()
+    return [InvitationResponse.from_model(inv) for inv in rows]
+
+
+@router.delete(
+    "/{household_id}/invitations/{invitation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(verify_csrf)],
+)
+def revoke_invitation(
+    invitation_id: uuid.UUID,
+    ctx: HouseholdCtxOwner,
+    user: CurrentUser,
+    db: DbSession,
+) -> None:
+    """Revoke a pending invitation so its link can no longer be accepted (owner only)."""
+    invitation = db.execute(
+        select(HouseholdInvitation).where(
+            HouseholdInvitation.public_id == invitation_id,
+            HouseholdInvitation.household_id == ctx.household.id,
+            HouseholdInvitation.status == "pending",
+        )
+    ).scalar_one_or_none()
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Invitación no encontrada"
+        )
+
+    invitation.status = "revoked"
+    db.flush()
+    record_audit(db, action="household.invitation.revoke", actor_user_id=user.id,
+                 household_id=ctx.household.id, entity_type="household_invitation",
+                 entity_public_id=invitation.public_id)

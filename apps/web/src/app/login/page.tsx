@@ -30,7 +30,16 @@ export default function LoginPage() {
     try {
       await loginMutation.mutateAsync(values);
       await refetch();
-      router.push("/households");
+      // Honour a `?next=` return path (e.g. from an invitation link). Only accept
+      // same-site relative paths so it can't be abused as an open redirect.
+      const next =
+        typeof window !== "undefined"
+          ? new URLSearchParams(window.location.search).get("next")
+          : null;
+      const destination = next && next.startsWith("/") && !next.startsWith("//")
+        ? next
+        : "/households";
+      router.push(destination);
     } catch {
       // surfaced below via loginMutation.error
     }

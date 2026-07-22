@@ -17,14 +17,18 @@ from cestaplan_engine.contracts import (
     CostBreakdown,
     CostTotal,
     InfeasibleResult,
+    MacroStatus,
+    MacroSummaryDTO,
     MealType,
+    NutritionSummaryDTO,
+    NutritionTargetDTO,
     PlanInput,
     PlannedMealDTO,
     PlanResult,
 )
 from cestaplan_engine.explain import ConstraintExplainer, explain_meal
 from cestaplan_engine.matching import ProductMatcher
-from cestaplan_engine.nutrition import NutritionCalculator
+from cestaplan_engine.nutrition import _MACROS, NutritionCalculator
 from cestaplan_engine.optimizer import PlanOptimizer
 from cestaplan_engine.packaging import PackageOptimizer
 from cestaplan_engine.pantry import PantryCalculator
@@ -106,6 +110,9 @@ def generate_plan(plan_input: PlanInput) -> PlanResult | InfeasibleResult:
     for member in plan_input.members:
         rejected_ids |= member.rejected_recipe_ids
 
+    nutrition_calc = NutritionCalculator(matcher, converter)
+    num_days = len({slot.date for slot in slots})
+
     optimizer = PlanOptimizer(
         provisioner=provisioner,
         weights=plan_input.weights,
@@ -114,6 +121,9 @@ def generate_plan(plan_input: PlanInput) -> PlanResult | InfeasibleResult:
         rejected_recipe_ids=rejected_ids,
         soft_penalty=soft_penalty,
         seed=plan_input.seed,
+        nutrition_target=plan_input.nutrition_target,
+        nutrition_calc=nutrition_calc,
+        num_days=num_days,
     )
     outcome = optimizer.optimize(slots, feasible)
 
@@ -207,6 +217,8 @@ def _build_result(
     planned: list[PlannedMealDTO] = []
     cost_per_day: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     prev_total = Decimal("0")
+    nutrition_totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
+    nutrition_all_complete = True
 
     for i, meal in enumerate(meals):
         step_prov = provisioner.provision(meals[: i + 1])
@@ -215,6 +227,13 @@ def _build_result(
 
         imputable = prov.imputable_by_meal.get(meal.slot_index, Decimal("0"))
         nutrition, complete = nutrition_calc.for_meal(meal)
+        if not complete:
+            nutrition_all_complete = False
+        if nutrition is not None:
+            for macro in _MACROS:
+                value = getattr(nutrition, macro)
+                if value is not None:
+                    nutrition_totals[macro] += value
         explanation = explain_meal(meal, plan_input.favorites, plan_input.budget, imputable)
         explainer_meals.append(explanation)
 
@@ -249,6 +268,14 @@ def _build_result(
         total=prov.cost_total,
     )
 
+    num_days = len({slot.date for slot in slots}) or 1
+    nutrition_summary = _build_nutrition_summary(
+        plan_input.nutrition_target,
+        nutrition_totals,
+        nutrition_all_complete,
+        num_days,
+    )
+
     return PlanResult(
         planned_meals=planned,
         grocery_lines=prov.grocery_lines,
@@ -258,9 +285,59 @@ def _build_result(
         leftovers=prov.leftovers,
         pantry_used=prov.pantry_used,
         coverage=coverage,
+        nutrition_summary=nutrition_summary,
         warnings=all_warnings,
         explanations=explainer_meals,
         seed=plan_input.seed,
+    )
+
+
+# Coverage/met band: a macro within +-5% of its per-day target counts as "met".
+_NUTRITION_TOLERANCE = Decimal("0.05")
+
+
+def _build_nutrition_summary(
+    target: NutritionTargetDTO | None,
+    totals: dict[str, Decimal],
+    complete: bool,
+    num_days: int,
+) -> NutritionSummaryDTO | None:
+    """Per-day actual vs target for each macro. ``None`` when no target is set."""
+    if target is None:
+        return None
+    days = Decimal(num_days)
+    macros: dict[str, MacroSummaryDTO] = {}
+    for macro in _MACROS:
+        actual_per_day = totals[macro] / days
+        goal = getattr(target, macro)
+        if goal is None or goal <= 0:
+            macros[macro] = MacroSummaryDTO(
+                actual_per_day=actual_per_day, status="unknown"
+            )
+            continue
+        deviation = actual_per_day - goal
+        coverage_ratio = actual_per_day / goal
+        status: MacroStatus
+        if abs(coverage_ratio - Decimal("1")) <= _NUTRITION_TOLERANCE:
+            status = "met"
+        elif coverage_ratio < Decimal("1"):
+            status = "under"
+        else:
+            status = "over"
+        macros[macro] = MacroSummaryDTO(
+            actual_per_day=actual_per_day,
+            target_per_day=goal,
+            deviation=deviation,
+            coverage_ratio=coverage_ratio,
+            status=status,
+        )
+    return NutritionSummaryDTO(
+        days=num_days,
+        complete=complete,
+        kcal=macros["kcal"],
+        protein_g=macros["protein_g"],
+        carbs_g=macros["carbs_g"],
+        fat_g=macros["fat_g"],
     )
 
 

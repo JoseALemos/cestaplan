@@ -513,6 +513,7 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
         "totals": None,
         "budget_diff": None,
         "coverage": None,
+        "nutrition_summary": None,
         "warnings": [],
         "explanations": [],
         "grocery_summary": None,
@@ -561,6 +562,7 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     }
     base["budget_diff"] = summary.get("budget_diff")
     base["coverage"] = summary.get("coverage")
+    base["nutrition_summary"] = summary.get("nutrition_summary")
     base["warnings"] = summary.get("warnings", [])
     base["explanations"] = summary.get("explanations", [])
     base["grocery_summary"] = _grocery_summary(db, meal_plan)

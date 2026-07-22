@@ -76,6 +76,11 @@ export default function HouseholdsPage() {
                   <Badge tone={household.my_role === "owner" ? "primary" : "neutral"}>
                     {ROLE_LABELS[household.my_role] ?? household.my_role}
                   </Badge>
+                  <Link href={`/households/${household.id}/miembros`}>
+                    <Button size="sm" variant="outline">
+                      Miembros
+                    </Button>
+                  </Link>
                   <Button
                     size="sm"
                     onClick={() => {

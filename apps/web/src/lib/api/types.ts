@@ -144,6 +144,46 @@ export interface MemberResponse {
   profile: DietaryProfileResponse | null;
 }
 
+// Invitations — bring a real user into a household with a role, via a shareable link.
+export type InvitationRole = "editor" | "viewer";
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export interface InvitationCreate {
+  email: string;
+  role?: InvitationRole;
+}
+
+export interface InvitationResponse {
+  id: Uuid;
+  email: string;
+  role: string;
+  status: string;
+  created_at: IsoDateTime;
+  expires_at: IsoDateTime;
+}
+
+/** Returned once on creation — the only time the raw token is exposed. */
+export interface InvitationCreateResponse {
+  invitation: InvitationResponse;
+  token: string;
+  accept_path: string;
+}
+
+export interface AcceptInvitationResponse {
+  household_id: Uuid;
+  household_name: string;
+  role: string;
+}
+
+/** Read-only preview shown on the accept page (never carries the token). */
+export interface InvitationPreviewResponse {
+  household_name: string;
+  email: string;
+  role: string;
+  status: string;
+  email_matches: boolean;
+}
+
 export const EQUIPMENT_CODES = [
   "oven",
   "microwave",
@@ -457,6 +497,29 @@ export interface MealPlanBudget {
   currency: string;
 }
 
+export type MacroStatus = "met" | "under" | "over" | "unknown";
+
+/** One macro's plan actual (per day) vs its household target. Decimals arrive as strings. */
+export interface MacroSummary {
+  actual_per_day: string | null;
+  target_per_day: string | null;
+  /** actual_per_day - target_per_day (signed). */
+  deviation: string | null;
+  /** actual_per_day / target_per_day (1 = on target). */
+  coverage_ratio: string | null;
+  status: MacroStatus;
+}
+
+/** Plan actual per-day macros vs the household nutrition target. Present only when a goal is set. */
+export interface NutritionSummary {
+  days: number;
+  complete: boolean;
+  kcal: MacroSummary;
+  protein_g: MacroSummary;
+  carbs_g: MacroSummary;
+  fat_g: MacroSummary;
+}
+
 export interface MealPlanDetail {
   id: Uuid;
   status: string;
@@ -468,6 +531,8 @@ export interface MealPlanDetail {
   totals: MealPlanTotals;
   budget_diff: MoneyString | number;
   coverage: MealPlanCoverage;
+  /** Per-day macros vs the household nutrition target. Null when no member set a goal. */
+  nutrition_summary?: NutritionSummary | null;
   warnings: string[];
   explanations?: string[];
   grocery_summary?: Record<string, unknown>;

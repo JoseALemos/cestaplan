@@ -15,7 +15,9 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     Numeric,
+    String,
     Text,
     text,
 )
@@ -28,6 +30,9 @@ if TYPE_CHECKING:
     from cestaplan_api.models.catalog import Retailer, Store
 
 MEMBER_ROLE = ("owner", "editor", "viewer")
+# An invitation can only grant a non-owner role: ownership is not transferable by invite.
+INVITATION_ROLE = ("editor", "viewer")
+INVITATION_STATUS = ("pending", "accepted", "revoked", "expired")
 
 
 class Household(BaseModel):
@@ -190,3 +195,53 @@ class Equipment(BaseModel):
     )
 
     household: Mapped[Household] = relationship(back_populates="equipment")
+
+
+class HouseholdInvitation(BaseModel):
+    """Pending invitation for a real ``User`` to join a household with a role.
+
+    Mirrors the opaque-session pattern: only the SHA-256 hash of the raw token is
+    stored (``token_hash``); the raw token is returned to the inviting owner exactly
+    once so they can share the accept link manually (no email is sent, matching the
+    documented password-recovery stub). Acceptance requires the logged-in user's email
+    to match ``email``. A partial unique index enforces at most one pending invitation
+    per (household, email).
+    """
+
+    __tablename__ = "household_invitation"
+    __table_args__ = (
+        Index("ux_invitation_token_hash", "token_hash", unique=True),
+        Index(
+            "ux_invitation_pending",
+            "household_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_invitation_household", "household_id"),
+    )
+
+    household_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("household.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stored normalised to lowercase; the accepting user's email must match this.
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(
+        enum_col(*INVITATION_ROLE, name="invitation_role"), nullable=False
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    status: Mapped[str] = mapped_column(
+        enum_col(*INVITATION_STATUS, name="invitation_status"),
+        nullable=False,
+        server_default="pending",
+    )
+    invited_by_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("user.id"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("user.id")
+    )
+
+    household: Mapped[Household] = relationship(foreign_keys=[household_id])

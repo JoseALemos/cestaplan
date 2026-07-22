@@ -123,6 +123,28 @@ class NutritionDTO(_Base):
     fat_g: DecimalStr | None = None
 
 
+class NutritionTargetDTO(_Base):
+    """Household-level per-day nutrition target the optimizer fits toward.
+
+    Aggregated by the service layer from the members' ``DietaryProfile`` goals
+    (each scaled by ``relative_serving``). Any subset of macros may be set; a
+    ``None`` macro is simply not scored. A fully-empty target should be passed as
+    ``None`` on :class:`PlanInput` (no target -> the nutrition term stays 0 and the
+    plan is byte-identical to a run without this feature).
+    """
+
+    kcal: DecimalStr | None = None
+    protein_g: DecimalStr | None = None
+    carbs_g: DecimalStr | None = None
+    fat_g: DecimalStr | None = None
+
+    def is_empty(self) -> bool:
+        return all(
+            getattr(self, m) is None
+            for m in ("kcal", "protein_g", "carbs_g", "fat_g")
+        )
+
+
 class CatalogProductDTO(_Base):
     """A store product linked to a canonical ingredient, with its packages."""
 
@@ -235,6 +257,9 @@ class PlanInput(_Base):
     favorites: set[str] = Field(default_factory=set)
     conversions: list[IngredientConversionDTO] = Field(default_factory=list)
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
+    # Optional household-level per-day nutrition target. ``None`` (the default) means
+    # no target: the optimizer's nutrition term is 0 and the plan is unchanged.
+    nutrition_target: NutritionTargetDTO | None = None
     seed: int = 0
     as_of: date | None = None  # "now" for price-expiry checks; pure, never datetime.now()
 
@@ -335,6 +360,32 @@ class PantryUsedDTO(_Base):
     unit: str
 
 
+MacroStatus = Literal["met", "under", "over", "unknown"]
+
+
+class MacroSummaryDTO(_Base):
+    """One macro's plan actual (per day) vs its target, with a coverage read."""
+
+    actual_per_day: DecimalStr | None = None
+    target_per_day: DecimalStr | None = None
+    # actual_per_day - target_per_day (signed; positive = over target).
+    deviation: DecimalStr | None = None
+    # actual_per_day / target_per_day (1 = exactly on target).
+    coverage_ratio: DecimalStr | None = None
+    status: MacroStatus = "unknown"
+
+
+class NutritionSummaryDTO(_Base):
+    """Plan actual per-day macros vs the household target (present only with a target)."""
+
+    days: int
+    complete: bool  # True = every scheduled meal had usable nutrition data
+    kcal: MacroSummaryDTO = Field(default_factory=MacroSummaryDTO)
+    protein_g: MacroSummaryDTO = Field(default_factory=MacroSummaryDTO)
+    carbs_g: MacroSummaryDTO = Field(default_factory=MacroSummaryDTO)
+    fat_g: MacroSummaryDTO = Field(default_factory=MacroSummaryDTO)
+
+
 class PlanResult(_Base):
     """A feasible, costed, auditable plan."""
 
@@ -347,6 +398,9 @@ class PlanResult(_Base):
     leftovers: list[LeftoverDTO]
     pantry_used: list[PantryUsedDTO]
     coverage: CoverageDTO
+    # Per-day macros vs the household nutrition target. ``None`` when no member set a
+    # goal (behavior unchanged from before this feature).
+    nutrition_summary: NutritionSummaryDTO | None = None
     warnings: list[str] = Field(default_factory=list)
     explanations: list[str] = Field(default_factory=list)
     seed: int = 0

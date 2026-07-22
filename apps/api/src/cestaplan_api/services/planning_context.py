@@ -46,6 +46,7 @@ from cestaplan_engine import (
     MealRequirementDTO,
     MemberDTO,
     NutritionDTO,
+    NutritionTargetDTO,
     PackageOptionDTO,
     PantryItemDTO,
     PlanInput,
@@ -125,8 +126,60 @@ def build_plan_input(
         pantry=_build_pantry(db, household_id),
         favorites=_build_favorites(db, household_id),
         conversions=[],
+        nutrition_target=_build_nutrition_target(db, household_id),
         seed=seed,
         as_of=effective_as_of,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Nutrition target
+# --------------------------------------------------------------------------- #
+# Engine macro -> DietaryProfile column. Targets are per-day, per-person goals.
+_TARGET_COLUMNS = (
+    ("kcal", "energy_target_kcal"),
+    ("protein_g", "protein_target_g"),
+    ("carbs_g", "carb_target_g"),
+    ("fat_g", "fat_target_g"),
+)
+
+
+def _build_nutrition_target(db: Session, household_id: int) -> NutritionTargetDTO | None:
+    """Aggregate eater members' per-day nutrition goals into a household target.
+
+    Each member's per-person daily goal is scaled by ``relative_serving`` (their
+    portion size) and summed, giving the household's total per-day target that the
+    engine compares against the plan's actual per-day nutrition. A macro no member
+    set stays ``None``; if no member set any goal the target is ``None`` (the engine
+    then scores no nutrition term and the plan is unchanged).
+    """
+    members = db.execute(
+        select(HouseholdMember).where(
+            HouseholdMember.household_id == household_id,
+            HouseholdMember.is_eater.is_(True),
+        )
+    ).scalars().all()
+
+    totals: dict[str, Decimal] = {macro: Decimal("0") for macro, _ in _TARGET_COLUMNS}
+    seen: dict[str, bool] = {macro: False for macro, _ in _TARGET_COLUMNS}
+    for member in members:
+        profile = member.dietary_profiles[0] if member.dietary_profiles else None
+        if profile is None:
+            continue
+        serving = member.relative_serving or Decimal("1")
+        for macro, column in _TARGET_COLUMNS:
+            value = getattr(profile, column)
+            if value is not None:
+                totals[macro] += value * serving
+                seen[macro] = True
+
+    if not any(seen.values()):
+        return None
+    return NutritionTargetDTO(
+        kcal=totals["kcal"] if seen["kcal"] else None,
+        protein_g=totals["protein_g"] if seen["protein_g"] else None,
+        carbs_g=totals["carbs_g"] if seen["carbs_g"] else None,
+        fat_g=totals["fat_g"] if seen["fat_g"] else None,
     )
 
 

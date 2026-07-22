@@ -10,6 +10,7 @@ import { formatDateLong } from "@/lib/utils/format";
 import type { PlannedMeal } from "@/lib/api/types";
 
 import { MealCard } from "@/components/plan/MealCard";
+import { NutritionSummaryPanel } from "@/components/plan/NutritionSummaryPanel";
 import { PlanHeader } from "@/components/plan/PlanHeader";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
@@ -92,6 +93,15 @@ export default function PlanPage() {
           goToEstado(accepted.optimization_run_id);
         }}
       />
+
+      {plan.nutrition_summary ? (
+        <NutritionSummaryPanel summary={plan.nutrition_summary} />
+      ) : days.length > 0 ? (
+        <Alert tone="info" title="Objetivos nutricionales">
+          Define objetivos de nutrición en los perfiles de tu hogar para ver aquí la energía y los
+          macros del plan frente a tu meta.
+        </Alert>
+      ) : null}
 
       {days.length === 0 ? (
         <Card>

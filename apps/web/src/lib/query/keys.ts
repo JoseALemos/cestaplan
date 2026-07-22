@@ -5,6 +5,9 @@ export const queryKeys = {
   household: (householdId: string) => ["households", householdId] as const,
   members: (householdId: string) => ["households", householdId, "members"] as const,
   equipment: (householdId: string) => ["households", householdId, "equipment"] as const,
+  invitations: (householdId: string) =>
+    ["households", householdId, "invitations"] as const,
+  invitationPreview: (token: string) => ["invitations", token] as const,
   pantry: (householdId: string) => ["households", householdId, "pantry"] as const,
   ingredients: (search: string) => ["ingredients", search] as const,
   retailers: () => ["retailers"] as const,

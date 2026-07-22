@@ -14,9 +14,14 @@ import type {
   CreateAdminImportInput,
   EquipmentResponse,
   EquipmentSet,
+  AcceptInvitationResponse,
   FavoriteRecipeListItem,
   FeedbackRequest,
   FeedbackSentiment,
+  InvitationCreate,
+  InvitationCreateResponse,
+  InvitationPreviewResponse,
+  InvitationResponse,
   GenerateRequest,
   GeneratePlanAccepted,
   GroceryItemIn,
@@ -130,6 +135,44 @@ export function putEquipment(
     method: "PUT",
     body,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Invitations — invite a real user into a household with a role (link-based).
+// ---------------------------------------------------------------------------
+
+export function listInvitations(householdId: Uuid): Promise<InvitationResponse[]> {
+  return apiFetch<InvitationResponse[]>(`/api/v1/households/${householdId}/invitations`);
+}
+
+export function createInvitation(
+  householdId: Uuid,
+  body: InvitationCreate,
+): Promise<InvitationCreateResponse> {
+  return apiFetch<InvitationCreateResponse>(
+    `/api/v1/households/${householdId}/invitations`,
+    { method: "POST", body },
+  );
+}
+
+export function revokeInvitation(householdId: Uuid, invitationId: Uuid): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/households/${householdId}/invitations/${invitationId}`,
+    { method: "DELETE" },
+  );
+}
+
+export function getInvitationPreview(token: string): Promise<InvitationPreviewResponse> {
+  return apiFetch<InvitationPreviewResponse>(
+    `/api/v1/invitations/${encodeURIComponent(token)}`,
+  );
+}
+
+export function acceptInvitation(token: string): Promise<AcceptInvitationResponse> {
+  return apiFetch<AcceptInvitationResponse>(
+    `/api/v1/invitations/${encodeURIComponent(token)}/accept`,
+    { method: "POST" },
+  );
 }
 
 // ---------------------------------------------------------------------------

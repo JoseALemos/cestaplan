@@ -12,6 +12,7 @@ from cestaplan_engine.contracts import (
     MealRequirementDTO,
     MemberDTO,
     NutritionDTO,
+    NutritionTargetDTO,
     PackageOptionDTO,
     PantryItemDTO,
     PlanInput,
@@ -175,6 +176,7 @@ def plan_input(
     seed: int = 42,
     equipment: set[str] | None = None,
     weights=None,
+    nutrition_target: NutritionTargetDTO | None = None,
     as_of: date = AS_OF,
     date_range: tuple[date, date] = RANGE,
 ) -> PlanInput:
@@ -192,6 +194,7 @@ def plan_input(
         pantry=pantry or [],
         favorites=favorites or set(),
         conversions=conversions or [],
+        nutrition_target=nutrition_target,
         seed=seed,
         as_of=as_of,
         **kwargs,

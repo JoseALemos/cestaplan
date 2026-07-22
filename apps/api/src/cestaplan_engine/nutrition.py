@@ -66,3 +66,26 @@ class NutritionCalculator:
             ),
             complete,
         )
+
+    def for_meals(
+        self, meals: list[MealAssignment]
+    ) -> tuple[dict[str, Decimal], bool]:
+        """Sum each macro across a set of meals (the plan's total nutrition).
+
+        Returns ``(totals, complete)`` where ``complete`` is ``True`` only if every
+        meal's nutrition could be fully computed. Reuses :meth:`for_meal` so the
+        per-meal and plan-level numbers stay consistent.
+        """
+        totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
+        complete = True
+        for meal in meals:
+            nutrition, meal_complete = self.for_meal(meal)
+            if not meal_complete:
+                complete = False
+            if nutrition is None:
+                continue
+            for macro in _MACROS:
+                value = getattr(nutrition, macro)
+                if value is not None:
+                    totals[macro] += value
+        return totals, complete

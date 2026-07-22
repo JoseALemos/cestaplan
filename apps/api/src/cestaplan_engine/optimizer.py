@@ -16,8 +16,10 @@ from decimal import Decimal
 from cestaplan_engine.contracts import (
     BudgetDTO,
     CandidateRecipeDTO,
+    NutritionTargetDTO,
     ScoringWeights,
 )
+from cestaplan_engine.nutrition import _MACROS, NutritionCalculator
 from cestaplan_engine.provisioning import MealAssignment, Provision, Provisioner
 from cestaplan_engine.scheduling import MealSlot
 
@@ -48,6 +50,9 @@ class PlanOptimizer:
         soft_penalty: dict[str, int],
         seed: int = 0,
         max_passes: int = 4,
+        nutrition_target: NutritionTargetDTO | None = None,
+        nutrition_calc: NutritionCalculator | None = None,
+        num_days: int = 0,
     ) -> None:
         self._prov = provisioner
         self._w = weights
@@ -57,6 +62,11 @@ class PlanOptimizer:
         self._soft = soft_penalty
         self._rng = random.Random(seed)
         self._max_passes = max_passes
+        # Nutrition fitting is inert unless a target is set: with ``nutrition_target``
+        # None the extra term is 0 and the search is byte-identical to before.
+        self._nutrition_target = nutrition_target
+        self._nutrition_calc = nutrition_calc
+        self._num_days = num_days if num_days > 0 else 1
         self._cheapest_cost: Decimal | None = None
         self._cheapest_assignment: list[CandidateRecipeDTO] = []
         self._cheapest_provision: Provision | None = None
@@ -85,8 +95,35 @@ class PlanOptimizer:
             )
         return meals
 
+    def _nutrition_penalty(
+        self, slots: list[MealSlot], recipes: list[CandidateRecipeDTO]
+    ) -> Decimal:
+        """Relative per-macro distance of the plan's per-day nutrition from target.
+
+        Sums, over each targeted macro, ``|actual_per_day - target| / target`` so the
+        term is scale-free across macros. Only macros with a positive target count.
+        Returns 0 when there is no target (keeps the no-target path unchanged).
+        """
+        target = self._nutrition_target
+        calc = self._nutrition_calc
+        if target is None or calc is None:
+            return Decimal("0")
+        totals, _complete = calc.for_meals(self._build_meals(slots, recipes))
+        days = Decimal(self._num_days)
+        penalty = Decimal("0")
+        for macro in _MACROS:
+            goal = getattr(target, macro)
+            if goal is None or goal <= 0:
+                continue
+            actual_per_day = totals[macro] / days
+            penalty += abs(actual_per_day - goal) / goal
+        return penalty
+
     def _score(
-        self, recipes: list[CandidateRecipeDTO], prov: Provision
+        self,
+        recipes: list[CandidateRecipeDTO],
+        prov: Provision,
+        slots: list[MealSlot],
     ) -> Decimal:
         w = self._w
         cost_total = prov.cost_total
@@ -127,6 +164,12 @@ class PlanOptimizer:
             - w.favorite * favorite_bonus
             + w.rejected * rejected
         )
+        # Nutrition fitting: a small penalty for the plan's per-day macros drifting
+        # from the household target. The weight (1.2) is far below the variety driver
+        # (12) and the budget cap (1e6), so it only breaks ties toward the target and
+        # never overrides budget/allergen/variety guarantees. Exactly 0 (no-op) when
+        # no target is set, so the no-target plan is unchanged.
+        score += w.nutrition_deviation * self._nutrition_penalty(slots, recipes)
         # Cost as an OBJECTIVE only when the household asked for the cheapest plan
         # (budget.priority == "price"). Under the default "waste" priority the
         # budget is an ENVELOPE, not something to minimize: within it we optimize
@@ -179,7 +222,11 @@ class PlanOptimizer:
             for recipe in self._ordered(feasible[slot.index]):
                 trial = [*chosen, recipe]
                 prov = self._provision(slots[: i + 1], trial)
-                metric = prov.cost_total if cost_only else self._score(trial, prov)
+                metric = (
+                    prov.cost_total
+                    if cost_only
+                    else self._score(trial, prov, slots[: i + 1])
+                )
                 key = (metric, recipe.recipe_id)
                 if best_key is None or key < best_key:
                     best_key = key
@@ -200,7 +247,7 @@ class PlanOptimizer:
         improves variety/preferences without crossing back over the cap."""
         prov = self._provision(slots, chosen)
         self._track_cheapest(chosen, prov)
-        best_score = self._score(chosen, prov)
+        best_score = self._score(chosen, prov, slots)
         best_prov = prov
         for _ in range(self._max_passes):
             improved = False
@@ -213,7 +260,7 @@ class PlanOptimizer:
                     trial[i] = recipe
                     tprov = self._provision(slots, trial)
                     self._track_cheapest(trial, tprov)
-                    tscore = self._score(trial, tprov)
+                    tscore = self._score(trial, tprov, slots)
                     if (tscore, recipe.recipe_id) < (best_score, current.recipe_id):
                         chosen = trial
                         best_score = tscore
