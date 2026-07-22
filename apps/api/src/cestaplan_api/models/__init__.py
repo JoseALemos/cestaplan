@@ -31,6 +31,19 @@ from cestaplan_api.models.household import (
     HouseholdMember,
 )
 from cestaplan_api.models.imports import DataImport, ProductBarcode
+from cestaplan_api.models.ingestion import (
+    ConnectorState,
+    CoverageSnapshot,
+    CrawlJob,
+    CrawlRun,
+    ExternalProduct,
+    PriceAnomaly,
+    PriceObservation,
+    ProductVariant,
+    PromotionRule,
+    RawCapture,
+    StoreResolution,
+)
 from cestaplan_api.models.jobs import GenerationJob
 from cestaplan_api.models.plan import (
     GroceryList,
@@ -50,10 +63,16 @@ __all__ = [
     "AuditLog",
     # base
     "BaseModel",
+    # ingestion (price-ingestion subsystem)
+    "ConnectorState",
+    "CoverageSnapshot",
+    "CrawlJob",
+    "CrawlRun",
     "DataImport",
     "DataSource",
     "DietaryProfile",
     "Equipment",
+    "ExternalProduct",
     # feedback
     "FavoriteRecipe",
     "FoodPreference",
@@ -73,10 +92,15 @@ __all__ = [
     # plan
     "PantryItem",
     "PlannedMeal",
+    "PriceAnomaly",
+    "PriceObservation",
     "Product",
     "ProductBarcode",
     "ProductNutrition",
     "ProductPrice",
+    "ProductVariant",
+    "PromotionRule",
+    "RawCapture",
     # recipe
     "Recipe",
     "RecipeFeedback",
@@ -85,6 +109,7 @@ __all__ = [
     # catalog
     "Retailer",
     "Store",
+    "StoreResolution",
     "TimestampMixin",
     "UUIDMixin",
     # usage / metering

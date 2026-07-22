@@ -24,10 +24,14 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from cestaplan_api.ingestion.contracts import LegalStatus, enum_values
 from cestaplan_api.models.base import BaseModel, enum_col, money
 
 if TYPE_CHECKING:
     from cestaplan_api.models.recipe import RecipeIngredient
+
+# Legal footing under which a data source may be ingested (see LegalStatus).
+DATA_SOURCE_LEGAL_STATUS = enum_values(LegalStatus)
 
 # The 9 canonical source_type values (canonical decisions §source_type).
 SOURCE_TYPE = (
@@ -247,6 +251,16 @@ class DataSource(BaseModel):
         Boolean, nullable=False, server_default=text("false")
     )
     url: Mapped[str | None] = mapped_column(Text)
+    # Compliance metadata for the ingestion subsystem: the legal footing plus when the
+    # source's terms of service / robots.txt were last reviewed, and free-text notes.
+    legal_status: Mapped[str] = mapped_column(
+        enum_col(*DATA_SOURCE_LEGAL_STATUS, name="data_source_legal_status"),
+        nullable=False,
+        server_default=LegalStatus.UNKNOWN.value,
+    )
+    terms_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    robots_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notes: Mapped[str | None] = mapped_column(Text)
 
 
 class Ingredient(BaseModel):

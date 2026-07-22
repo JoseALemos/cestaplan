@@ -90,6 +90,42 @@ class Settings(BaseSettings):
     )
     commercial_feed_license_code: str = "proprietary"
 
+    # --- Scraping / price-ingestion HTTP layer (FASE A, spec §23) ---
+    # DISABLED by default: nothing fetches a public source unless the operator opts in.
+    # None of these are secrets. The connectors additionally require their own enable flag
+    # (below) AND the relevant DataSource row to be enabled before anything runs. We only
+    # ever access sources on their declared legal footing and NEVER evade blocks/CAPTCHA/auth.
+    scraping_enabled: bool = False
+    price_sync_enabled: bool = False
+    # Honest, identifiable User-Agent + optional operator/abuse contact (From header).
+    scraping_user_agent: str = "CestaPlanBot/0.0 (+https://github.com/; price-ingestion)"
+    scraping_contact_email: str = ""
+    # Per-domain politeness: in-flight requests and the delay window between requests.
+    scraping_max_concurrency: int = 2
+    scraping_request_delay_min_ms: int = 500
+    scraping_request_delay_max_ms: int = 1500
+    scraping_timeout_seconds: int = 20
+    scraping_max_retries: int = 3
+    # Hard cap on a single response body; oversized downloads are aborted.
+    scraping_max_response_mb: int = 5
+    # Raw-capture retention (days) used to compute RawCapture.expires_at.
+    raw_capture_retention_days: int = 30
+    # Freshness thresholds for a stored price (hours) — used by coverage/health downstream.
+    stale_price_hours: int = 24
+    expired_price_hours: int = 48
+    # Circuit breaker: open a domain after N consecutive failures, for this many minutes.
+    connector_failure_threshold: int = 5
+    connector_circuit_open_minutes: int = 30
+
+    # --- Per-connector enable flags (all OFF by default; opt-in per retailer) ---
+    mercadona_connector_enabled: bool = False
+    alcampo_connector_enabled: bool = False
+    carrefour_connector_enabled: bool = False
+    dia_connector_enabled: bool = False
+    lidl_offers_connector_enabled: bool = False
+    aldi_offers_connector_enabled: bool = False
+    deza_connector_enabled: bool = False
+
     # --- Cloud metering / quotas (enforced only when deployment_mode == "cloud") ---
     # A value <= 0 disables that particular limit.
     cloud_monthly_generation_limit: int = 100
@@ -126,6 +162,18 @@ class Settings(BaseSettings):
             if isinstance(prices, dict):
                 table[str(model)] = {str(k): str(v) for k, v in prices.items()}
         return table
+
+    @property
+    def scraping_request_delay_bounds_seconds(self) -> tuple[float, float]:
+        """(min, max) per-domain request delay in seconds, always ``min <= max``."""
+        lo = max(0, self.scraping_request_delay_min_ms)
+        hi = max(lo, self.scraping_request_delay_max_ms)
+        return (lo / 1000.0, hi / 1000.0)
+
+    @property
+    def scraping_max_response_bytes(self) -> int:
+        """Response-body hard cap in bytes, derived from ``scraping_max_response_mb``."""
+        return max(1, self.scraping_max_response_mb) * 1024 * 1024
 
     @property
     def commercial_feed_field_map(self) -> dict[str, str]:
