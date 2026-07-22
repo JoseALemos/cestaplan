@@ -1,0 +1,161 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# Fork-safety model
+# ---------------------------------------------------------------------------
+# - This workflow runs on `push` (trusted branches of THIS repo) and on
+#   `pull_request` (which includes PRs from forks).
+# - It uses NO secrets and requests only read permissions, so a malicious fork
+#   PR cannot exfiltrate credentials or write to the repo. `pull_request` (not
+#   `pull_request_target`) runs in the fork's context WITHOUT repo secrets.
+# - There is intentionally NO deploy job here. Deploys are handled by Railway
+#   from trusted, protected branches after review (see docs/DEPLOYMENT.md 4.5).
+#   Never add deploy credentials to a workflow that runs on `pull_request`.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Least privilege: read-only token, never exposed to forks with write scope.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Backend: lint, typecheck, tests against a real Postgres, migration drift.
+  # -------------------------------------------------------------------------
+  backend:
+    name: backend (api + worker + engine)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cestaplan
+          POSTGRES_PASSWORD: cestaplan
+          POSTGRES_DB: cestaplan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cestaplan"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Point the app at the Postgres service container (psycopg driver URL).
+      DATABASE_URL: postgresql+psycopg://cestaplan:cestaplan@localhost:5432/cestaplan
+      # Keep the AI path fully disabled in CI (no OpenAI key, deterministic engine).
+      DEPLOYMENT_MODE: self_hosted
+      AI_BILLING_MODE: disabled
+      SESSION_SECRET: ci-not-a-real-secret-just-32-bytes-long
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (with Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Typecheck (pyright)
+        # pyright is heavier than ruff but the codebase is small; keep it in CI.
+        run: uv run pyright
+
+      - name: Run tests (pytest)
+        run: uv run pytest
+
+      - name: Migration validation (apply + drift check)
+        # Apply all migrations, then assert models and migrations are in sync.
+        # `alembic check` exits non-zero if autogenerate would emit operations.
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+  # -------------------------------------------------------------------------
+  # Frontend: lint, typecheck, production build (standalone).
+  # -------------------------------------------------------------------------
+  frontend:
+    name: frontend (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (eslint)
+        run: pnpm --filter @cestaplan/web lint
+
+      - name: Typecheck (tsc)
+        run: pnpm --filter @cestaplan/web typecheck
+
+      - name: Build (next, standalone)
+        env:
+          # Build-time public base URL; overridden per environment at deploy time.
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        run: pnpm --filter @cestaplan/web build
+
+  # -------------------------------------------------------------------------
+  # Dependency scan: advisory only (non-blocking) — surfaces CVEs without
+  # gating merges on noisy transitive advisories. Tighten once triaged.
+  # -------------------------------------------------------------------------
+  dependency-scan:
+    name: dependency scan (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (with Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Python audit (pip-audit)
+        continue-on-error: true
+        working-directory: apps/api
+        run: |
+          uv export --frozen --no-dev --format requirements-txt --no-emit-project -o requirements.txt
+          uvx pip-audit -r requirements.txt
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: JS audit (pnpm audit)
+        continue-on-error: true
+        run: pnpm audit --audit-level high

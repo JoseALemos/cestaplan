@@ -1,0 +1,52 @@
+# Docker build context is the repository ROOT (see docker-compose.yml:
+#   context: . / dockerfile: apps/{api,web}/Dockerfile).
+# Keep the context small and never ship secrets or build artefacts into images.
+
+# --- VCS / tooling state ---
+.git
+.gitignore
+.github
+.omc
+.claude
+
+# --- Secrets / env (baked build-time values are passed via --build-arg, not files) ---
+.env
+.env.*
+!.env.example
+*.p12
+*.pem
+
+# --- Node / JS ---
+**/node_modules
+**/.next
+**/out
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+**/coverage
+**/.env.local
+
+# --- Python ---
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/htmlcov
+**/.coverage
+**/.coverage.*
+
+# --- Tests are not needed inside runtime images ---
+apps/api/tests
+
+# --- Local data (never bake imported catalogues into an image) ---
+data/imports/*
+!data/imports/.gitkeep
+
+# --- OS / editor noise ---
+.DS_Store
+*.log
+.idea
+.vscode

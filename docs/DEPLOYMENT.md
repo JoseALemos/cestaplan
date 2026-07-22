@@ -86,19 +86,28 @@ en [`infra/railway/`](../infra/railway/) (ver su `README.md` para el mapeo detal
 
 ### 4.1 Servicios
 
-| Servicio   | Root directory  | Config                                  | Dominio          | Comando de arranque                                      |
-|------------|-----------------|-----------------------------------------|------------------|----------------------------------------------------------|
-| `web`      | `apps/web`      | [`infra/railway/web.json`](../infra/railway/web.json)       | **Público**      | `node apps/web/server.js`                    |
-| `api`      | `apps/api`      | [`infra/railway/api.json`](../infra/railway/api.json)       | **Público**      | `uvicorn cestaplan_api.main:app --host 0.0.0.0 --port $PORT` |
-| `worker`   | `apps/worker`   | [`infra/railway/worker.json`](../infra/railway/worker.json) | **Sin dominio**  | `python -m cestaplan_worker.main`                        |
-| `postgres` | —               | Base de datos gestionada por Railway    | Red privada      | —                                                        |
+| Servicio   | Root directory | Dockerfile            | Config                                  | Dominio          | Comando de arranque                                      |
+|------------|:--------------:|-----------------------|-----------------------------------------|------------------|----------------------------------------------------------|
+| `web`      | `/` (raíz)     | `apps/web/Dockerfile` | [`infra/railway/web.json`](../infra/railway/web.json)       | **Público**      | `node apps/web/server.js`                    |
+| `api`      | `/` (raíz)     | `apps/api/Dockerfile` | [`infra/railway/api.json`](../infra/railway/api.json)       | **Público**      | `uvicorn cestaplan_api.main:app --host 0.0.0.0 --port $PORT` |
+| `worker`   | `/` (raíz)     | `apps/api/Dockerfile` | [`infra/railway/worker.json`](../infra/railway/worker.json) | **Sin dominio**  | `python -m cestaplan_worker.main`                        |
+| `postgres` | —              | —                     | Base de datos gestionada por Railway    | Red privada      | —                                                        |
 
-- **`web`**: público. Sirve la PWA. Healthcheck en `/`.
+> **Contexto de build = raíz del repo.** Los `Dockerfile` se construyen con la raíz del
+> repositorio como contexto (igual que `docker-compose.yml`: `context: .`). Por eso, en
+> Railway, el *Root Directory* de cada servicio se deja en la **raíz** (vacío / `/`) y
+> cada servicio se diferencia por su *Railway config file*. Fijar el *Root Directory* a
+> `apps/api`/`apps/web` rompería los `COPY` del Dockerfile. Ver
+> [`infra/railway/README.md`](../infra/railway/README.md).
+
+- **`web`**: público. Sirve la PWA (Next.js **standalone**, `node apps/web/server.js`).
+  Healthcheck en `/`. `NEXT_PUBLIC_API_BASE_URL` se **hornea en el build** (ver 4.6).
 - **`api`**: público. Healthcheck en **`/health`**. Pre-deploy `alembic upgrade head`
   (sección 4.4).
-- **`worker`**: **no** lleva dominio. Consume la cola de generación en Postgres
-  (`SELECT FOR UPDATE SKIP LOCKED`, reintentos limitados con backoff y heartbeat).
-  Comparte imagen con `api`.
+- **`worker`**: **no** lleva dominio ni healthcheck. Consume la cola de generación en
+  Postgres (`SELECT FOR UPDATE SKIP LOCKED`, reintentos limitados con backoff y
+  heartbeat). **Reutiliza la imagen de `api`** (mismo `apps/api/Dockerfile`, distinto
+  `startCommand`); el código vive en `apps/api/src/cestaplan_worker`.
 - **`postgres`**: expone `DATABASE_URL` que `api` y `worker` consumen por **red
   privada** (ver 4.3).
 
@@ -137,9 +146,40 @@ en [`infra/railway/`](../infra/railway/) (ver su `README.md` para el mapeo detal
 - Los secretos se inyectan por servicio/entorno en Railway; nunca se versionan (ver
   `docs/SECURITY.md`, sección de gestión de secretos).
 
+### 4.6 Variables públicas horneadas en el build (`web`)
+
+- Las variables `NEXT_PUBLIC_*` se **incrustan en el bundle de cliente en tiempo de
+  build**, no en runtime. En particular `NEXT_PUBLIC_API_BASE_URL` se pasa como
+  `--build-arg` al `apps/web/Dockerfile`.
+- Consecuencia: para cambiar el dominio del API que consume el front hay que
+  **reconstruir la imagen de `web`** (un cambio de variable en runtime no basta). En
+  Railway, define `NEXT_PUBLIC_API_BASE_URL` como *build-time variable* del servicio
+  `web` de cada entorno (staging/production) apuntando al dominio público del `api` de
+  ese entorno.
+- Nunca pongas secretos en variables `NEXT_PUBLIC_*`: son visibles en el cliente.
+
 ---
 
-## 5. Variables de entorno
+## 5. Integración continua (CI)
+
+El pipeline vive en [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) y corre en
+`push` y `pull_request`. Jobs:
+
+| Job                | Qué hace                                                                                     |
+|--------------------|----------------------------------------------------------------------------------------------|
+| `backend`          | `uv sync` → `ruff check` → `pyright` → `pytest` (contra Postgres 16 en *service container*) → validación de migraciones (`alembic upgrade head` + `alembic check` para detectar *drift*). |
+| `frontend`         | pnpm + Node 22 → `lint` → `typecheck` → `build` (Next standalone).                            |
+| `dependency-scan`  | `pip-audit` (Python) y `pnpm audit` (JS). **No bloqueante** (`continue-on-error`): reporta CVEs sin frenar el merge por avisos transitivos ruidosos; endurecer cuando estén triados. |
+
+**Seguridad frente a forks**: el workflow pide permisos de solo lectura
+(`permissions: contents: read`), **no usa secretos** y **no incluye ningún job de
+deploy**. Se usa `pull_request` (no `pull_request_target`), de modo que los PRs de forks
+corren sin acceso a los secretos del repo. El despliegue lo hace Railway desde ramas de
+confianza tras revisión (sección 4.5).
+
+---
+
+## 6. Variables de entorno
 
 Fuente única: [`.env.example`](../.env.example). En Railway se definen **por servicio y
 por entorno**. Tabla completa:
@@ -178,7 +218,7 @@ Reglas:
 
 ---
 
-## 6. Comprobaciones post-despliegue
+## 7. Comprobaciones post-despliegue
 
 1. `api`: `GET /health` responde `200`.
 2. Migraciones aplicadas (el pre-deploy no falló).
