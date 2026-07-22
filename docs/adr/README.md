@@ -16,6 +16,7 @@ Formato: [MADR](https://adr.github.io/madr/) simplificado.
 | [0005](0005-opaque-session-auth.md) | Sesiones opacas en base de datos, no JWT en el cliente | Aceptado |
 | [0006](0006-hybrid-data-sources-no-scraping.md) | Fuentes híbridas sin scraping en el MVP | Aceptado |
 | [0007](0007-full-package-cost-model.md) | Coste por envases completos, no por fracción proporcional | Aceptado |
+| [0008](0008-price-ingestion-subsystem.md) | Subsistema de ingesta de precios: conectores, cola Postgres, sin scraping de fuentes bloqueadas | Aceptado |
 
 ## Plantilla
 

@@ -25,6 +25,8 @@ Ver la guía completa en [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md).
 | `api`            | [`api.json`](api.json)       | `/` (raíz) | `apps/api/Dockerfile`  | Sí             | FastAPI. Pre-deploy `alembic upgrade head`, health `/health` |
 | `worker`         | [`worker.json`](worker.json) | `/` (raíz) | `apps/api/Dockerfile`  | **No**         | Consume la cola en Postgres. **Sin dominio, sin healthcheck** |
 | `open-prices-sync` | [`open-prices-sync.json`](open-prices-sync.json) | `/` (raíz) | `apps/api/Dockerfile` | **No** | **Cron diario** (`0 4 * * *` UTC). Reutiliza la imagen del `api`; `startCommand` = `python -m cestaplan_api.scripts.sync_open_prices --all`. Sincroniza precios reales (ODbL) de Open Prices. Sin dominio, sin healthcheck. |
+| `ingestion-scheduler` | [`ingestion-scheduler.json`](ingestion-scheduler.json) | `/` (raíz) | `apps/api/Dockerfile` | **No** | **Cron diario** (`0 3 * * *` UTC). `startCommand` = `python -m cestaplan_api.jobs.schedule_daily_price_sync`. Crea los `CrawlRun`+`CrawlJob` del día (idempotente: advisory lock + freshness). `restartPolicyType: NEVER`. Sin dominio, sin healthcheck. Ver [`docs/PRICE_INGESTION.md`](../../docs/PRICE_INGESTION.md) y [`docs/RAILWAY_PRICE_SYNC.md`](../../docs/RAILWAY_PRICE_SYNC.md). |
+| `ingestion-worker` | [`ingestion-worker.json`](ingestion-worker.json) | `/` (raíz) | `apps/api/Dockerfile` | **No** | Demonio de la cola de rastreo. `startCommand` = `python -m cestaplan_api.jobs.crawl_worker`. Consume `CrawlJob` (`SELECT … FOR UPDATE SKIP LOCKED`), aislamiento por job. `restartPolicyType: ON_FAILURE`. Sin dominio, sin healthcheck. **No** necesita Playwright para los conectores activos (`Demo`, `Open Prices`); sólo si algún conector futuro lo requiriese. |
 | `postgres`       | —                    | —              | —                      | No (red privada)| Base de datos gestionada por Railway. No lleva config aquí |
 
 > **Cron opcional `commercial-feed-sync` (authorized_partner).** Si el operador contrata un
@@ -45,6 +47,14 @@ Ver la guía completa en [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md).
 > infraestructura, deshabilita la fuente `open-prices` (`DataSource.is_enabled=false`): el
 > comando saldrá sin escribir nada.
 
+> **`ingestion-scheduler` / `ingestion-worker` son la ingesta de precios**, distintos
+> del `worker` de planes. El `worker` (`cestaplan_worker.main`) consume la cola
+> `GenerationJob` de planes de comida; el `ingestion-worker`
+> (`cestaplan_api.jobs.crawl_worker`) consume la cola `CrawlJob` de rastreo de precios,
+> y el `ingestion-scheduler` (cron) crea esos jobs. Los tres reutilizan la imagen del
+> `api` y sólo cambian el `startCommand`. Detalle en
+> [`docs/PRICE_INGESTION.md`](../../docs/PRICE_INGESTION.md).
+
 > **El `worker` reutiliza la imagen del `api`.** Ambos servicios construyen el mismo
 > `apps/api/Dockerfile`; solo cambia el `startCommand` (`worker.json` lo fija a
 > `python -m cestaplan_worker.main`). El código del worker vive en
@@ -64,6 +74,8 @@ equivalentes; usa la que prefieras:
    - servicio `web`  → `infra/railway/web.json`
    - servicio `api`  → `infra/railway/api.json`
    - servicio `worker` → `infra/railway/worker.json`
+   - servicio `ingestion-scheduler` → `infra/railway/ingestion-scheduler.json`
+   - servicio `ingestion-worker` → `infra/railway/ingestion-worker.json`
 2. **Dashboard.** Alternativamente, fija en la UI el `Dockerfile Path` y el
    `Start Command` equivalentes a los del JSON. En ambos casos, **deja el *Root
    Directory* en la raíz del repo** (ver la nota de contexto de build arriba).

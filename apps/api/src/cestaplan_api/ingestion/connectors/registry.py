@@ -23,11 +23,17 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from cestaplan_api.adapters.openprices import OpenPricesAdapter
 from cestaplan_api.ingestion import RetailerConnector
 from cestaplan_api.ingestion.connectors.demo import DemoFixtureConnector
+from cestaplan_api.ingestion.connectors.openprices import OpenPricesConnector
 from cestaplan_api.ingestion.crawl_worker import ConnectorRegistry, JobOutcome
 from cestaplan_api.ingestion.orchestration import run_crawl_job
-from cestaplan_api.models import CrawlJob, CrawlRun, Retailer
+from cestaplan_api.models import CrawlJob, CrawlRun, Retailer, Store
+from cestaplan_api.services.open_prices_sync import (
+    open_prices_enabled,
+    parse_osm_from_external_code,
+)
 
 #: The demo connector is synthetic and safe, so it is never gated off.
 DEMO_ALWAYS_ENABLED = True
@@ -54,6 +60,33 @@ def get_connector(retailer_code: str, **kwargs: object) -> RetailerConnector | N
 
 if DEMO_ALWAYS_ENABLED:
     register_connector(DemoFixtureConnector.retailer_code, DemoFixtureConnector)
+
+#: The first real connector: Open Food Facts Open Prices (legal, ODbL open dataset). Registered
+#: under its retailer code; runtime use stays gated by the Open Prices DataSource.is_enabled flag
+#: (see :func:`build_open_prices_connector`).
+register_connector(OpenPricesConnector.retailer_code, OpenPricesConnector)
+
+
+def build_open_prices_connector(
+    db: Session, store: Store, *, adapter: OpenPricesAdapter | None = None
+) -> OpenPricesConnector | None:
+    """Build an :class:`OpenPricesConnector` for a store, gated by the OP ``DataSource``.
+
+    Resolves the store's OSM location from its ``external_code`` (``osm:{TYPE}/{id}``) and honours
+    the existing Open Prices ``DataSource.is_enabled`` flag (a disabled source yields a disabled
+    connector). Returns ``None`` when the store has no usable OSM location. Reuses the shared
+    :class:`~cestaplan_api.adapters.openprices.OpenPricesAdapter` (injectable for tests).
+    """
+    osm = parse_osm_from_external_code(store.external_code)
+    if osm is None:
+        return None
+    osm_id, osm_type = osm
+    return OpenPricesConnector(
+        osm_id=osm_id,
+        osm_type=osm_type,
+        adapter=adapter,
+        enabled=open_prices_enabled(db),
+    )
 
 
 def build_worker_registry(*, as_of: datetime | None = None) -> ConnectorRegistry:
@@ -97,6 +130,7 @@ __all__ = [
     "CONNECTOR_FACTORIES",
     "DEMO_ALWAYS_ENABLED",
     "ConnectorFactory",
+    "build_open_prices_connector",
     "build_worker_registry",
     "get_connector",
     "register_connector",
