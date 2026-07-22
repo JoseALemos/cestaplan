@@ -14,7 +14,7 @@
 | **FASE 2** | Documentación | ✅ Hecha |
 | **FASE 3** | Vertical slice (+3.5: OpenAI, frontend cableado) | ✅ Hecha |
 | **FASE 4** | Fuentes de datos e importación (+ Open Food Facts, admin) | ✅ Hecha |
-| **FASE 5** | Cloud / Railway | ⏳ Pendiente |
+| **FASE 5** | Cloud / Railway | ✅ Preparada (deploy lo lanza el propietario) |
 
 Decisiones del propietario que enmarcan el roadmap: **recetas semilla primero**; el usuario aporta su
 `OPENAI_API_KEY` (**BYOK**); **completar FASE 2 y parar**; `git init` local **sin remoto**; **no `git push`**.
@@ -25,7 +25,7 @@ flowchart LR
     F1 --> F2["FASE 2<br/>Documentación ✅"]
     F2 --> F3["FASE 3<br/>Vertical slice ✅"]
     F3 --> F4["FASE 4<br/>Fuentes e importación ✅"]
-    F4 --> F5["FASE 5<br/>Cloud / Railway ⏳"]
+    F4 --> F5["FASE 5<br/>Cloud / Railway ✅ (preparada)"]
 ```
 
 ---
