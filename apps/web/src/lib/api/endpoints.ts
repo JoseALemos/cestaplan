@@ -1,86 +1,232 @@
 /**
- * Typed placeholders for the CestaPlan API surface.
- *
- * These types intentionally stay minimal and are NOT wired to real
- * screens yet: the API contract lives in `packages/contracts` (Pydantic v2
- * → JSON Schema → TS types + Zod schemas) and hasn't been generated for
- * this vertical slice. Once it has, replace these hand-written types with
- * the generated ones and back these functions with `apiFetch` + TanStack
- * Query hooks.
- *
- * Money fields are `string` on purpose — see docs/PRD.md, "el dinero viaja
- * como string" — never `number`/`float`.
+ * Typed calls for the CestaPlan API surface, verified against
+ * `GET /openapi.json` on the running server for every endpoint that exists
+ * today. Catalog endpoints (`retailers`, `stores`, `recipes/{id}`) are coded
+ * against the FASE 3.5 brief's documented shape even though they are not yet
+ * in the live schema ("may be added concurrently") — call sites handle the
+ * resulting 404 as a normal error state, never a crash.
  */
 
 import { apiFetch } from "./client";
+import type {
+  EquipmentResponse,
+  EquipmentSet,
+  FeedbackRequest,
+  GenerateRequest,
+  GeneratePlanAccepted,
+  GroceryItemIn,
+  GroceryList,
+  HouseholdCreate,
+  HouseholdResponse,
+  LoginRequest,
+  LoginResponse,
+  MealPlanDetail,
+  MemberCreate,
+  MemberResponse,
+  MemberUpdate,
+  OptimizationRunStatusResponse,
+  PasswordRecoveryRequest,
+  Recipe,
+  RegisterRequest,
+  Retailer,
+  Store,
+  SubstituteRequest,
+  UserResponse,
+  Uuid,
+} from "./types";
 
-export type Uuid = string;
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
 
-export type HouseholdRole = "owner" | "editor" | "viewer";
-
-export interface HouseholdMemberSummary {
-  id: Uuid;
-  displayName: string;
-  role: HouseholdRole;
+export function registerUser(body: RegisterRequest): Promise<UserResponse> {
+  return apiFetch<UserResponse>("/api/v1/auth/register", { method: "POST", body });
 }
 
-export interface HouseholdSummary {
-  id: Uuid;
-  name: string;
-  memberCount: number;
-  members: HouseholdMemberSummary[];
+export function login(body: LoginRequest): Promise<LoginResponse> {
+  return apiFetch<LoginResponse>("/api/v1/auth/login", { method: "POST", body });
 }
 
-export type OptimizationRunStatus =
-  | "queued"
-  | "collecting_data"
-  | "generating_candidates"
-  | "validating"
-  | "optimizing"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export interface OptimizationRunStatusResponse {
-  optimizationRunId: Uuid;
-  status: OptimizationRunStatus;
-  /** Populated only once status is "failed" or the run has no solution. */
-  error?: string;
+export function logout(): Promise<void> {
+  return apiFetch<void>("/api/v1/auth/logout", { method: "POST" });
 }
 
-export type PriceCoverageLabel =
-  | "completo"
-  | "cobertura_alta"
-  | "cobertura_parcial"
-  | "cobertura_insuficiente"
-  | "datos_caducados"
-  | "sin_datos";
-
-export interface MealPlanCostSummary {
-  /** String money, e.g. "42.90" — never a float. */
-  knownCost: string;
-  estimatedCost: string;
-  currency: "EUR";
-  priceCoverage: number;
-  weightedPriceCoverage: number;
-  coverageLabel: PriceCoverageLabel;
+export function getMe(): Promise<UserResponse> {
+  return apiFetch<UserResponse>("/api/v1/auth/me");
 }
 
-/**
- * Placeholder — NOT called from any screen yet. Present so the shape of a
- * future call site is visible and typed end to end.
- */
-export async function getHousehold(householdId: Uuid): Promise<HouseholdSummary> {
-  return apiFetch<HouseholdSummary>(`/api/v1/households/${householdId}`);
+export function requestPasswordRecovery(body: PasswordRecoveryRequest): Promise<unknown> {
+  return apiFetch("/api/v1/auth/password-recovery", { method: "POST", body });
 }
 
-/**
- * Placeholder — NOT called from any screen yet.
- */
-export async function getOptimizationRunStatus(
+// ---------------------------------------------------------------------------
+// Households / members / equipment
+// ---------------------------------------------------------------------------
+
+export function listHouseholds(): Promise<HouseholdResponse[]> {
+  return apiFetch<HouseholdResponse[]>("/api/v1/households");
+}
+
+export function createHousehold(body: HouseholdCreate): Promise<HouseholdResponse> {
+  return apiFetch<HouseholdResponse>("/api/v1/households", { method: "POST", body });
+}
+
+export function getHousehold(householdId: Uuid): Promise<HouseholdResponse> {
+  return apiFetch<HouseholdResponse>(`/api/v1/households/${householdId}`);
+}
+
+export function updateHousehold(
+  householdId: Uuid,
+  body: Partial<HouseholdCreate>,
+): Promise<HouseholdResponse> {
+  return apiFetch<HouseholdResponse>(`/api/v1/households/${householdId}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+export function addMember(householdId: Uuid, body: MemberCreate): Promise<MemberResponse> {
+  return apiFetch<MemberResponse>(`/api/v1/households/${householdId}/members`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function listMembers(householdId: Uuid): Promise<MemberResponse[]> {
+  return apiFetch<MemberResponse[]>(`/api/v1/households/${householdId}/members`);
+}
+
+export function updateMember(
+  householdId: Uuid,
+  memberId: Uuid,
+  body: MemberUpdate,
+): Promise<MemberResponse> {
+  return apiFetch<MemberResponse>(
+    `/api/v1/households/${householdId}/members/${memberId}`,
+    { method: "PATCH", body },
+  );
+}
+
+export function getEquipment(householdId: Uuid): Promise<EquipmentResponse[]> {
+  return apiFetch<EquipmentResponse[]>(`/api/v1/households/${householdId}/equipment`);
+}
+
+export function putEquipment(
+  householdId: Uuid,
+  body: EquipmentSet,
+): Promise<EquipmentResponse[]> {
+  return apiFetch<EquipmentResponse[]>(`/api/v1/households/${householdId}/equipment`, {
+    method: "PUT",
+    body,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Catalog (retailers / stores / recipe detail) — see module docblock.
+// ---------------------------------------------------------------------------
+
+export function listRetailers(): Promise<Retailer[]> {
+  return apiFetch<Retailer[]>("/api/v1/retailers");
+}
+
+export function listStores(retailerId: Uuid): Promise<Store[]> {
+  return apiFetch<Store[]>(`/api/v1/retailers/${retailerId}/stores`);
+}
+
+export function getRecipe(recipeId: Uuid): Promise<Recipe> {
+  return apiFetch<Recipe>(`/api/v1/recipes/${recipeId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+export function generatePlan(body: GenerateRequest): Promise<GeneratePlanAccepted> {
+  return apiFetch<GeneratePlanAccepted>("/api/v1/plans/generate", { method: "POST", body });
+}
+
+export function getRunStatus(
   optimizationRunId: Uuid,
 ): Promise<OptimizationRunStatusResponse> {
   return apiFetch<OptimizationRunStatusResponse>(
-    `/api/v1/optimization-runs/${optimizationRunId}`,
+    `/api/v1/plans/runs/${optimizationRunId}`,
+  );
+}
+
+export function getPlan(mealPlanId: Uuid): Promise<MealPlanDetail> {
+  return apiFetch<MealPlanDetail>(`/api/v1/plans/${mealPlanId}`);
+}
+
+export function regeneratePlan(mealPlanId: Uuid): Promise<GeneratePlanAccepted> {
+  return apiFetch<GeneratePlanAccepted>(`/api/v1/plans/${mealPlanId}/regenerate`, {
+    method: "POST",
+  });
+}
+
+export function regenerateMeal(
+  mealPlanId: Uuid,
+  plannedMealId: Uuid,
+): Promise<GeneratePlanAccepted> {
+  return apiFetch<GeneratePlanAccepted>(
+    `/api/v1/plans/${mealPlanId}/meals/${plannedMealId}/regenerate`,
+    { method: "POST" },
+  );
+}
+
+export function favoriteRecipe(recipeId: Uuid, householdId: Uuid): Promise<unknown> {
+  return apiFetch(
+    `/api/v1/plans/recipes/${recipeId}/favorite?household_id=${householdId}`,
+    { method: "POST" },
+  );
+}
+
+export function unfavoriteRecipe(recipeId: Uuid, householdId: Uuid): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/plans/recipes/${recipeId}/favorite?household_id=${householdId}`,
+    { method: "DELETE" },
+  );
+}
+
+export function submitFeedback(
+  recipeId: Uuid,
+  householdId: Uuid,
+  body: FeedbackRequest,
+): Promise<unknown> {
+  return apiFetch(
+    `/api/v1/plans/recipes/${recipeId}/feedback?household_id=${householdId}`,
+    { method: "POST", body },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Grocery list
+// ---------------------------------------------------------------------------
+
+export function getGroceryList(mealPlanId: Uuid): Promise<GroceryList> {
+  return apiFetch<GroceryList>(`/api/v1/plans/${mealPlanId}/grocery-list`);
+}
+
+export function toggleGroceryItem(mealPlanId: Uuid, itemId: Uuid): Promise<unknown> {
+  return apiFetch(
+    `/api/v1/plans/${mealPlanId}/grocery-list/items/${itemId}/toggle`,
+    { method: "POST" },
+  );
+}
+
+export function addGroceryItem(mealPlanId: Uuid, body: GroceryItemIn): Promise<unknown> {
+  return apiFetch(`/api/v1/plans/${mealPlanId}/grocery-list/items`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function substituteGroceryItem(
+  mealPlanId: Uuid,
+  itemId: Uuid,
+  body: SubstituteRequest,
+): Promise<unknown> {
+  return apiFetch(
+    `/api/v1/plans/${mealPlanId}/grocery-list/items/${itemId}/substitute`,
+    { method: "POST", body },
   );
 }

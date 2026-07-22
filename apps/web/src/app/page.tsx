@@ -78,10 +78,14 @@ export default function LandingPage() {
             prepara una lista de compra adaptada a una tienda concreta.&rdquo;
           </p>
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Button size="lg">Crear mi primer plan</Button>
-            <Button variant="outline" size="lg">
-              Ver una tienda demo
-            </Button>
+            <Link href="/registro">
+              <Button size="lg">Crear mi primer plan</Button>
+            </Link>
+            <Link href="/onboarding/tienda">
+              <Button variant="outline" size="lg">
+                Ver una tienda demo
+              </Button>
+            </Link>
           </div>
           <p className="mt-5 text-sm text-ink-faint">
             Sin tarjeta. El presupuesto es una restricción real, no una estimación optimista.

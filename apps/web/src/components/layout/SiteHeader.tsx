@@ -1,7 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
+
+import { useAuth } from "@/lib/auth/auth-context";
+import { useLogoutMutation } from "@/lib/query/hooks/use-auth-mutations";
 
 import { Button } from "@/components/ui/Button";
 
@@ -37,6 +41,62 @@ function BasketMark() {
   );
 }
 
+function AuthActions({ onNavigate, layout }: { onNavigate?: () => void; layout: "desktop" | "mobile" }) {
+  const router = useRouter();
+  const { isAuthenticated, isLoading, user } = useAuth();
+  const logoutMutation = useLogoutMutation();
+
+  const containerClass = layout === "desktop" ? "hidden items-center gap-3 md:flex" : "mt-4 flex flex-col gap-2";
+
+  if (isLoading) {
+    return <div className={containerClass} aria-hidden="true" />;
+  }
+
+  if (isAuthenticated) {
+    return (
+      <div className={containerClass}>
+        {layout === "mobile" ? (
+          <p className="px-2 text-sm text-ink-muted">
+            {user?.display_name ?? user?.email}
+          </p>
+        ) : null}
+        <Link href="/households" onClick={onNavigate}>
+          <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
+            Mis hogares
+          </Button>
+        </Link>
+        <Button
+          variant="primary"
+          size={layout === "desktop" ? "sm" : "md"}
+          loading={logoutMutation.isPending}
+          onClick={async () => {
+            await logoutMutation.mutateAsync();
+            onNavigate?.();
+            router.push("/");
+          }}
+        >
+          Cerrar sesión
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={containerClass}>
+      <Link href="/login" onClick={onNavigate}>
+        <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
+          Iniciar sesión
+        </Button>
+      </Link>
+      <Link href="/registro" onClick={onNavigate}>
+        <Button variant="primary" size={layout === "desktop" ? "sm" : "md"}>
+          Crear cuenta gratis
+        </Button>
+      </Link>
+    </div>
+  );
+}
+
 export function SiteHeader() {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -60,14 +120,7 @@ export function SiteHeader() {
           ))}
         </nav>
 
-        <div className="hidden items-center gap-3 md:flex">
-          <Button variant="ghost" size="sm">
-            Iniciar sesión
-          </Button>
-          <Button variant="primary" size="sm">
-            Crear cuenta gratis
-          </Button>
-        </div>
+        <AuthActions layout="desktop" />
 
         <button
           type="button"
@@ -111,10 +164,7 @@ export function SiteHeader() {
               </Link>
             ))}
           </nav>
-          <div className="mt-4 flex flex-col gap-2">
-            <Button variant="outline">Iniciar sesión</Button>
-            <Button variant="primary">Crear cuenta gratis</Button>
-          </div>
+          <AuthActions layout="mobile" onNavigate={() => setMenuOpen(false)} />
         </div>
       ) : null}
     </header>

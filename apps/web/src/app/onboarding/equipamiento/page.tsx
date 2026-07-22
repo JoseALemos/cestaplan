@@ -1,11 +1,26 @@
-import Link from "next/link";
+"use client";
+
+import { useRouter } from "next/navigation";
+
+import { EQUIPMENT_CODES } from "@/lib/api/types";
+import { EQUIPMENT_LABELS } from "@/lib/domain/labels";
+import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 
-const EQUIPMENT = ["Horno", "Freidora de aire", "Microondas", "Robot de cocina", "Tupper para el trabajo"];
-
 export default function EquipamientoPage() {
+  const router = useRouter();
+  const { state, setEquipment } = useOnboarding();
+
+  const toggle = (code: (typeof EQUIPMENT_CODES)[number]) => {
+    setEquipment(
+      state.equipment.includes(code)
+        ? state.equipment.filter((existing) => existing !== code)
+        : [...state.equipment, code],
+    );
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -15,26 +30,28 @@ export default function EquipamientoPage() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2.5">
-        {EQUIPMENT.map((item) => (
+        {EQUIPMENT_CODES.map((code) => (
           <label
-            key={item}
+            key={code}
             className="flex items-center gap-3 rounded-md border border-border px-4 py-3 text-sm text-ink"
           >
-            <input type="checkbox" disabled className="h-4 w-4 accent-primary" />
-            {item}
+            <input
+              type="checkbox"
+              checked={state.equipment.includes(code)}
+              onChange={() => toggle(code)}
+              className="h-4 w-4 accent-primary"
+            />
+            {EQUIPMENT_LABELS[code]}
           </label>
         ))}
-        <p className="mt-1 text-xs text-ink-faint">Pantalla en construcción.</p>
       </CardContent>
       <div className="mt-2 flex items-center justify-between">
-        <Link href="/onboarding/preferencias">
-          <Button variant="ghost" size="sm">
-            Atrás
-          </Button>
-        </Link>
-        <Link href="/onboarding/tienda">
-          <Button size="sm">Continuar</Button>
-        </Link>
+        <Button type="button" variant="ghost" size="sm" onClick={() => router.push("/onboarding/preferencias")}>
+          Atrás
+        </Button>
+        <Button type="button" size="sm" onClick={() => router.push("/onboarding/presupuesto")}>
+          Continuar
+        </Button>
       </div>
     </Card>
   );
