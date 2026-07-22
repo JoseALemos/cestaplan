@@ -27,6 +27,16 @@ Ver la guía completa en [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md).
 | `open-prices-sync` | [`open-prices-sync.json`](open-prices-sync.json) | `/` (raíz) | `apps/api/Dockerfile` | **No** | **Cron diario** (`0 4 * * *` UTC). Reutiliza la imagen del `api`; `startCommand` = `python -m cestaplan_api.scripts.sync_open_prices --all`. Sincroniza precios reales (ODbL) de Open Prices. Sin dominio, sin healthcheck. |
 | `postgres`       | —                    | —              | —                      | No (red privada)| Base de datos gestionada por Railway. No lleva config aquí |
 
+> **Cron opcional `commercial-feed-sync` (authorized_partner).** Si el operador contrata un
+> **feed comercial de precios** de pago (ver `docs/DATA_SOURCES.md` §4.2), puede añadir un
+> segundo servicio cron análogo al de Open Prices reutilizando la imagen del `api`: `startCommand`
+> = `python -m cestaplan_api.scripts.sync_commercial_feed --all`, `restartPolicyType: NEVER`,
+> mismo `DATABASE_URL`, y además las variables `COMMERCIAL_FEED_*` (URL base, clave, cabecera,
+> ruta, paginación y mapeo de campos). Está **desactivado por defecto**: mientras la fuente
+> `commercial-feed` esté `is_enabled=false` o falte configuración, el comando sale sin escribir
+> nada. No lleva dominio ni healthcheck. No se incluye un `infra/railway/*.json` por defecto
+> precisamente porque es opt-in; créalo sólo si vas a usar el feed.
+
 > **Cron `open-prices-sync`.** Es un servicio cron de Railway (no un demonio): `cronSchedule`
 > lo ejecuta una vez al día, arranca el comando, sincroniza y termina (`restartPolicyType:
 > NEVER`). Comparte la imagen del `api` (mismo `Dockerfile`), así que necesita las mismas

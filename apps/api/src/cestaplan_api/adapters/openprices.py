@@ -45,6 +45,9 @@ OP_TIMEOUT_SECONDS = 15.0
 OP_PAGE_SIZE = 100
 #: Safety cap on pages pulled per store (defensive; real stores have very few pages).
 OP_MAX_PAGES = 50
+#: Safety cap on ``/locations`` pages during live discovery (the whole global list is
+#: paginated and filtered client-side; ~65 pages of 100 at the time of writing).
+OP_MAX_LOCATION_PAGES = 500
 
 OP_ADAPTER_KEY = "open_prices"
 OP_DATA_SOURCE_SLUG = "open-prices"
@@ -78,6 +81,52 @@ class OpenPrice:
     price_per: str | None = None
     price_is_discounted: bool = False
     price_without_discount: Decimal | None = None
+
+
+@dataclass(slots=True)
+class OpenPricesLocation:
+    """One OpenStreetMap store location known to Open Prices, parsed and normalized.
+
+    ``price_count`` is how many real price observations Open Prices holds for this location;
+    only locations with ``price_count > 0`` are worth seeding as a real ``Store``. Address
+    fields come straight from OSM (``osm_address_*``); missing values stay ``None``.
+    """
+
+    osm_id: int
+    osm_type: str
+    price_count: int
+    osm_name: str | None = None
+    osm_brand: str | None = None
+    country_code: str | None = None
+    city: str | None = None
+    postcode: str | None = None
+    latitude: Decimal | None = None
+    longitude: Decimal | None = None
+
+
+def _parse_location(item: dict[str, Any]) -> OpenPricesLocation | None:
+    """Parse one ``/locations`` item into an :class:`OpenPricesLocation`, or ``None``.
+
+    A location without a usable ``osm_id`` / ``osm_type`` cannot be addressed as a store and
+    is skipped. ``price_count`` degrades to 0 (an honest "no prices yet"), never fabricated.
+    """
+    osm_id = item.get("osm_id")
+    osm_type = _clean_str(item.get("osm_type"))
+    if not isinstance(osm_id, int) or not osm_type:
+        return None
+    price_count = item.get("price_count")
+    return OpenPricesLocation(
+        osm_id=osm_id,
+        osm_type=osm_type.upper(),
+        price_count=price_count if isinstance(price_count, int) else 0,
+        osm_name=_clean_str(item.get("osm_name")),
+        osm_brand=_clean_str(item.get("osm_brand")),
+        country_code=_clean_str(item.get("osm_address_country_code")),
+        city=_clean_str(item.get("osm_address_city")),
+        postcode=_clean_str(item.get("osm_address_postcode")),
+        latitude=_decimal_or_none(item.get("osm_lat")),
+        longitude=_decimal_or_none(item.get("osm_lon")),
+    )
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -183,9 +232,9 @@ class OpenPricesAdapter(RetailerAdapter):
             attribution_text=OP_ATTRIBUTION_TEXT,
         )
 
-    def _get(self, params: dict[str, Any]) -> httpx.Response | None:
-        """Issue one GET to ``/prices``; return the response or ``None`` on any HTTP error."""
-        url = f"{OP_API_BASE}/prices"
+    def _get(self, params: dict[str, Any], *, path: str = "/prices") -> httpx.Response | None:
+        """Issue one GET to ``path`` (default ``/prices``); ``None`` on any HTTP error."""
+        url = f"{OP_API_BASE}{path}"
         headers = {"User-Agent": OP_USER_AGENT}
         try:
             if self._client is not None:
@@ -228,6 +277,43 @@ class OpenPricesAdapter(RetailerAdapter):
                 if isinstance(item, dict):
                     parsed = _parse_price(item)
                     if parsed is not None:
+                        collected.append(parsed)
+            pages = payload.get("pages")
+            if not isinstance(pages, int) or page >= pages:
+                break
+            page += 1
+        return collected
+
+    def fetch_locations(self, country_code: str = "ES") -> list[OpenPricesLocation]:
+        """Pull every Open Prices store location for a country (paginated, client-side filter).
+
+        Open Prices ignores the country query filter server-side, so the whole ``/locations``
+        list is paginated and filtered here by ``osm_address_country_code``. Returns the parsed
+        locations (any ``price_count``); on any network/HTTP/parse problem it stops and returns
+        whatever it gathered so far (partial success, never a crash, never fabricated data).
+        """
+        wanted = country_code.strip().upper()
+        collected: list[OpenPricesLocation] = []
+        page = 1
+        while page <= OP_MAX_LOCATION_PAGES:
+            response = self._get(
+                {"size": OP_PAGE_SIZE, "page": page}, path="/locations"
+            )
+            if response is None or response.status_code != 200:
+                break
+            try:
+                payload: Any = response.json()
+            except (ValueError, UnicodeDecodeError):
+                break
+            if not isinstance(payload, dict):
+                break
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if isinstance(item, dict):
+                    parsed = _parse_location(item)
+                    if parsed is not None and (parsed.country_code or "").upper() == wanted:
                         collected.append(parsed)
             pages = payload.get("pages")
             if not isinstance(pages, int) or page >= pages:

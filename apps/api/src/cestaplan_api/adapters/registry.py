@@ -13,6 +13,7 @@ from cestaplan_api.adapters.base import (
     AdapterStatus,
     RetailerAdapter,
 )
+from cestaplan_api.adapters.commercial_feed import CommercialFeedAdapter
 from cestaplan_api.adapters.demo import DemoRetailerAdapter
 from cestaplan_api.adapters.files import (
     CsvRetailerAdapter,
@@ -40,6 +41,7 @@ def _build_registry() -> dict[str, RetailerAdapter]:
         ManualRetailerAdapter(),
         OpenFoodFactsAdapter(),
         OpenPricesAdapter(),
+        CommercialFeedAdapter(),
         MercadonaCommunityAdapter(),
         AldiAdapter(),
         LidlAdapter(),

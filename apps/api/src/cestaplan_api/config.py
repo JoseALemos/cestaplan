@@ -58,6 +58,38 @@ class Settings(BaseSettings):
     # Default EMPTY -> estimated_cost stays NULL (a cost is never fabricated).
     openai_price_table: str = ""
 
+    # --- Commercial price feed (authorized_partner connector) ---
+    # A GENERIC, config-driven connector to a paid third-party price API the operator
+    # subscribes to (RadarSuper / Pepesto / …). Our code only CONSUMES an authorized API
+    # with the operator's key; it does NOT scrape. DISABLED by default: empty base URL / key
+    # means "unconfigured" and the connector refuses to run (see services/commercial_feed_sync).
+    commercial_feed_base_url: str = ""
+    commercial_feed_api_key: str = ""
+    # Header used to send the key, "Name: Prefix" (prefix optional). Examples:
+    #   "Authorization: Bearer"  ->  Authorization: Bearer <key>
+    #   "x-api-key"              ->  x-api-key: <key>
+    commercial_feed_auth_header: str = "Authorization: Bearer"
+    # Endpoint path (appended to base URL) that lists priced products.
+    commercial_feed_products_path: str = "/products"
+    # Pagination style of the products endpoint: "none" | "page" | "offset".
+    commercial_feed_pagination: Literal["none", "page", "offset"] = "none"
+    commercial_feed_page_size: int = 100
+    # Dotted path to the array of items inside the JSON response ("" = the response is the
+    # array itself; common wrappers items/data/products/results are auto-detected).
+    commercial_feed_items_path: str = ""
+    # JSON object mapping CANONICAL field -> the provider's JSON field (dotted path allowed).
+    # Canonical fields: barcode, product_ref, product_name, brand, amount, currency,
+    #   unit_price, date, store_ref, category, promo_price, package_quantity, package_unit.
+    # Default EMPTY -> the connector stays unconfigured (a record is never fabricated).
+    #   e.g. {"barcode":"ean","product_name":"name","amount":"price","unit_price":"unit_price"}
+    commercial_feed_mapping: str = ""
+    # Human-readable source name / attribution stored on each price and the DataSource row.
+    commercial_feed_source_name: str = "Feed comercial autorizado"
+    commercial_feed_attribution: str = (
+        "Precios cedidos por un proveedor comercial autorizado, licenciados por el operador."
+    )
+    commercial_feed_license_code: str = "proprietary"
+
     # --- Cloud metering / quotas (enforced only when deployment_mode == "cloud") ---
     # A value <= 0 disables that particular limit.
     cloud_monthly_generation_limit: int = 100
@@ -94,6 +126,37 @@ class Settings(BaseSettings):
             if isinstance(prices, dict):
                 table[str(model)] = {str(k): str(v) for k, v in prices.items()}
         return table
+
+    @property
+    def commercial_feed_field_map(self) -> dict[str, str]:
+        """Parsed ``commercial_feed_mapping`` (canonical field -> provider field).
+
+        ``{}`` when unset/invalid — which keeps the connector unconfigured (a record is
+        never fabricated from an empty mapping).
+        """
+        raw = self.commercial_feed_mapping.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in parsed.items()
+            if isinstance(k, str) and isinstance(v, str) and v.strip()
+        }
+
+    @property
+    def commercial_feed_configured(self) -> bool:
+        """Whether the commercial feed has the minimum config to run (base URL + key + map)."""
+        return bool(
+            self.commercial_feed_base_url.strip()
+            and self.commercial_feed_api_key.strip()
+            and self.commercial_feed_field_map
+        )
 
 
 @lru_cache

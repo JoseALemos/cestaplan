@@ -5,7 +5,7 @@
     "dockerfilePath": "apps/api/Dockerfile"
   },
   "deploy": {
-    "startCommand": "python -m cestaplan_api.scripts.sync_open_prices --all",
+    "startCommand": "python -m cestaplan_api.scripts.sync_all_sources",
     "cronSchedule": "0 4 * * *",
     "numReplicas": 1,
     "restartPolicyType": "NEVER"

@@ -12,6 +12,8 @@ live figure). Coordinates/city/postcode come straight from OSM via Open Prices.
 
 from __future__ import annotations
 
+import re
+
 #: {ChainName: (retailer_slug, [store dicts])}. Retailer display name is the ChainName.
 OPEN_PRICES_CHAINS: dict[str, str] = {
     "Mercadona": "mercadona",
@@ -21,6 +23,38 @@ OPEN_PRICES_CHAINS: dict[str, str] = {
     "Dia": "dia",
     "Alcampo": "alcampo",
 }
+
+#: Whole-word brand/name keywords per chain, used by the live ``--discover`` mode to map an
+#: Open Prices OSM location to one of the 6 chains. Word-boundary matching keeps ``\bdia\b``
+#: from matching "media"/"diagonal" and never matches Deza (deliberately absent → not seeded).
+_CHAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Mercadona": ("mercadona",),
+    "Aldi": ("aldi",),
+    "Lidl": ("lidl",),
+    "Carrefour": ("carrefour",),
+    "Dia": ("dia",),
+    "Alcampo": ("alcampo",),
+}
+
+_CHAIN_PATTERNS: dict[str, re.Pattern[str]] = {
+    chain: re.compile(
+        r"\b(?:" + "|".join(re.escape(kw) for kw in kws) + r")\b", re.IGNORECASE
+    )
+    for chain, kws in _CHAIN_KEYWORDS.items()
+}
+
+
+def match_chain(brand: str | None, name: str | None) -> str | None:
+    """Return the ChainName an OSM location's brand/name belongs to, or ``None``.
+
+    Matches the chain keywords as whole words against ``"{brand} {name}"``; the first of the
+    6 supported chains that matches wins. Deza (and everything else) yields ``None``.
+    """
+    haystack = f"{brand or ''} {name or ''}"
+    for chain, pattern in _CHAIN_PATTERNS.items():
+        if pattern.search(haystack):
+            return chain
+    return None
 
 #: {ChainName: [ {osm_id, osm_type, name, city, pc, lat, lon, price_count} ]}
 OPEN_PRICES_STORES: dict[str, list[dict[str, object]]] = {

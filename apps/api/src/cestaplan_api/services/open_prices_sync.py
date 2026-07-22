@@ -29,6 +29,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cestaplan_api.adapters.openfoodfacts import OpenFoodFactsAdapter
 from cestaplan_api.adapters.openprices import (
     OP_ADAPTER_KEY,
     OP_ATTRIBUTION_TEXT,
@@ -44,10 +45,12 @@ from cestaplan_api.models import (
     DataSource,
     Product,
     ProductBarcode,
+    ProductNutrition,
     ProductPrice,
     Retailer,
     Store,
 )
+from cestaplan_api.services.enrichment import enrich_product, off_source_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,10 @@ class SyncSummary:
     skipped_no_barcode: int = 0
     products_created: int = 0
     barcodes_created: int = 0
+    products_enriched: int = 0
+    #: Product ids that carried a priced barcode this run (candidates for OFF enrichment).
+    #: Internal bookkeeping — not part of the serialized summary.
+    touched_product_ids: set[int] = field(default_factory=set)
     errors: list[str] = field(default_factory=list)
     attribution: str = OP_ATTRIBUTION_TEXT
     license_code: str = OP_LICENSE_CODE
@@ -83,6 +90,7 @@ class SyncSummary:
             "skipped_no_barcode": self.skipped_no_barcode,
             "products_created": self.products_created,
             "barcodes_created": self.barcodes_created,
+            "products_enriched": self.products_enriched,
             "errors": list(self.errors),
             "attribution": self.attribution,
             "license_code": self.license_code,
@@ -319,6 +327,7 @@ def sync_store(
             summary.products_created += 1
         if _ensure_barcode(db, product, price.barcode):
             summary.barcodes_created += 1
+        summary.touched_product_ids.add(product.id)
         # Flush so the just-created product/barcode is visible to the dedup SELECTs of
         # later prices in this same batch (append-only history is preserved).
         db.flush()
@@ -391,3 +400,155 @@ def sync_all(
     """Sync every Open-Prices-linked store. Returns one :class:`SyncSummary` per store."""
     adapter = adapter or OpenPricesAdapter()
     return [sync_store(db, store, adapter=adapter) for store in open_prices_stores(db)]
+
+
+# --------------------------------------------------------------------------- #
+# OFF enrichment of the real products Open Prices created ("data nutrition")
+# --------------------------------------------------------------------------- #
+def _product_has_nutrition(db: Session, product_id: int) -> bool:
+    return (
+        db.execute(
+            select(ProductNutrition.id).where(ProductNutrition.product_id == product_id)
+        ).first()
+        is not None
+    )
+
+
+def enrich_products(
+    db: Session,
+    product_ids: set[int] | list[int],
+    *,
+    off_adapter: OpenFoodFactsAdapter | None = None,
+    skip_enriched: bool = True,
+) -> int:
+    """Enrich the given real products from Open Food Facts (data only, **never prices**).
+
+    Reuses the enrichment service to fill nutrition/allergens/brand/image/category where OFF
+    has the barcode. Idempotent and graceful: an OFF 404/network miss leaves the product
+    un-enriched (no crash). When ``skip_enriched`` is set, products that already carry a
+    ``ProductNutrition`` row are left untouched (keeps the daily cron cheap and respectful).
+    Returns the number of products where OFF data was applied.
+    """
+    if not off_source_enabled(db):
+        return 0
+    off_adapter = off_adapter or OpenFoodFactsAdapter()
+    applied = 0
+    for pid in product_ids:
+        if skip_enriched and _product_has_nutrition(db, pid):
+            continue
+        product = db.get(Product, pid)
+        if product is None or product.deleted_at is not None:
+            continue
+        result = enrich_product(db, product, apply=True, adapter=off_adapter)
+        if result.applied:
+            applied += 1
+    return applied
+
+
+def sync_and_enrich_store(
+    db: Session,
+    store: Store,
+    *,
+    op_adapter: OpenPricesAdapter | None = None,
+    off_adapter: OpenFoodFactsAdapter | None = None,
+    enrich: bool = True,
+    now: datetime | None = None,
+) -> SyncSummary:
+    """Sync one store's Open Prices, then (optionally) OFF-enrich the products it touched.
+
+    ``enrich`` defaults on (the CLI/cron path). Enrichment is gated by the OFF source flag,
+    idempotent and graceful — prices are never taken from OFF. Returns the same
+    :class:`SyncSummary`, with ``products_enriched`` set.
+    """
+    summary = sync_store(db, store, adapter=op_adapter, now=now)
+    if enrich and summary.touched_product_ids and off_source_enabled(db):
+        summary.products_enriched = enrich_products(
+            db, summary.touched_product_ids, off_adapter=off_adapter
+        )
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+# "Sync everything" orchestration (Open Prices → OFF enrichment), gated by flags
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class OrchestrationSummary:
+    """Combined outcome of the daily "sync everything" job across the open sources."""
+
+    open_prices_enabled: bool = True
+    openfoodfacts_enabled: bool = True
+    stores_synced: int = 0
+    prices_fetched: int = 0
+    prices_inserted: int = 0
+    products_created: int = 0
+    products_enriched: int = 0
+    #: {ChainName: {stores, prices_inserted, products_enriched}} for the per-chain report.
+    per_chain: dict[str, dict[str, int]] = field(default_factory=dict)
+    store_results: list[dict[str, object]] = field(default_factory=list)
+    attribution: str = OP_ATTRIBUTION_TEXT
+    license_code: str = OP_LICENSE_CODE
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "open_prices_enabled": self.open_prices_enabled,
+            "openfoodfacts_enabled": self.openfoodfacts_enabled,
+            "stores_synced": self.stores_synced,
+            "prices_fetched": self.prices_fetched,
+            "prices_inserted": self.prices_inserted,
+            "products_created": self.products_created,
+            "products_enriched": self.products_enriched,
+            "per_chain": {k: dict(v) for k, v in self.per_chain.items()},
+            "store_results": list(self.store_results),
+            "attribution": self.attribution,
+            "license_code": self.license_code,
+        }
+
+
+def sync_all_and_enrich(
+    db: Session,
+    *,
+    op_adapter: OpenPricesAdapter | None = None,
+    off_adapter: OpenFoodFactsAdapter | None = None,
+    enrich: bool = True,
+) -> OrchestrationSummary:
+    """Run the whole daily job: Open Prices sync for every linked store → OFF enrichment.
+
+    Gated by the ``DataSource.is_enabled`` flags: a disabled Open Prices source skips the sync
+    entirely; a disabled Open Food Facts source (or ``enrich=False``) skips enrichment. Prices
+    are never taken from OFF. Returns a combined, per-chain :class:`OrchestrationSummary`.
+    """
+    result = OrchestrationSummary()
+    result.open_prices_enabled = open_prices_enabled(db)
+    result.openfoodfacts_enabled = off_source_enabled(db)
+    if not result.open_prices_enabled:
+        return result
+
+    op_adapter = op_adapter or OpenPricesAdapter()
+    do_enrich = enrich and result.openfoodfacts_enabled
+    if do_enrich:
+        off_adapter = off_adapter or OpenFoodFactsAdapter()
+
+    for store in open_prices_stores(db):
+        summary = sync_and_enrich_store(
+            db,
+            store,
+            op_adapter=op_adapter,
+            off_adapter=off_adapter if do_enrich else None,
+            enrich=do_enrich,
+        )
+        retailer = db.get(Retailer, store.retailer_id)
+        chain = retailer.name if retailer is not None else "?"
+        bucket = result.per_chain.setdefault(
+            chain, {"stores": 0, "prices_inserted": 0, "products_enriched": 0}
+        )
+        bucket["stores"] += 1
+        bucket["prices_inserted"] += summary.inserted
+        bucket["products_enriched"] += summary.products_enriched
+
+        result.stores_synced += 1
+        result.prices_fetched += summary.fetched
+        result.prices_inserted += summary.inserted
+        result.products_created += summary.products_created
+        result.products_enriched += summary.products_enriched
+        result.store_results.append(summary.to_dict())
+    return result

@@ -29,7 +29,12 @@ from sqlalchemy import func, select
 from cestaplan_api.adapters.registry import list_adapters
 from cestaplan_api.deps import AdminUser, DbSession, verify_csrf
 from cestaplan_api.models import DataImport, DataSource, Product, Store
-from cestaplan_api.services import enrichment, importer, open_prices_sync
+from cestaplan_api.services import (
+    commercial_feed_sync,
+    enrichment,
+    importer,
+    open_prices_sync,
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -325,6 +330,78 @@ def sync_open_prices(
         "attribution": open_prices_sync.OP_ATTRIBUTION_TEXT,
         "license_code": open_prices_sync.OP_LICENSE_CODE,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Commercial feed sync (authorized_partner — licensed vendor prices, opt-in)
+# --------------------------------------------------------------------------- #
+class CommercialFeedSyncIn(BaseModel):
+    """Body of an on-demand commercial-feed sync (optional single store)."""
+
+    store_id: uuid.UUID | None = Field(default=None)
+
+
+@router.post(
+    "/sources/commercial-feed/sync",
+    dependencies=[Depends(verify_csrf)],
+)
+def sync_commercial_feed(
+    body: CommercialFeedSyncIn, admin: AdminUser, db: DbSession
+) -> dict[str, Any]:
+    """Pull real prices from the authorized commercial feed for all linked stores (or one).
+
+    Gated by the commercial-feed ``DataSource.is_enabled`` flag **and** the connector being
+    configured (base URL + key + mapping): a 409 is returned when disabled or unconfigured.
+    Prices are real (``is_synthetic=False``, ``source_type='authorized_partner'``), append-only
+    and idempotent; the operator licenses the feed and the vendor bears sourcing.
+    """
+    if not commercial_feed_sync.commercial_feed_enabled(db):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="El feed comercial está deshabilitado o sin configurar",
+        )
+
+    if body.store_id is not None:
+        store = db.execute(
+            select(Store).where(Store.public_id == body.store_id)
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+        stores = [store]
+    else:
+        stores = commercial_feed_sync.commercial_feed_stores(db)
+
+    summaries = [
+        commercial_feed_sync.sync_and_enrich_store(db, store) for store in stores
+    ]
+    db.flush()
+    return {
+        "stores_synced": len(summaries),
+        "inserted": sum(s.inserted for s in summaries),
+        "fetched": sum(s.fetched for s in summaries),
+        "products_enriched": sum(s.products_enriched for s in summaries),
+        "results": [s.to_dict() for s in summaries],
+        "attribution": commercial_feed_sync.get_settings().commercial_feed_attribution,
+        "license_code": commercial_feed_sync.get_settings().commercial_feed_license_code,
+    }
+
+
+@router.post("/sources/sync-all", dependencies=[Depends(verify_csrf)])
+def sync_all_sources(admin: AdminUser, db: DbSession) -> dict[str, Any]:
+    """Run the daily "sync everything" job: Open Prices sync → Open Food Facts enrichment.
+
+    Gated by each source's ``DataSource.is_enabled`` flag — a disabled source is skipped (the
+    response reflects which ran). Prices are real (``is_synthetic=False``, ODbL); OFF only ever
+    contributes product data, never a price. The opt-in commercial feed (``authorized_partner``)
+    is included only when it is enabled + configured. Returns the combined per-chain summary.
+    """
+    result = open_prices_sync.sync_all_and_enrich(db)
+    payload = result.to_dict()
+    # The authorized-partner feed only participates when explicitly enabled + configured.
+    commercial = commercial_feed_sync.sync_all(db)
+    payload["commercial_feed"] = commercial.to_dict()
+    db.flush()
+    return payload
 
 
 # --------------------------------------------------------------------------- #

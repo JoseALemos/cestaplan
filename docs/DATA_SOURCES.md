@@ -47,6 +47,7 @@ Todos los adaptadores implementan el **contrato único `RetailerAdapter`** (ver
 | `JsonRetailerAdapter` | `admin_import` | **Activo** | Sí | Importa desde JSON con el mismo modelo de campos que el CSV. |
 | `ManualRetailerAdapter` | `manual_entry` | **Activo** | Sí | Precios introducidos a mano por el usuario para un producto/tienda. |
 | `OpenFoodFactsAdapter` | `open_dataset` | **Activo** | Sí | Nutrición, alérgenos, barcode, ingredientes, categorías, marcas e imagen (si licencia). **Nunca precios.** |
+| `CommercialFeedAdapter` | `authorized_partner` | **Experimental** | **No (desactivado)** | Conector genérico a un **feed comercial de precios** de pago que el operador contrata (RadarSuper/Pepesto/…). Config-driven (URL, clave, cabecera, mapeo de campos). Sólo **consume** una API autorizada con la clave del operador; **no** hace scraping. Ver §4.2. |
 | `MercadonaCommunityAdapter` | `community_connector` | **Experimental** | **No (desactivado)** | Conector comunitario de ejemplo. Requiere activación explícita por flag. No scraping ni elusión anti-bot. |
 | `AldiRetailerAdapter` | — | Esqueleto | No | Estructura sin implementación. |
 | `LidlRetailerAdapter` | — | Esqueleto | No | Estructura sin implementación. |
@@ -154,6 +155,83 @@ sólo lo que la API devuelve; los campos ausentes quedan `null`.
 - **Visibilidad.** `GET /retailers` y `/retailers/{id}/stores` sólo devuelven cadenas/tiendas
   con **al menos un producto con precio**; las vacías (Deza, o tiendas sembradas pero aún no
   sincronizadas) quedan ocultas hasta tener precios reales.
+
+### 4.2 Feed comercial (`authorized_partner`) — `CommercialFeedAdapter`
+
+Conector **genérico y opcional** a una **API de precios comercial de pago** que el operador
+**contrata** a un proveedor tercero (RadarSuper, Pepesto, u otro agregador de precios de super).
+CestaPlan **sólo consume** esa API con la clave del operador; **no** hace scraping, **no** elude
+anti-bot y **nunca** fabrica un precio (una fila sin importe o sin identidad de producto se
+descarta). Es **config-driven**: cualquier proveedor encaja sin tocar código, definiendo por
+configuración la URL base, la cabecera de autenticación, la ruta del endpoint, el estilo de
+paginación y un **mapeo de campos** de su JSON a los campos canónicos.
+
+- **Desactivado por defecto.** El adaptador (`adapter_key='commercial_feed'`,
+  `source_type='authorized_partner'`, `get_price=True`) reporta `enabled=false` mientras no haya
+  URL base + clave + mapeo. Su fila `DataSource` (`slug='commercial-feed'`) se crea
+  `is_enabled=false`; activarla es una acción deliberada del operador. El *gate* real de ejecución
+  es `DataSource.is_enabled` **Y** que el conector esté configurado.
+- **Nota legal.** El **operador licencia el feed** con su proveedor y bajo sus términos; el
+  **proveedor asume el origen** de los datos (sourcing). CestaPlan sólo es el consumidor
+  autorizado. Por defecto los precios se marcan `license_code='proprietary'` y no se
+  redistribuyen fuera del despliegue del operador.
+
+**Configuración (variables de entorno / `config.py`).**
+
+| Variable | Significado | Ejemplo |
+|---|---|---|
+| `COMMERCIAL_FEED_BASE_URL` | URL base de la API del proveedor. | `https://api.pepesto.com` |
+| `COMMERCIAL_FEED_API_KEY` | Clave del operador (secreto). | `sk_live_…` |
+| `COMMERCIAL_FEED_AUTH_HEADER` | Cabecera de la clave, `"Nombre: Prefijo"` (prefijo opcional). | `Authorization: Bearer` · `x-api-key` |
+| `COMMERCIAL_FEED_PRODUCTS_PATH` | Ruta del endpoint que lista productos con precio. | `/v1/products` |
+| `COMMERCIAL_FEED_PAGINATION` | Estilo de paginación: `none` \| `page` \| `offset`. | `page` |
+| `COMMERCIAL_FEED_PAGE_SIZE` | Tamaño de página (para `page`/`offset`). | `100` |
+| `COMMERCIAL_FEED_ITEMS_PATH` | Ruta (con puntos) al array de items en la respuesta (`""` = la respuesta es el array; se autodetectan `items`/`data`/`products`/`results`). | `products` |
+| `COMMERCIAL_FEED_MAPPING` | JSON `{campo_canónico: campo_del_proveedor}` (ruta con puntos permitida). | ver abajo |
+| `COMMERCIAL_FEED_SOURCE_NAME` | Nombre legible de la fuente (por precio y en `DataSource`). | `Feed comercial autorizado` |
+| `COMMERCIAL_FEED_ATTRIBUTION` | Texto de atribución del operador. | `Precios cedidos por proveedor autorizado.` |
+| `COMMERCIAL_FEED_LICENSE_CODE` | Licencia de los datos (por defecto `proprietary`). | `proprietary` |
+
+Campos canónicos admitidos en el mapeo: `barcode`, `product_ref` (id de producto del proveedor,
+alternativa al barcode como identidad), `product_name`, `brand`, `amount` (**precio, obligatorio**),
+`currency`, `unit_price`, `date` (fecha/hora de observación; si falta, se observa a medianoche UTC
+del día de la ejecución, para idempotencia diaria), `store_ref`, `category`, `promo_price`
+(si es menor que `amount` genera una nota de promoción), `package_quantity`, `package_unit`.
+
+**Ejemplo trabajado (JSON unificado tipo Pepesto).** El proveedor devuelve
+`{"products": [ {"name": "...", "ean": "...", "price": 0.95, "unit_price": 0.95, "promo_price": 1.50, "image": "..."}, … ]}`.
+Configuración:
+
+```bash
+COMMERCIAL_FEED_BASE_URL=https://api.pepesto.com
+COMMERCIAL_FEED_API_KEY=sk_live_xxx
+COMMERCIAL_FEED_AUTH_HEADER="Authorization: Bearer"
+COMMERCIAL_FEED_PRODUCTS_PATH=/v1/products
+COMMERCIAL_FEED_PAGINATION=page
+COMMERCIAL_FEED_ITEMS_PATH=products
+COMMERCIAL_FEED_MAPPING='{"barcode":"ean","product_name":"name","amount":"price","unit_price":"unit_price","promo_price":"promo_price","category":"category"}'
+```
+
+(El campo `image` no se ingesta como precio ni como campo canónico; la imagen se rellena, si
+procede, vía enriquecimiento de Open Food Facts.)
+
+**Cómo activarlo.**
+
+1. Configura las variables anteriores en el servicio `api` (y en el cron, si lo usas).
+2. Enlaza un `Retailer` real (`adapter_key='commercial_feed'`) y al menos una `Store`.
+3. Habilita la fuente: pon `DataSource.is_enabled=true` para `slug='commercial-feed'`.
+
+**Sincronización.** *Append-only* e **idempotente** (`(tienda, producto, observed_at)` ya
+presente se omite); precios reales (`source_type='authorized_partner'`, `is_synthetic=false`,
+`Decimal`) con `import_id` de un lote `DataImport`. Tras sincronizar, enriquecimiento opcional
+con OFF (sólo datos, nunca precios).
+
+- **Comando / cron:** `python -m cestaplan_api.scripts.sync_commercial_feed --all`
+  (sale sin escribir si está deshabilitado o sin configurar). También participa en
+  `sync_all_sources` **sólo** cuando está habilitado + configurado.
+- **On-demand (admin):** `POST /api/v1/admin/sources/commercial-feed/sync`
+  (require_admin + CSRF), con `store_id` opcional. Se rechaza con **409** si la fuente está
+  deshabilitada o sin configurar.
 
 ---
 
