@@ -17,6 +17,7 @@ from cestaplan_api.adapters.base import (
     RetailerAdapter,
     StoreSelector,
 )
+from cestaplan_api.adapters.openfoodfacts import OffProduct, OpenFoodFactsAdapter
 from cestaplan_api.adapters.registry import (
     ADAPTER_REGISTRY,
     get_adapter,
@@ -30,6 +31,8 @@ __all__ = [
     "AdapterStatus",
     "NormalizedRecord",
     "NotSupportedError",
+    "OffProduct",
+    "OpenFoodFactsAdapter",
     "RawRow",
     "RetailerAdapter",
     "StoreSelector",

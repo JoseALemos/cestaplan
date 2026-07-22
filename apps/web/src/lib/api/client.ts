@@ -37,7 +37,12 @@ export class ApiError extends Error {
 }
 
 export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
-  /** JSON-serialisable request body. Do not pass raw money values as numbers — money travels as string. */
+  /**
+   * JSON-serialisable request body, or a `FormData` instance for multipart
+   * uploads (admin imports). `FormData` bodies are passed through as-is —
+   * the browser sets its own `Content-Type` with the multipart boundary.
+   * Do not pass raw money values as numbers — money travels as string.
+   */
   body?: unknown;
   /** CSRF token override for mutating requests. Defaults to reading the `cestaplan_csrf` cookie. */
   csrfToken?: string;
@@ -72,8 +77,10 @@ export async function apiFetch<TResponse>(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+
   const requestHeaders = new Headers(headers);
-  if (body !== undefined && !requestHeaders.has("Content-Type")) {
+  if (body !== undefined && !isFormData && !requestHeaders.has("Content-Type")) {
     requestHeaders.set("Content-Type", "application/json");
   }
   if (isMutatingMethod(method)) {
@@ -92,7 +99,7 @@ export async function apiFetch<TResponse>(
       headers: requestHeaders,
       credentials: "include",
       signal: controller.signal,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body),
     });
 
     if (response.status === 204) {

@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { useAuth } from "@/lib/auth/auth-context";
 import { useLogoutMutation } from "@/lib/query/hooks/use-auth-mutations";
+import { useIsAdminQuery } from "@/lib/query/hooks/use-admin";
 
 import { Button } from "@/components/ui/Button";
 
@@ -45,6 +46,7 @@ function AuthActions({ onNavigate, layout }: { onNavigate?: () => void; layout: 
   const router = useRouter();
   const { isAuthenticated, isLoading, user } = useAuth();
   const logoutMutation = useLogoutMutation();
+  const { isAdmin } = useIsAdminQuery();
 
   const containerClass = layout === "desktop" ? "hidden items-center gap-3 md:flex" : "mt-4 flex flex-col gap-2";
 
@@ -65,6 +67,13 @@ function AuthActions({ onNavigate, layout }: { onNavigate?: () => void; layout: 
             Mis hogares
           </Button>
         </Link>
+        {isAdmin ? (
+          <Link href="/admin" onClick={onNavigate}>
+            <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
+              Administración
+            </Button>
+          </Link>
+        ) : null}
         <Button
           variant="primary"
           size={layout === "desktop" ? "sm" : "md"}

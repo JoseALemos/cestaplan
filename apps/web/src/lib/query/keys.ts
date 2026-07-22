@@ -11,4 +11,7 @@ export const queryKeys = {
   runStatus: (runId: string) => ["plans", "runs", runId] as const,
   plan: (mealPlanId: string) => ["plans", mealPlanId] as const,
   groceryList: (mealPlanId: string) => ["plans", mealPlanId, "grocery-list"] as const,
+  adminSources: () => ["admin", "sources"] as const,
+  adminImports: () => ["admin", "imports"] as const,
+  adminImport: (importId: string) => ["admin", "imports", importId] as const,
 };

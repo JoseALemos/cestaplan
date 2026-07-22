@@ -160,3 +160,90 @@ export const RUN_STATUS_ORDER = [
   "optimizing",
   "completed",
 ];
+
+// ---------------------------------------------------------------------------
+// Admin — data imports & catalog sources (FASE 4). Backend enum values for
+// `AdminImportRecord.status` / `AdminSource.status` aren't confirmed on the
+// wire (the openapi.json types them as opaque dicts), so these maps cover
+// every plausible spelling and fall back to the raw code — never a blank
+// label — for anything unmapped.
+// ---------------------------------------------------------------------------
+
+export const IMPORT_STATUS_LABELS: Record<string, string> = {
+  pending: "Pendiente",
+  previewed: "Vista previa",
+  preview: "Vista previa",
+  dry_run: "Vista previa",
+  validated: "Validado",
+  ready: "Listo para confirmar",
+  committed: "Importado",
+  committing: "Importando…",
+  applied: "Importado",
+  rolled_back: "Revertido",
+  rollback: "Revertido",
+  failed: "Con errores",
+  error: "Con errores",
+};
+
+export const IMPORT_STATUS_TONE: Record<string, "success" | "info" | "warning" | "error" | "neutral"> = {
+  pending: "neutral",
+  previewed: "info",
+  preview: "info",
+  dry_run: "info",
+  validated: "warning",
+  ready: "warning",
+  committed: "success",
+  committing: "info",
+  applied: "success",
+  rolled_back: "warning",
+  rollback: "warning",
+  failed: "error",
+  error: "error",
+};
+
+/**
+ * Derives a friendly status for an import record, preferring the raw
+ * `status` field when the API's wording isn't in `IMPORT_STATUS_LABELS`, but
+ * always deferring to `rolled_back_at`/`committed_at` timestamps first since
+ * those are unambiguous regardless of what `status` says.
+ */
+export function importStatusLabel(record: {
+  status?: string;
+  dry_run?: boolean;
+  committed_at?: string | null;
+  rolled_back_at?: string | null;
+}): string {
+  if (record.rolled_back_at) return "Revertido";
+  if (record.committed_at) return "Importado";
+  if (record.status) return IMPORT_STATUS_LABELS[record.status] ?? record.status;
+  return record.dry_run ? "Vista previa" : "Validado";
+}
+
+export function importStatusTone(record: {
+  status?: string;
+  dry_run?: boolean;
+  committed_at?: string | null;
+  rolled_back_at?: string | null;
+}): "success" | "info" | "warning" | "error" | "neutral" {
+  if (record.rolled_back_at) return "warning";
+  if (record.committed_at) return "success";
+  const mapped = record.status ? IMPORT_STATUS_TONE[record.status] : undefined;
+  if (mapped) return mapped;
+  return record.dry_run ? "info" : "warning";
+}
+
+export const SOURCE_STATUS_LABELS: Record<string, string> = {
+  active: "Activo",
+  enabled: "Activo",
+  disabled: "Desactivado",
+  inactive: "Desactivado",
+  experimental: "Experimental",
+  community: "Comunidad",
+  skeleton: "Sin implementar",
+  deprecated: "Obsoleto",
+};
+
+export function sourceStatusLabel(status: string | null | undefined): string {
+  if (!status) return "Desconocido";
+  return SOURCE_STATUS_LABELS[status] ?? status;
+}

@@ -443,3 +443,83 @@ export interface GroceryItemIn {
 export interface SubstituteRequest {
   product_id: Uuid;
 }
+
+// ---------------------------------------------------------------------------
+// Admin — catalog sources & data imports (FASE 4).
+// The live openapi.json declares every admin response as
+// `additionalProperties: true` (an untyped dict) rather than a concrete
+// schema, so these shapes are hand-typed from the FASE 4 brief and kept
+// deliberately loose (`Record<string, unknown>` / index signatures) where the
+// exact backend fields are unconfirmed. Render code must degrade gracefully
+// (optional chaining, generic key/value fallback) instead of assuming a key
+// is present.
+// ---------------------------------------------------------------------------
+
+export interface AdminSourceCapabilities {
+  search: boolean;
+  get_product: boolean;
+  get_price: boolean;
+  get_availability: boolean;
+  store_catalog: boolean;
+  [key: string]: boolean | undefined;
+}
+
+export interface AdminSource {
+  adapter_key: string;
+  version: string;
+  source_type: string;
+  status: string;
+  enabled: boolean;
+  is_community: boolean;
+  requires_network: boolean;
+  /** Shape unconfirmed on the wire — render defensively (string, object, or list of either). */
+  retailers?: unknown[];
+  capabilities: AdminSourceCapabilities;
+  license_code: string | null;
+  attribution_text: string | null;
+  data_source?: Record<string, unknown> | null;
+  last_import?: Record<string, unknown> | null;
+  coverage?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface AdminImportRowError {
+  row: number;
+  field: string | null;
+  message: string;
+  [key: string]: unknown;
+}
+
+/** `POST /admin/imports` multipart body. `dry_run` defaults to `true` server-side. */
+export interface CreateAdminImportInput {
+  file: File;
+  dry_run: boolean;
+  /** Raw JSON text, passed through as-is to the `column_mapping` form field. */
+  column_mapping?: string | null;
+}
+
+/**
+ * Shared shape for the import batch returned by create/get/commit/rollback —
+ * every field beyond `id` may or may not be present depending on the import's
+ * lifecycle stage (a fresh dry-run has no `committed_at`, etc.).
+ */
+export interface AdminImportRecord {
+  id: Uuid;
+  status: string;
+  format?: string;
+  filename?: string;
+  source_type?: string;
+  dry_run: boolean;
+  checksum?: string;
+  counts?: Record<string, number>;
+  errors?: AdminImportRowError[];
+  would_change?: Record<string, unknown>;
+  /** Present on the detail endpoint; absent (or empty) on the list endpoint. */
+  summary?: Record<string, unknown>;
+  created_at: IsoDateTime;
+  committed_at?: IsoDateTime | null;
+  rolled_back_at?: IsoDateTime | null;
+  /** Only present on the rollback response. */
+  deleted_prices?: number;
+  [key: string]: unknown;
+}

@@ -19,6 +19,7 @@ from cestaplan_api.adapters.files import (
     JsonRetailerAdapter,
     ManualRetailerAdapter,
 )
+from cestaplan_api.adapters.openfoodfacts import OpenFoodFactsAdapter
 from cestaplan_api.adapters.skeletons import (
     AlcampoAdapter,
     AldiAdapter,
@@ -36,6 +37,7 @@ def _build_registry() -> dict[str, RetailerAdapter]:
         CsvRetailerAdapter(),
         JsonRetailerAdapter(),
         ManualRetailerAdapter(),
+        OpenFoodFactsAdapter(),
         MercadonaCommunityAdapter(),
         AldiAdapter(),
         LidlAdapter(),

@@ -9,6 +9,9 @@
 
 import { apiFetch } from "./client";
 import type {
+  AdminImportRecord,
+  AdminSource,
+  CreateAdminImportInput,
   EquipmentResponse,
   EquipmentSet,
   FeedbackRequest,
@@ -229,4 +232,44 @@ export function substituteGroceryItem(
     `/api/v1/plans/${mealPlanId}/grocery-list/items/${itemId}/substitute`,
     { method: "POST", body },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Admin — catalog sources & data imports (admin-gated; a 403 means the
+// caller isn't an admin, see `useIsAdminQuery`).
+// ---------------------------------------------------------------------------
+
+export function listAdminSources(): Promise<AdminSource[]> {
+  return apiFetch<AdminSource[]>("/api/v1/admin/sources");
+}
+
+export function listAdminImports(): Promise<AdminImportRecord[]> {
+  return apiFetch<AdminImportRecord[]>("/api/v1/admin/imports");
+}
+
+export function getAdminImport(importId: Uuid): Promise<AdminImportRecord> {
+  return apiFetch<AdminImportRecord>(`/api/v1/admin/imports/${importId}`);
+}
+
+/** Multipart upload. `dry_run: true` validates only — nothing is written until `commitAdminImport`. */
+export function createAdminImport(input: CreateAdminImportInput): Promise<AdminImportRecord> {
+  const form = new FormData();
+  form.set("file", input.file);
+  form.set("dry_run", String(input.dry_run));
+  if (input.column_mapping) {
+    form.set("column_mapping", input.column_mapping);
+  }
+  return apiFetch<AdminImportRecord>("/api/v1/admin/imports", { method: "POST", body: form });
+}
+
+export function commitAdminImport(importId: Uuid): Promise<AdminImportRecord> {
+  return apiFetch<AdminImportRecord>(`/api/v1/admin/imports/${importId}/commit`, {
+    method: "POST",
+  });
+}
+
+export function rollbackAdminImport(importId: Uuid): Promise<AdminImportRecord> {
+  return apiFetch<AdminImportRecord>(`/api/v1/admin/imports/${importId}/rollback`, {
+    method: "POST",
+  });
 }

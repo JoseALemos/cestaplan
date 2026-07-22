@@ -23,12 +23,13 @@ from fastapi import (
     UploadFile,
     status,
 )
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from cestaplan_api.adapters.registry import list_adapters
 from cestaplan_api.deps import AdminUser, DbSession, verify_csrf
-from cestaplan_api.models import DataImport, DataSource
-from cestaplan_api.services import importer
+from cestaplan_api.models import DataImport, DataSource, Product
+from cestaplan_api.services import enrichment, importer
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -197,6 +198,84 @@ def rollback_import(
     detail = _import_detail(di)
     detail["deleted_prices"] = deleted
     return detail
+
+
+# --------------------------------------------------------------------------- #
+# Open Food Facts enrichment (open_dataset — data only, never prices)
+# --------------------------------------------------------------------------- #
+class BarcodeIn(BaseModel):
+    """Body of a barcode enrichment request."""
+
+    barcode: str = Field(min_length=1, max_length=64)
+
+
+class ProductEnrichIn(BaseModel):
+    """Body of a per-product enrichment request (optional explicit barcode)."""
+
+    barcode: str | None = Field(default=None, max_length=64)
+
+
+def _enrichment_response(result: enrichment.EnrichmentResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "found": result.found,
+        "applied": result.applied,
+        "barcode": result.barcode,
+        "product_public_id": result.product_public_id,
+        "matched_products": result.matched_products,
+        "message": result.message,
+        "off_product": result.product,
+        "attribution": result.attribution,
+        "license_code": result.license_code,
+        "source_url": result.source_url,
+    }
+
+
+def _refuse_if_disabled(result: enrichment.EnrichmentResult) -> None:
+    if result.status == "disabled":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=result.message)
+
+
+@router.post("/enrich/barcode", dependencies=[Depends(verify_csrf)])
+def enrich_barcode(
+    body: BarcodeIn, admin: AdminUser, db: DbSession
+) -> dict[str, Any]:
+    """Dry OFF lookup for a barcode: returns the product data + ODbL attribution, no writes.
+
+    Refused with 409 when the Open Food Facts source is disabled.
+    """
+    result = enrichment.enrich_product_by_barcode(db, body.barcode, apply=False)
+    _refuse_if_disabled(result)
+    return _enrichment_response(result)
+
+
+@router.post(
+    "/products/{product_id}/enrich",
+    dependencies=[Depends(verify_csrf)],
+)
+def enrich_product_endpoint(
+    product_id: uuid.UUID,
+    body: ProductEnrichIn,
+    admin: AdminUser,
+    db: DbSession,
+) -> dict[str, Any]:
+    """Apply OFF enrichment to one product: writes barcode/nutrition/brand/image/category.
+
+    Never reads or writes any price. Refused with 409 when OFF is disabled; 404 when the
+    product is unknown.
+    """
+    product = db.execute(
+        select(Product).where(
+            Product.public_id == product_id, Product.deleted_at.is_(None)
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+
+    result = enrichment.enrich_product(db, product, barcode=body.barcode, apply=True)
+    _refuse_if_disabled(result)
+    db.flush()
+    return _enrichment_response(result)
 
 
 # --------------------------------------------------------------------------- #
