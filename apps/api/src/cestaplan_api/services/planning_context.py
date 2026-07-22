@@ -23,6 +23,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cestaplan_api.config import Settings, get_settings
 from cestaplan_api.models import (
     Equipment,
     FavoriteRecipe,
@@ -33,12 +34,14 @@ from cestaplan_api.models import (
     PantryItem,
     Product,
     ProductPrice,
-    Recipe,
     RecipeFeedback,
+)
+from cestaplan_api.services.candidate_providers import (
+    CandidateRequest,
+    get_candidate_provider,
 )
 from cestaplan_engine import (
     BudgetDTO,
-    CandidateRecipeDTO,
     CatalogProductDTO,
     MealRequirementDTO,
     MemberDTO,
@@ -46,7 +49,6 @@ from cestaplan_engine import (
     PackageOptionDTO,
     PantryItemDTO,
     PlanInput,
-    RecipeIngredientDTO,
 )
 
 
@@ -56,8 +58,16 @@ def build_plan_input(
     *,
     seed: int,
     as_of: date | None = None,
+    settings: Settings | None = None,
+    warnings: list[str] | None = None,
 ) -> PlanInput:
-    """Assemble the engine's :class:`PlanInput` for a persisted meal plan."""
+    """Assemble the engine's :class:`PlanInput` for a persisted meal plan.
+
+    Candidate recipes come from the configured provider (OpenAI when AI is enabled,
+    the seed library otherwise). Any AI degradation is appended to ``warnings`` when a
+    sink list is supplied, so the worker can surface it on the plan result.
+    """
+    settings = settings or get_settings()
     household_id = meal_plan.household_id
     effective_as_of = as_of or date.today()
 
@@ -71,14 +81,40 @@ def build_plan_input(
         currency=meal_plan.currency,
     )
 
+    equipment = _build_equipment(db, household_id)
+    catalog = _build_catalog(db)
+
+    provider = get_candidate_provider(settings)
+    bundle = provider.get_candidates(
+        db,
+        CandidateRequest(
+            household_id=household_id,
+            requested_types=requested_types,
+            allow_list=sorted({c.canonical_name for c in catalog}),
+            allergens={a for m in members for a in m.allergens},
+            hard_restrictions={h for m in members for h in m.hard_restrictions},
+            soft_preferences=[p for m in members for p in m.soft_preferences],
+            equipment=equipment,
+            budget_amount=budget.amount,
+            currency=budget.currency,
+            requirement_counts={
+                r.meal_type: r.requested_count
+                for r in requirements
+                if r.requested_count > 0
+            },
+        ),
+    )
+    if warnings is not None:
+        warnings.extend(bundle.warnings)
+
     return PlanInput(
         members=members,
         meal_requirements=requirements,
         budget=budget,
         date_range=(meal_plan.start_date, meal_plan.end_date),
-        available_equipment=_build_equipment(db, household_id),
-        catalog=_build_catalog(db),
-        candidates=_build_candidates(db, requested_types),
+        available_equipment=equipment,
+        catalog=catalog,
+        candidates=bundle.candidates,
         pantry=_build_pantry(db, household_id),
         favorites=_build_favorites(db, household_id),
         conversions=[],
@@ -269,66 +305,6 @@ def _package_option(product: Product, price: ProductPrice) -> PackageOptionDTO:
         confidence_score=price.confidence_score,
         has_price=True,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Candidates (seeded recipes)
-# --------------------------------------------------------------------------- #
-def _build_candidates(
-    db: Session, requested_types: set[str]
-) -> list[CandidateRecipeDTO]:
-    ingredient_allergens = {
-        ing_id: set(codes or [])
-        for ing_id, codes in db.execute(
-            select(Ingredient.id, Ingredient.allergen_codes)
-        ).all()
-    }
-
-    recipes = db.execute(
-        select(Recipe)
-        .where(Recipe.deleted_at.is_(None), Recipe.is_public.is_(True))
-        .order_by(Recipe.id)
-    ).scalars().all()
-
-    candidates: list[CandidateRecipeDTO] = []
-    for recipe in recipes:
-        meal_types = set(recipe.meal_types or [])
-        if requested_types and not (meal_types & requested_types):
-            continue
-
-        ingredients: list[RecipeIngredientDTO] = []
-        declared: set[str] = set()
-        for ri in recipe.ingredients:
-            declared |= ingredient_allergens.get(ri.ingredient_id, set())
-            ingredients.append(
-                RecipeIngredientDTO(
-                    canonical_name=ri.canonical_name,
-                    display_name=ri.display_name or ri.canonical_name,
-                    quantity=ri.quantity,
-                    unit=ri.unit,
-                    optional=ri.optional,
-                    substitution_group=ri.substitution_group,
-                )
-            )
-
-        candidates.append(
-            CandidateRecipeDTO(
-                recipe_id=str(recipe.id),
-                title=recipe.title,
-                description=recipe.description or "",
-                servings=recipe.servings,
-                meal_types=meal_types,  # type: ignore[arg-type]
-                cuisine=recipe.cuisine or "",
-                preference_tags=list(recipe.preference_tags or []),
-                ingredients=ingredients,
-                steps=[s.instruction for s in sorted(recipe.steps, key=lambda s: s.step_number)],
-                preparation_minutes=recipe.preparation_minutes or 0,
-                cooking_minutes=recipe.cooking_minutes or 0,
-                required_equipment=set(recipe.required_equipment or []),
-                allergens_declared=declared,
-            )
-        )
-    return candidates
 
 
 # --------------------------------------------------------------------------- #

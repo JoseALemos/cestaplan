@@ -18,12 +18,28 @@ from collections.abc import Iterator
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import engine, get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
+from cestaplan_api.models import Recipe
 from cestaplan_api.routers import auth, households
+from cestaplan_api.scripts.seed_demo import main as seed_demo_main
 from cestaplan_api.security import login_rate_limiter
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_demo_seed() -> None:
+    """Seed the demo catalogue once per session if the DB has no recipes.
+
+    Catalog/candidate tests read the seeded retailers, stores and recipes; the seed is
+    committed (idempotent wipe-then-insert), so it persists across the transactional tests.
+    """
+    with Session(bind=engine) as check:
+        count = check.scalar(select(func.count()).select_from(Recipe))
+    if not count:
+        seed_demo_main()
 
 
 @pytest.fixture(autouse=True)

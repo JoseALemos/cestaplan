@@ -49,7 +49,10 @@ def _execute(
     db: Session, job: GenerationJob, run: OptimizationRun, meal_plan: MealPlan
 ) -> None:
     _transition(run, job, "collecting_data", started=True)
-    plan_input = build_plan_input(db, meal_plan, seed=run.seed)
+    provider_warnings: list[str] = []
+    plan_input = build_plan_input(
+        db, meal_plan, seed=run.seed, warnings=provider_warnings
+    )
     _apply_bias(plan_input, job.payload)
 
     _transition(run, job, "generating_candidates")
@@ -58,6 +61,8 @@ def _execute(
 
     result = generate_plan(plan_input)
     if isinstance(result, PlanResult):
+        if provider_warnings:
+            result.warnings = [*provider_warnings, *result.warnings]
         persist_plan_result(db, meal_plan, run, result)
         job.status = "completed"
         job.last_error = None

@@ -361,7 +361,8 @@ def _verify(session: Session) -> tuple[dict[str, int], list[str]]:
     for canonical_name, ingredient_id in rows:
         if ingredient_id not in priced_ingredients:
             orphans.append(canonical_name)
-    return live, sorted(set(orphans))
+    # func.count() is typed int | None by SQLAlchemy but never returns NULL; coerce to int.
+    return {key: (value or 0) for key, value in live.items()}, sorted(set(orphans))
 
 
 def main() -> None:
