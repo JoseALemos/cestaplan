@@ -33,6 +33,7 @@ from cestaplan_api.services import (
     commercial_feed_sync,
     enrichment,
     importer,
+    ingredient_matching,
     open_prices_sync,
 )
 
@@ -384,6 +385,39 @@ def sync_commercial_feed(
         "attribution": commercial_feed_sync.get_settings().commercial_feed_attribution,
         "license_code": commercial_feed_sync.get_settings().commercial_feed_license_code,
     }
+
+
+class MapIngredientsIn(BaseModel):
+    """Body of an on-demand ingredient-mapping run (optional single store)."""
+
+    store_id: uuid.UUID | None = Field(default=None)
+
+
+@router.post("/sources/map-ingredients", dependencies=[Depends(verify_csrf)])
+def map_ingredients(
+    body: MapIngredientsIn, admin: AdminUser, db: DbSession
+) -> dict[str, Any]:
+    """Map real chain products onto canonical ingredients and populate the mapping table.
+
+    Conservative + idempotent: only clearly-correct matches are written (each with a
+    confidence), and products already mapped are skipped. Returns the mapped count, a per-chain
+    breakdown, sample mappings, and the resulting **chain-level** ingredient coverage (pricing
+    is by chain, not by single store): how many canonical ingredients are now priced per chain.
+    Never fabricates a price or a doubtful mapping.
+    """
+    store_id: int | None = None
+    if body.store_id is not None:
+        store = db.execute(
+            select(Store).where(Store.public_id == body.store_id)
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+        store_id = store.id
+
+    summary = ingredient_matching.map_real_products(db, store_id=store_id)
+    summary.chain_coverage = ingredient_matching.all_chain_coverage(db)
+    db.flush()
+    return summary.to_dict()
 
 
 @router.post("/sources/sync-all", dependencies=[Depends(verify_csrf)])

@@ -23,6 +23,11 @@ import argparse
 from cestaplan_api.db import SessionLocal
 from cestaplan_api.services.commercial_feed_sync import CommercialFeedRun
 from cestaplan_api.services.commercial_feed_sync import sync_all as sync_commercial_feed_all
+from cestaplan_api.services.ingredient_matching import (
+    MappingSummary,
+    all_chain_coverage,
+    map_real_products,
+)
 from cestaplan_api.services.open_prices_sync import (
     OrchestrationSummary,
     sync_all_and_enrich,
@@ -69,14 +74,32 @@ def _print_commercial(result: CommercialFeedRun) -> None:
         print(f"    {result.attribution}")
 
 
+def _print_mapping(result: MappingSummary) -> None:
+    print(
+        f"  Mapeo ingred.  : analizados={result.scanned} "
+        f"mapeados={result.mapped} sin_coincidencia={result.unmatched}"
+    )
+    for cov in result.chain_coverage:
+        print(
+            f"    {cov['chain']:<11}: "
+            f"{cov['priced_ingredients']}/{cov['total_ingredients']} "
+            "ingredientes con precio"
+        )
+
+
 def run(*, enrich: bool = True) -> int:
     with SessionLocal() as session:
         result = sync_all_and_enrich(session, enrich=enrich)
         # The opt-in commercial feed only runs when enabled + configured (no-op otherwise).
         commercial = sync_commercial_feed_all(session, enrich=enrich)
+        # Map freshly-synced real products to canonical ingredients (after OFF enrichment, so
+        # OFF categories/names are available). Conservative + idempotent; never fabricates.
+        mapping = map_real_products(session)
+        mapping.chain_coverage = all_chain_coverage(session)
         session.commit()
     _print_summary(result)
     _print_commercial(commercial)
+    _print_mapping(mapping)
     return 0
 
 
