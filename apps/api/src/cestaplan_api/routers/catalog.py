@@ -12,12 +12,13 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
+    ProductPrice,
     Recipe,
     Retailer,
     Store,
@@ -35,9 +36,17 @@ def _s(value: Any) -> str | None:
 # --------------------------------------------------------------------------- #
 @router.get("/retailers")
 def list_retailers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
-    """List active retailers (public id, name, synthetic flag)."""
+    """List active retailers that currently have at least one priced product.
+
+    Retailers with no ``ProductPrice`` (e.g. Deza, or chains whose stores are seeded but
+    not yet synced) are hidden until they have real prices. The synthetic demo retailer
+    (MercaEjemplo) has prices and stays visible.
+    """
+    priced_retailer_ids = select(ProductPrice.retailer_id).distinct().scalar_subquery()
     retailers = db.execute(
-        select(Retailer).where(Retailer.is_active.is_(True)).order_by(Retailer.name)
+        select(Retailer)
+        .where(Retailer.is_active.is_(True), Retailer.id.in_(priced_retailer_ids))
+        .order_by(Retailer.name)
     ).scalars().all()
     return [
         {
@@ -60,9 +69,23 @@ def list_stores(
     if retailer is None or not retailer.is_active:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Distribuidor no encontrado")
 
+    # Only stores that currently have at least one priced product, with a per-store count.
+    count_rows = db.execute(
+        select(
+            ProductPrice.store_id,
+            func.count(func.distinct(ProductPrice.product_id)),
+        )
+        .where(ProductPrice.retailer_id == retailer.id)
+        .group_by(ProductPrice.store_id)
+    ).all()
+    price_counts: dict[int, int] = {row[0]: row[1] for row in count_rows}
     stores = db.execute(
         select(Store)
-        .where(Store.retailer_id == retailer.id, Store.is_active.is_(True))
+        .where(
+            Store.retailer_id == retailer.id,
+            Store.is_active.is_(True),
+            Store.id.in_(price_counts.keys()),
+        )
         .order_by(Store.name)
     ).scalars().all()
     return [
@@ -75,6 +98,7 @@ def list_stores(
             "external_store_id": s.external_code,
             "catalog_updated_at": s.catalog_updated_at,
             "price_coverage": _s(s.price_coverage_hint),
+            "priced_product_count": price_counts.get(s.id, 0),
         }
         for s in stores
     ]

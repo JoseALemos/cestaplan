@@ -24,7 +24,16 @@ Ver la guía completa en [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md).
 | `web`            | [`web.json`](web.json)       | `/` (raíz) | `apps/web/Dockerfile`  | Sí             | Next.js (PWA) standalone. Healthcheck `/`. `node apps/web/server.js` |
 | `api`            | [`api.json`](api.json)       | `/` (raíz) | `apps/api/Dockerfile`  | Sí             | FastAPI. Pre-deploy `alembic upgrade head`, health `/health` |
 | `worker`         | [`worker.json`](worker.json) | `/` (raíz) | `apps/api/Dockerfile`  | **No**         | Consume la cola en Postgres. **Sin dominio, sin healthcheck** |
+| `open-prices-sync` | [`open-prices-sync.json`](open-prices-sync.json) | `/` (raíz) | `apps/api/Dockerfile` | **No** | **Cron diario** (`0 4 * * *` UTC). Reutiliza la imagen del `api`; `startCommand` = `python -m cestaplan_api.scripts.sync_open_prices --all`. Sincroniza precios reales (ODbL) de Open Prices. Sin dominio, sin healthcheck. |
 | `postgres`       | —                    | —              | —                      | No (red privada)| Base de datos gestionada por Railway. No lleva config aquí |
+
+> **Cron `open-prices-sync`.** Es un servicio cron de Railway (no un demonio): `cronSchedule`
+> lo ejecuta una vez al día, arranca el comando, sincroniza y termina (`restartPolicyType:
+> NEVER`). Comparte la imagen del `api` (mismo `Dockerfile`), así que necesita las mismas
+> variables de entorno de base de datos (`DATABASE_URL`). Es idempotente y *append-only*:
+> volver a ejecutarlo no duplica observaciones. Para desactivarlo temporalmente sin tocar
+> infraestructura, deshabilita la fuente `open-prices` (`DataSource.is_enabled=false`): el
+> comando saldrá sin escribir nada.
 
 > **El `worker` reutiliza la imagen del `api`.** Ambos servicios construyen el mismo
 > `apps/api/Dockerfile`; solo cambia el `startCommand` (`worker.json` lo fija a

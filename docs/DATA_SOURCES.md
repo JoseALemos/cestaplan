@@ -116,6 +116,45 @@ Usos **prohibidos**:
   autorizada para ese fin en CestaPlan.
 - Redistribuir datos de OFF sin cumplir la atribución y el share-alike de ODbL (ver §5).
 
+### 4.1 Open Prices — precios reales, ODbL (`OpenPricesAdapter`)
+
+**Open Prices** (`https://prices.openfoodfacts.org`) es la base de datos **abierta** de precios
+de Open Food Facts, alimentada por la comunidad a partir de fotos de tickets y etiquetas y
+distribuida bajo **ODbL**. A diferencia de OFF (nunca precios), Open Prices **sí** es una fuente
+de precios legítima, y CestaPlan la consume a través de su **API pública oficial** (lectura sin
+autenticación) con `User-Agent` descriptivo (`CestaPlan/0.0 (+self-hosted)`) y timeout acotado.
+**Nunca** se hace scraping ni elusión anti-bot, y **jamás** se fabrica un precio: un precio es
+sólo lo que la API devuelve; los campos ausentes quedan `null`.
+
+- **Adaptador.** `OpenPricesAdapter` (`adapter_key='open_prices'`, `source_type='open_dataset'`,
+  `get_price=True`). `fetch_store_prices(osm_id, osm_type)` pagina el endpoint `/prices` de una
+  tienda (localizada por OpenStreetMap) y devuelve objetos `OpenPrice` (barcode, importe
+  `Decimal`, moneda, fecha, `price_per`, descuento).
+- **DataSource.** Fila `slug='open-prices'`, `source_type='open_dataset'`, `license_code='ODbL'`,
+  atribución "Precios de Open Food Facts - Open Prices, bajo licencia ODbL.
+  https://prices.openfoodfacts.org", habilitada por defecto (`is_enabled=true`).
+- **Semilla.** `python -m cestaplan_api.scripts.seed_open_prices_stores` crea `Retailer` reales
+  (`is_synthetic=false`) para las 6 cadenas con datos en España — Mercadona, Aldi, Lidl,
+  Carrefour, Dia, Alcampo (**Deza no**, no tiene datos) — y una `Store` real por ubicación OSM
+  (`external_code = osm:{TIPO}/{osm_id}`). Idempotente. Las tiendas nacen **sin precios**.
+- **Sincronización (actualización automática).**
+  `python -m cestaplan_api.scripts.sync_open_prices [--all | --store <public_id>]` extrae los
+  precios de cada tienda vinculada y **añade** observaciones `ProductPrice`
+  (`source_type='open_dataset'`, `is_synthetic=false`, `import_id` de un lote `DataImport`).
+  Es *append-only* e **idempotente**: una observación `(tienda, producto, observed_at)` ya
+  presente se omite. Errores de red/HTTP/parseo → éxito parcial, sin caída.
+- **Programación.** No hay planificador propio en la app: el mecanismo es *comando + cron*.
+  - **Railway:** servicio cron `open-prices-sync` (`infra/railway/open-prices-sync.json`,
+    `cronSchedule: "0 4 * * *"` UTC) que ejecuta `sync_open_prices --all` una vez al día.
+  - **Cron de sistema (self-hosted):** por ejemplo, ejecutar a diario
+    `0 4 * * * cd /ruta/apps/api && uv run python -m cestaplan_api.scripts.sync_open_prices --all`.
+  - **On-demand (admin):** `POST /api/v1/admin/sources/open-prices/sync` (require_admin + CSRF),
+    con `store_id` opcional; devuelve el resumen y la atribución ODbL. Se rechaza con 409 si la
+    fuente `open-prices` está deshabilitada.
+- **Visibilidad.** `GET /retailers` y `/retailers/{id}/stores` sólo devuelven cadenas/tiendas
+  con **al menos un producto con precio**; las vacías (Deza, o tiendas sembradas pero aún no
+  sincronizadas) quedan ocultas hasta tener precios reales.
+
 ---
 
 ## 5. Licencias por dataset (separadas del MIT del código)

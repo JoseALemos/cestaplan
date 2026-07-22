@@ -28,8 +28,8 @@ from sqlalchemy import func, select
 
 from cestaplan_api.adapters.registry import list_adapters
 from cestaplan_api.deps import AdminUser, DbSession, verify_csrf
-from cestaplan_api.models import DataImport, DataSource, Product
-from cestaplan_api.services import enrichment, importer
+from cestaplan_api.models import DataImport, DataSource, Product, Store
+from cestaplan_api.services import enrichment, importer, open_prices_sync
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -276,6 +276,55 @@ def enrich_product_endpoint(
     _refuse_if_disabled(result)
     db.flush()
     return _enrichment_response(result)
+
+
+# --------------------------------------------------------------------------- #
+# Open Prices sync (open_dataset — real prices, ODbL)
+# --------------------------------------------------------------------------- #
+class OpenPricesSyncIn(BaseModel):
+    """Body of an on-demand Open Prices sync (optional single store)."""
+
+    store_id: uuid.UUID | None = Field(default=None)
+
+
+@router.post(
+    "/sources/open-prices/sync",
+    dependencies=[Depends(verify_csrf)],
+)
+def sync_open_prices(
+    body: OpenPricesSyncIn, admin: AdminUser, db: DbSession
+) -> dict[str, Any]:
+    """Pull real prices from Open Prices for all linked stores (or one) and append them.
+
+    Gated by the Open Prices ``DataSource.is_enabled`` flag (409 when disabled). Returns a
+    per-store summary plus the ODbL attribution. Idempotent + append-only (see the sync
+    service); prices are real (``is_synthetic=False``), never fabricated.
+    """
+    if not open_prices_sync.open_prices_enabled(db):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="La fuente Open Prices está deshabilitada"
+        )
+
+    if body.store_id is not None:
+        store = db.execute(
+            select(Store).where(Store.public_id == body.store_id)
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Tienda no encontrada")
+        stores = [store]
+    else:
+        stores = open_prices_sync.open_prices_stores(db)
+
+    summaries = [open_prices_sync.sync_store(db, store) for store in stores]
+    db.flush()
+    return {
+        "stores_synced": len(summaries),
+        "inserted": sum(s.inserted for s in summaries),
+        "fetched": sum(s.fetched for s in summaries),
+        "results": [s.to_dict() for s in summaries],
+        "attribution": open_prices_sync.OP_ATTRIBUTION_TEXT,
+        "license_code": open_prices_sync.OP_LICENSE_CODE,
+    }
 
 
 # --------------------------------------------------------------------------- #

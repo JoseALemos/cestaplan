@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "apps/api/Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "python -m cestaplan_api.scripts.sync_open_prices --all",
+    "cronSchedule": "0 4 * * *",
+    "numReplicas": 1,
+    "restartPolicyType": "NEVER"
+  }
+}
