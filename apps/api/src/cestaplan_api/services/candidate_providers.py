@@ -25,6 +25,7 @@ Guarantees (see docs/OPENAI.md):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 import time
@@ -38,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import Ingredient, Recipe, RecipeIngredient, RecipeStep
+from cestaplan_api.services.usage import record_openai_usage
 from cestaplan_engine import CandidateRecipeDTO, RecipeIngredientDTO
 
 if TYPE_CHECKING:
@@ -71,6 +73,10 @@ class CandidateRequest:
     currency: str = "EUR"
     requirement_counts: dict[str, int] = field(default_factory=dict)
     per_meal_type: int = _DEFAULT_PER_MEAL_TYPE
+    # Metering context (tagged onto UsageLedger; never sent to OpenAI).
+    user_id: int | None = None
+    operation: str = "plan_generation"
+    optimization_run_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -287,7 +293,7 @@ class OpenAICandidateProvider:
     # -- public API ------------------------------------------------------- #
     def get_candidates(self, db: Session, request: CandidateRequest) -> CandidateBundle:
         try:
-            raw = self._invoke_with_retries(request)
+            raw = self._invoke_with_retries(db, request)
         except Exception as exc:  # network/timeout/unavailable after retries
             return self._fallback(db, request, f"OpenAI no disponible: {exc}")
 
@@ -306,12 +312,12 @@ class OpenAICandidateProvider:
         return CandidateBundle(candidates)
 
     # -- OpenAI call with backoff ---------------------------------------- #
-    def _invoke_with_retries(self, request: CandidateRequest) -> str:
+    def _invoke_with_retries(self, db: Session, request: CandidateRequest) -> str:
         attempts = max(0, self._settings.openai_max_retries)
         last_exc: Exception | None = None
         for attempt in range(attempts + 1):
             try:
-                return self._call_openai(request)
+                return self._call_openai(db, request)
             except Exception as exc:  # transient: retry with backoff + jitter
                 last_exc = exc
                 if attempt >= attempts:
@@ -321,7 +327,7 @@ class OpenAICandidateProvider:
         assert last_exc is not None
         raise last_exc
 
-    def _call_openai(self, request: CandidateRequest) -> str:
+    def _call_openai(self, db: Session, request: CandidateRequest) -> str:
         client = self._client or _make_openai_client(self._settings)
         response = client.responses.create(
             model=self._settings.openai_model,
@@ -339,6 +345,19 @@ class OpenAICandidateProvider:
                 }
             },
         )
+        # Record REAL usage (server-side truth) for this OpenAI call. A failed cost
+        # imputation or ledger write must never break plan generation.
+        with contextlib.suppress(Exception):
+            record_openai_usage(
+                db,
+                response=response,
+                settings=self._settings,
+                operation=request.operation,
+                household_id=request.household_id,
+                user_id=request.user_id,
+                optimization_run_id=request.optimization_run_id,
+                currency=request.currency,
+            )
         return response.output_text
 
     # -- persistence ------------------------------------------------------ #

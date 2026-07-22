@@ -60,6 +60,9 @@ def build_plan_input(
     as_of: date | None = None,
     settings: Settings | None = None,
     warnings: list[str] | None = None,
+    operation: str = "plan_generation",
+    optimization_run_id: int | None = None,
+    user_id: int | None = None,
 ) -> PlanInput:
     """Assemble the engine's :class:`PlanInput` for a persisted meal plan.
 
@@ -102,6 +105,9 @@ def build_plan_input(
                 for r in requirements
                 if r.requested_count > 0
             },
+            user_id=user_id,
+            operation=operation,
+            optimization_run_id=optimization_run_id,
         ),
     )
     if warnings is not None:

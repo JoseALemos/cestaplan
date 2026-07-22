@@ -22,6 +22,13 @@ from cestaplan_engine import PlanResult, generate_plan
 
 _MAX_BACKOFF_SECONDS = 300
 
+# Map the queued job type to the UsageLedger operation tag for any OpenAI call it makes.
+_OPERATION_BY_JOB_TYPE = {
+    "generate": "plan_generation",
+    "regenerate_plan": "plan_regeneration",
+    "regenerate_meal": "recipe_regeneration",
+}
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -51,7 +58,12 @@ def _execute(
     _transition(run, job, "collecting_data", started=True)
     provider_warnings: list[str] = []
     plan_input = build_plan_input(
-        db, meal_plan, seed=run.seed, warnings=provider_warnings
+        db,
+        meal_plan,
+        seed=run.seed,
+        warnings=provider_warnings,
+        operation=_OPERATION_BY_JOB_TYPE.get(job.job_type, "plan_generation"),
+        optimization_run_id=run.id,
     )
     _apply_bias(plan_input, job.payload)
 

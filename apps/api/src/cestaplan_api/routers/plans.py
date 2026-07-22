@@ -31,6 +31,7 @@ from cestaplan_api.services.plan_service import (
     serialize_plan,
     serialize_run,
 )
+from cestaplan_api.services.quota import check_generation_quota
 
 router = APIRouter(prefix="/api/v1/plans", tags=["plans"])
 
@@ -63,6 +64,9 @@ def generate_plan_endpoint(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail="Permisos insuficientes para esta acción"
         )
+
+    # Cloud-mode quota (server-side); no-op in self_hosted mode.
+    check_generation_quota(db, household_id=ctx.household.id, user_id=user.id)
 
     meal_plan, run, _job = create_generation(
         db,
@@ -112,6 +116,7 @@ def regenerate_plan(
 ) -> dict:
     """Regenerate the whole plan with a new seed (async)."""
     meal_plan = resolve_plan(db, user.id, meal_plan_id, require_edit=True)
+    check_generation_quota(db, household_id=meal_plan.household_id, user_id=user.id)
     run, _job = enqueue_regeneration(db, meal_plan, job_type="regenerate_plan")
     record_audit(
         db, action="plan.regenerate", actor_user_id=user.id,
@@ -139,6 +144,7 @@ def regenerate_meal(
 ) -> dict:
     """Regenerate a single meal slot, keeping the other meals fixed (async)."""
     meal_plan = resolve_plan(db, user.id, meal_plan_id, require_edit=True)
+    check_generation_quota(db, household_id=meal_plan.household_id, user_id=user.id)
     planned_meal = db.execute(
         select(PlannedMeal).where(
             PlannedMeal.public_id == planned_meal_id,

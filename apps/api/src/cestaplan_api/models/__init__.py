@@ -41,6 +41,7 @@ from cestaplan_api.models.plan import (
     PlannedMeal,
 )
 from cestaplan_api.models.recipe import Recipe, RecipeIngredient, RecipeStep
+from cestaplan_api.models.usage import UsageLedger
 
 __all__ = [
     "Allergy",
@@ -84,6 +85,8 @@ __all__ = [
     "Store",
     "TimestampMixin",
     "UUIDMixin",
+    # usage / metering
+    "UsageLedger",
     # auth
     "User",
     "UserSession",
