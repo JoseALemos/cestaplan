@@ -11,9 +11,9 @@
 |---|---|---|
 | **FASE 0** | Inspección del terreno | ✅ Hecha |
 | **FASE 1** | Preguntas y decisiones | ✅ Hecha |
-| **FASE 2** | Documentación | 🔄 En curso (este trabajo) |
-| **FASE 3** | Vertical slice | ⏳ Pendiente |
-| **FASE 4** | Fuentes de datos e importación | ⏳ Pendiente |
+| **FASE 2** | Documentación | ✅ Hecha |
+| **FASE 3** | Vertical slice (+3.5: OpenAI, frontend cableado) | ✅ Hecha |
+| **FASE 4** | Fuentes de datos e importación (+ Open Food Facts, admin) | ✅ Hecha |
 | **FASE 5** | Cloud / Railway | ⏳ Pendiente |
 
 Decisiones del propietario que enmarcan el roadmap: **recetas semilla primero**; el usuario aporta su
@@ -22,9 +22,9 @@ Decisiones del propietario que enmarcan el roadmap: **recetas semilla primero**;
 ```mermaid
 flowchart LR
     F0["FASE 0<br/>Inspección ✅"] --> F1["FASE 1<br/>Decisiones ✅"]
-    F1 --> F2["FASE 2<br/>Documentación 🔄"]
-    F2 --> F3["FASE 3<br/>Vertical slice ⏳"]
-    F3 --> F4["FASE 4<br/>Fuentes e importación ⏳"]
+    F1 --> F2["FASE 2<br/>Documentación ✅"]
+    F2 --> F3["FASE 3<br/>Vertical slice ✅"]
+    F3 --> F4["FASE 4<br/>Fuentes e importación ✅"]
     F4 --> F5["FASE 5<br/>Cloud / Railway ⏳"]
 ```
 
