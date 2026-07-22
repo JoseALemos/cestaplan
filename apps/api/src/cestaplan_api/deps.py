@@ -77,6 +77,27 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 # --------------------------------------------------------------------------- #
+# Admin authorization
+# --------------------------------------------------------------------------- #
+def require_admin(user: CurrentUser) -> User:
+    """Assert the authenticated user is a platform admin, or raise 403.
+
+    Admin is a global (not per-household) capability used for data-source management and
+    catalogue imports. Bootstrap a first admin with ``python -m
+    cestaplan_api.scripts.make_admin <email>``.
+    """
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requieren permisos de administrador",
+        )
+    return user
+
+
+AdminUser = Annotated[User, Depends(require_admin)]
+
+
+# --------------------------------------------------------------------------- #
 # Household authorization
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True)

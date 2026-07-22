@@ -29,6 +29,7 @@ from cestaplan_api.models.household import (
     Household,
     HouseholdMember,
 )
+from cestaplan_api.models.imports import DataImport, ProductBarcode
 from cestaplan_api.models.jobs import GenerationJob
 from cestaplan_api.models.plan import (
     GroceryList,
@@ -47,6 +48,7 @@ __all__ = [
     "AuditLog",
     # base
     "BaseModel",
+    "DataImport",
     "DataSource",
     "DietaryProfile",
     "Equipment",
@@ -69,6 +71,7 @@ __all__ = [
     "PantryItem",
     "PlannedMeal",
     "Product",
+    "ProductBarcode",
     "ProductNutrition",
     "ProductPrice",
     # recipe

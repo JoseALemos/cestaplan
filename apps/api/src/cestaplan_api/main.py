@@ -9,7 +9,7 @@ from sqlalchemy import text
 from cestaplan_api.config import get_settings
 from cestaplan_api.db import engine
 from cestaplan_api.routers import auth as auth_router
-from cestaplan_api.routers import catalog, grocery, households, plans
+from cestaplan_api.routers import admin, catalog, grocery, households, plans
 
 settings = get_settings()
 
@@ -32,6 +32,7 @@ app.include_router(households.router)
 app.include_router(plans.router)
 app.include_router(grocery.router)
 app.include_router(catalog.router)
+app.include_router(admin.router)
 
 
 @app.get("/health", tags=["system"])

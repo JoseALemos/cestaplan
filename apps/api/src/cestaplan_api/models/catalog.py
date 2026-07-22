@@ -122,6 +122,7 @@ class Product(BaseModel):
     brand: Mapped[str | None] = mapped_column(Text)
     package_quantity: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     package_unit: Mapped[str | None] = mapped_column(Text)
+    category_code: Mapped[str | None] = mapped_column(Text)
     image_url: Mapped[str | None] = mapped_column(Text)
     is_synthetic: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
