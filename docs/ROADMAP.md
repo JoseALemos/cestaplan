@@ -44,7 +44,7 @@ flowchart LR
   esqueletos de `apps/`, `packages/`, `data/`, `infra/`.
 - **Criterios de salida**: decisiones firmes y consistentes para poder documentar y construir.
 
-## 4. FASE 2 — Documentación 🔄 (en curso)
+## 4. FASE 2 — Documentación ✅
 
 - **Objetivos**: producir documentación de ingeniería completa y auto-consistente que sirva de contrato para
   construir el vertical slice.
@@ -54,7 +54,7 @@ flowchart LR
 - **Criterios de salida**: los 25 criterios de aceptación están enunciados y trazados; el vertical slice de FASE 3
   está definido sin ambigüedad; toda restricción estricta está documentada. **Al terminar FASE 2, parar.**
 
-## 5. FASE 3 — Vertical slice ⏳
+## 5. FASE 3 — Vertical slice ✅
 
 - **Objetivos**: implementar un recorrido **end-to-end** delgado que atraviese todas las capas (auth → hogar →
   tienda → presupuesto → comidas → generación async → validación determinista → envases → coste → plan → lista
@@ -95,7 +95,7 @@ flowchart TB
     M --> N["Favorito / rechazado"]
 ```
 
-## 6. FASE 4 — Fuentes de datos e importación ⏳
+## 6. FASE 4 — Fuentes de datos e importación ✅
 
 - **Objetivos**: dar de alta datos reales aportados por el usuario/admin sin scraping.
 - **Entregables**: adaptadores activos completos (`CsvRetailerAdapter`, `JsonRetailerAdapter`, `ManualRetailerAdapter`,
@@ -104,7 +104,7 @@ flowchart TB
 - **Criterios de salida**: un administrador puede importar un catálogo por CSV/JSON con procedencia completa; OFF se
   integra respetando **ODbL**; los estados de **cobertura de precios** reflejan datos reales.
 
-## 7. FASE 5 — Cloud / Railway ⏳
+## 7. FASE 5 — Cloud / Railway ✅ (preparada; el deploy lo lanza el propietario)
 
 - **Objetivos**: despliegue gestionado multi-entorno con facturación IA `platform` (sin cobro) y cuotas.
 - **Entregables**: servicios `web`, `api`, `worker`, `postgres` en Railway (staging + production); pre-deploy
@@ -152,30 +152,32 @@ Trazabilidad de los criterios de `docs/PRD.md` §7. Estado por fase donde se esp
 
 | ID | Criterio (resumen) | Fase objetivo | Estado |
 |---|---|---|---|
-| AC-01 | Registro email+contraseña con Argon2id | FASE 3 | ⏳ Pendiente |
-| AC-02 | Sesión opaca en BD, cookie HttpOnly/Secure/SameSite | FASE 3 | ⏳ Pendiente |
-| AC-03 | Hogar + miembros con roles owner/editor/viewer | FASE 3 | ⏳ Pendiente |
-| AC-04 | Alergias como restricción DURA en el plan final | FASE 3 | ⏳ Pendiente |
-| AC-05 | Restricciones dietéticas y preferencias aplicadas | FASE 3 | ⏳ Pendiente |
-| AC-06 | Selección de tienda concreta (cadena/CP/tienda/fecha) | FASE 3 | ⏳ Pendiente |
-| AC-07 | Presupuesto + nº comensales condicionan el plan | FASE 3 | ⏳ Pendiente |
-| AC-08 | Comidas requeridas flexibles (huecos, tuppers, raciones) | FASE 3 | ⏳ Pendiente |
-| AC-09 | Generación async: POST 202 + optimization_run_id + status_url | FASE 3 | ⏳ Pendiente |
-| AC-10 | Estados del job observables por polling | FASE 3 | ⏳ Pendiente |
-| AC-11 | Coste por envases completos (nunca 600/500×precio) | FASE 3 | ⏳ Pendiente |
-| AC-12 | ProductPrice con fuente+tienda+fecha; nunca inventar ni 0 | FASE 3/4 | ⏳ Pendiente |
-| AC-13 | Cobertura de precios con estado explícito | FASE 3/4 | ⏳ Pendiente |
-| AC-14 | Coste conocido vs estimado; reemplazar/precio manual | FASE 3/4 | ⏳ Pendiente |
-| AC-15 | Dinero Decimal/numeric/string; ningún float | FASE 3 | ⏳ Pendiente |
-| AC-16 | Motor reproducible con semilla | FASE 3 | ⏳ Pendiente |
-| AC-17 | Toda función crítica funciona sin OpenAI | FASE 3 | ⏳ Pendiente |
-| AC-18 | Flujo OpenAI de 12 pasos; IA no decide lo crítico | FASE 3 | ⏳ Pendiente |
-| AC-19 | Contexto a OpenAI pseudonimizado | FASE 3 | ⏳ Pendiente |
-| AC-20 | Lista por categorías offline (IndexedDB) | FASE 3 | ⏳ Pendiente |
-| AC-21 | Regenerar una única comida | FASE 3 | ⏳ Pendiente |
-| AC-22 | Favorito/rechazado influye en la puntuación | FASE 3 | ⏳ Pendiente |
-| AC-23 | Sin solución: conflicto mínimo, no plan falso | FASE 3 | ⏳ Pendiente |
-| AC-24 | Exportar/eliminar cuenta, desactivar IA, consentimiento | FASE 3/5 | ⏳ Pendiente |
-| AC-25 | Disclaimer sanitario obligatorio visible | FASE 3 | ⏳ Pendiente |
+| AC-01 | Registro email+contraseña con Argon2id | FASE 3 | ✅ Cumplido |
+| AC-02 | Sesión opaca en BD, cookie HttpOnly/Secure/SameSite | FASE 3 | ✅ Cumplido |
+| AC-03 | Hogar + miembros con roles owner/editor/viewer | FASE 3 | ✅ Cumplido |
+| AC-04 | Alergias como restricción DURA en el plan final | FASE 3 | ✅ Cumplido |
+| AC-05 | Restricciones dietéticas y preferencias aplicadas | FASE 3 | ✅ Cumplido |
+| AC-06 | Selección de tienda concreta (cadena/CP/tienda/fecha) | FASE 3 | ✅ Cumplido |
+| AC-07 | Presupuesto + nº comensales condicionan el plan | FASE 3 | ✅ Cumplido |
+| AC-08 | Comidas requeridas flexibles (huecos, tuppers, raciones) | FASE 3 | ✅ Cumplido |
+| AC-09 | Generación async: POST 202 + optimization_run_id + status_url | FASE 3 | ✅ Cumplido |
+| AC-10 | Estados del job observables por polling | FASE 3 | ✅ Cumplido |
+| AC-11 | Coste por envases completos (nunca 600/500×precio) | FASE 3 | ✅ Cumplido |
+| AC-12 | ProductPrice con fuente+tienda+fecha; nunca inventar ni 0 | FASE 3/4 | ✅ Cumplido |
+| AC-13 | Cobertura de precios con estado explícito | FASE 3/4 | ✅ Cumplido |
+| AC-14 | Coste conocido vs estimado; reemplazar/precio manual | FASE 3/4 | ✅ Cumplido |
+| AC-15 | Dinero Decimal/numeric/string; ningún float | FASE 3 | ✅ Cumplido |
+| AC-16 | Motor reproducible con semilla | FASE 3 | ✅ Cumplido |
+| AC-17 | Toda función crítica funciona sin OpenAI | FASE 3 | ✅ Cumplido |
+| AC-18 | Flujo OpenAI de 12 pasos; IA no decide lo crítico | FASE 3 | ✅ Cumplido |
+| AC-19 | Contexto a OpenAI pseudonimizado | FASE 3 | ✅ Cumplido |
+| AC-20 | Lista por categorías offline (IndexedDB) | FASE 3 | ✅ Cumplido |
+| AC-21 | Regenerar una única comida | FASE 3 | ✅ Cumplido |
+| AC-22 | Favorito/rechazado influye en la puntuación | FASE 3 | ✅ Cumplido |
+| AC-23 | Sin solución: conflicto mínimo, no plan falso | FASE 3 | ✅ Cumplido |
+| AC-24 | Exportar/eliminar cuenta, desactivar IA, consentimiento | FASE 3/5 | ✅ Cumplido |
+| AC-25 | Disclaimer sanitario obligatorio visible | FASE 3 | ✅ Cumplido |
 
-> Leyenda: ✅ Completo · 🔄 En curso · ⏳ Pendiente. Actualizar esta tabla a medida que avance FASE 3.
+> Leyenda: ✅ Cumplido. Los 25 criterios de aceptación del MVP están cubiertos y verificados; el detalle
+> por versión está en [`CHANGELOG.md`](../CHANGELOG.md). (El criterio 1 —Docker Compose— está preparado
+> pero no se verificó en el entorno de desarrollo por no tener Docker; el modo nativo sí está probado.)
