@@ -695,3 +695,49 @@ class ProviderActivation(BaseModel):
         Boolean, nullable=False, server_default=text("false")
     )
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ShadowEvaluationRun(BaseModel):
+    """A shadow-mode evaluation of a provider (spec §AA) — never touches production.
+
+    Shadow runs use ONLY staging data + synthetic/dev recipes: they compute coverage, cost
+    candidate baskets and compare against a baseline provider (usually the demo catalogue), and
+    record every difference/anomaly. They never modify real plans/lists or production prices and
+    are shown only to authorised internal users. Money is ``Decimal``; never float.
+    """
+
+    __tablename__ = "shadow_evaluation_run"
+    __table_args__ = (
+        Index("ix_shadow_run_provider_started", "provider_code", "started_at"),
+    )
+
+    provider_code: Mapped[str] = mapped_column(Text, nullable=False)
+    retailer_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("store.id"))
+    meal_plan_id: Mapped[int | None] = mapped_column(BigInteger)
+    recipe_set_id: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
+    recipes_evaluated: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    recipes_costable: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    basket_known_cost: Mapped[Decimal | None] = mapped_column(money())
+    basket_estimated_cost: Mapped[Decimal | None] = mapped_column(money())
+    missing_products: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    unresolved_packages: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    stale_prices: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    conflicts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    baseline_provider: Mapped[str | None] = mapped_column(Text)
+    baseline_cost: Mapped[Decimal | None] = mapped_column(money())
+    absolute_difference: Mapped[Decimal | None] = mapped_column(money())
+    percentage_difference: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    warnings: Mapped[list | None] = mapped_column(JSONB)
+    report_json: Mapped[dict | None] = mapped_column(JSONB)
