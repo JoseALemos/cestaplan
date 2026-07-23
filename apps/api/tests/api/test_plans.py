@@ -102,6 +102,7 @@ def test_generate_flow_end_to_end(db_session: Session) -> None:
     job = db_session.execute(
         select(GenerationJob).order_by(GenerationJob.id.desc())
     ).scalars().first()
+    assert job is not None
     process_job(job, db_session)
 
     assert client.get(body["status_url"]).json()["status"] == "completed"

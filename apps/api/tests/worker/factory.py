@@ -20,11 +20,11 @@ from cestaplan_api.models import (
     OptimizationRun,
     User,
 )
-from cestaplan_api.schemas.plan import MealRequirementIn
+from cestaplan_api.schemas.plan import MealRequirementIn, MealType
 from cestaplan_api.services.plan_service import create_generation
 
 _EQUIPMENT = ("toaster", "stovetop", "blender", "oven")
-_DEFAULT_REQUIREMENTS = (
+_DEFAULT_REQUIREMENTS: tuple[tuple[MealType, int], ...] = (
     ("breakfast", 2),
     ("lunch", 4),
     ("snack", 1),
@@ -90,7 +90,7 @@ def enqueue_plan(
     *,
     budget: str = "500",
     budget_priority: str = "waste",
-    requirements: tuple[tuple[str, int], ...] = _DEFAULT_REQUIREMENTS,
+    requirements: tuple[tuple[MealType, int], ...] = _DEFAULT_REQUIREMENTS,
 ) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
     """Create a plan + requirements + queued run/job (2 bf / 4 lunch / 1 snack / 3 dinner)."""
     ctx = HouseholdContext(household=household, member=member)

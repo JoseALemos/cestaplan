@@ -50,9 +50,11 @@ def _demo_stores(db: Session) -> list[Store]:
 
 
 def _demo_retailer(db: Session) -> Retailer:
-    return db.execute(
+    retailer = db.execute(
         select(Retailer).where(Retailer.is_synthetic.is_(True)).order_by(Retailer.id)
     ).scalars().first()
+    assert retailer is not None
+    return retailer
 
 
 def _rows(db: Session, household, member, *, store: Store | None):

@@ -27,9 +27,11 @@ from .factory import enqueue_plan, make_household
 
 
 def _planned_meals(db: Session, meal_plan_id: int) -> list[PlannedMeal]:
-    return db.execute(
-        select(PlannedMeal).where(PlannedMeal.meal_plan_id == meal_plan_id)
-    ).scalars().all()
+    return list(
+        db.execute(
+            select(PlannedMeal).where(PlannedMeal.meal_plan_id == meal_plan_id)
+        ).scalars().all()
+    )
 
 
 def _recipe_allergens(db: Session, recipe_id: int) -> set[str]:
@@ -98,6 +100,7 @@ def test_process_job_produces_valid_plan(db_session: Session) -> None:
     assert len(meals) == 10  # 2 breakfast + 4 lunch + 1 snack + 3 dinner
 
     # cost_total is a positive Decimal.
+    assert run.result_summary is not None
     total = Decimal(run.result_summary["cost_total"]["total"])
     assert total > 0
 
