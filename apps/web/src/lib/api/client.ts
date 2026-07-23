@@ -44,7 +44,11 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
    * Do not pass raw money values as numbers — money travels as string.
    */
   body?: unknown;
-  /** CSRF token override for mutating requests. Defaults to reading the `cestaplan_csrf` cookie. */
+  /**
+   * CSRF token override for mutating requests. Defaults to the token persisted
+   * from the login response, falling back to the `cestaplan_csrf` cookie
+   * (same-origin only).
+   */
   csrfToken?: string;
   /** Abort the request after this many milliseconds. */
   timeoutMs?: number;
@@ -61,6 +65,44 @@ export function readCsrfCookie(): string | undefined {
     new RegExp(`(?:^|; )${CSRF_COOKIE_NAME}=([^;]*)`),
   );
   return match?.[1] ? decodeURIComponent(match[1]) : undefined;
+}
+
+// The CSRF cookie is set on the API's origin. When the web app is served from a
+// DIFFERENT origin than the API (the cloud deployment: web-*.railway.app vs
+// api-*.railway.app), `document.cookie` on the web origin cannot read it, so the
+// header could never be filled and every mutation 403'd. Persist the token from
+// the login response body instead — that value is origin-independent.
+const CSRF_STORAGE_KEY = "cestaplan_csrf_token";
+
+/** Persist the CSRF token returned in the login/register response body. */
+export function storeCsrfToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CSRF_STORAGE_KEY, token);
+  } catch {
+    // localStorage may be unavailable (private mode / disabled); the cookie
+    // fallback still covers the same-origin case.
+  }
+}
+
+/** Read the persisted CSRF token, if any. */
+export function getStoredCsrfToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.localStorage.getItem(CSRF_STORAGE_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Clear the persisted CSRF token (on logout). */
+export function clearCsrfToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(CSRF_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -84,7 +126,7 @@ export async function apiFetch<TResponse>(
     requestHeaders.set("Content-Type", "application/json");
   }
   if (isMutatingMethod(method)) {
-    const token = csrfToken ?? readCsrfCookie();
+    const token = csrfToken ?? getStoredCsrfToken() ?? readCsrfCookie();
     if (token) {
       requestHeaders.set(CSRF_HEADER_NAME, token);
     }
