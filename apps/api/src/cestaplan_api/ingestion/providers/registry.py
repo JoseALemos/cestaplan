@@ -55,7 +55,13 @@ def register_default(code: str, factory: ProviderFactory) -> None:
 
 # Demo is always available (no flags, no network).
 from cestaplan_api.ingestion.providers.demo.provider import DemoCatalogProvider  # noqa: E402
+from cestaplan_api.ingestion.providers.open_prices.provider import (  # noqa: E402
+    OpenPricesProvider,
+)
 
 register_default(DemoCatalogProvider.provider_code, DemoCatalogProvider)
+# Open Prices needs no credentials (public ODbL API); enablement is via OPEN_PRICES_ENABLED
+# at the call site, not here.
+register_default(OpenPricesProvider.provider_code, OpenPricesProvider)
 
 __all__ = ["ProviderRegistry", "register_default", "registry"]
