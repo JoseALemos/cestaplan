@@ -4,7 +4,12 @@
 // PWA opens instantly and gracefully offline. Data screens (plan, grocery
 // list) will layer their own IndexedDB-backed offline strategy on top of
 // this once the API contract lands — this file only owns the shell cache.
-const SHELL_CACHE = "cestaplan-shell-v1";
+//
+// Navigations use a NETWORK-FIRST strategy: a cache-first HTML shell goes
+// stale on every rebuild/deploy and keeps referencing hashed JS/CSS chunks
+// that no longer exist, which breaks the page ("This page couldn't load").
+// Fresh HTML must always win; the cache is only an offline fallback.
+const SHELL_CACHE = "cestaplan-shell-v2";
 
 const SHELL_URLS = ["/", "/manifest.webmanifest", "/icons/icon.svg"];
 
@@ -40,6 +45,19 @@ self.addEventListener("fetch", (event) => {
   // API calls: always go to the network, never served from the shell cache.
   if (url.pathname.startsWith("/api/")) return;
 
+  // Navigations (HTML documents): network-first. The freshly built HTML — with
+  // its current chunk references — always wins; the cached shell is served only
+  // when the network is unavailable (offline).
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request).catch(() =>
+        caches.match(request).then((cached) => cached ?? caches.match("/")),
+      ),
+    );
+    return;
+  }
+
+  // Static assets (hashed, immutable): stale-while-revalidate.
   event.respondWith(
     caches.match(request).then((cached) => {
       const network = fetch(request)
