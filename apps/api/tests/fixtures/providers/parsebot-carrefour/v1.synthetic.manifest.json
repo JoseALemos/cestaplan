@@ -1,0 +1,7 @@
+{
+  "provider": "parsebot-carrefour",
+  "fixture_version": "v1",
+  "schema_fingerprint": "ef52b00a840410cd64485e0c281940f9504acadbae1ba73140729d945952ee4b",
+  "synthetic_structure": true,
+  "record_count": 10
+}
