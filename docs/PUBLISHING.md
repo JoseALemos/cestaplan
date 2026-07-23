@@ -75,14 +75,14 @@ gh repo create OWNER/cestaplan --public \
 O créalo desde la web (**New repository**, público, **sin** README/licencia/`.gitignore`
 autogenerados: el repositorio ya los trae).
 
-### 2.2 Añadir el remoto y hacer push de `master`
+### 2.2 Añadir el remoto y hacer push de `main`
 
-El repositorio usa la rama **`master`**.
+El repositorio usa la rama **`main`**.
 
 ```bash
 cd /ruta/a/cestaplan
 git remote add origin git@github.com:OWNER/cestaplan.git   # o la URL HTTPS
-git push -u origin master
+git push -u origin main
 ```
 
 ### 2.3 Configurar temas (topics) y descripción
@@ -113,7 +113,7 @@ gh label create "documentation"    --color 0075ca --description "Mejoras de docu
 gh label create "data-source"      --color d4c5f9 --description "Adaptadores y fuentes de datos" --force
 ```
 
-### 2.6 Protección de la rama `master`
+### 2.6 Protección de la rama `main`
 
 Desde **Settings → Branches → Add rule** (o con la API):
 
@@ -124,7 +124,7 @@ Desde **Settings → Branches → Add rule** (o con la API):
 Con la API de GitHub:
 
 ```bash
-gh api -X PUT repos/OWNER/cestaplan/branches/master/protection \
+gh api -X PUT repos/OWNER/cestaplan/branches/main/protection \
   -H "Accept: application/vnd.github+json" \
   -f "required_status_checks[strict]=true" \
   -f "required_pull_request_reviews[required_approving_review_count]=1" \
