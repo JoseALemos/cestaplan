@@ -179,6 +179,11 @@ class Settings(BaseSettings):
     parse_bot_alcampo_enabled: bool = False
     parse_bot_dia_base_url: str = ""
     parse_bot_alcampo_base_url: str = ""
+    # Additional Parse.bot chains — base URLs empty until a verified scraper exists per chain.
+    parse_bot_carrefour_base_url: str = ""
+    parse_bot_lidl_base_url: str = ""
+    parse_bot_aldi_base_url: str = ""
+    parse_bot_deza_base_url: str = ""
     # Apify (Mercadona actor) — Bearer token, actor id configurable, cost/quota caps.
     apify_enabled: bool = False
     apify_api_token: str = ""

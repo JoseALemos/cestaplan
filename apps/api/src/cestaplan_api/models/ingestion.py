@@ -650,4 +650,14 @@ class ProviderActivation(BaseModel):
     production_approved_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("user.id")
     )
+    # Onboarding matrix (retailer roll-out): the intended role, whether the source is a full
+    # or partial catalogue, the roll-out stage and the declared capabilities. Kept as free
+    # Text/JSONB (documented vocabularies) so the matrix evolves without a migration per value.
+    intended_role: Mapped[str | None] = mapped_column(Text)
+    catalog_scope: Mapped[str | None] = mapped_column(Text)  # full | partial | complementary
+    # disabled | transport_only | shadow | staging | production_partial | production_primary
+    activation_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="disabled"
+    )
+    expected_capabilities: Mapped[list | None] = mapped_column(JSONB)
     notes: Mapped[str | None] = mapped_column(Text)

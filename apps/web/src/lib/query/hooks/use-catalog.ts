@@ -2,7 +2,13 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
-import { getRecipe, listRetailers, listStorePrices, listStores } from "@/lib/api/endpoints";
+import {
+  getRecipe,
+  listPriceProviders,
+  listRetailers,
+  listStorePrices,
+  listStores,
+} from "@/lib/api/endpoints";
 import { queryKeys } from "@/lib/query/keys";
 
 /**
@@ -15,6 +21,14 @@ export function useRetailersQuery() {
   return useQuery({
     queryKey: queryKeys.retailers(),
     queryFn: listRetailers,
+    retry: false,
+  });
+}
+
+export function usePriceProvidersQuery() {
+  return useQuery({
+    queryKey: queryKeys.priceProviders(),
+    queryFn: listPriceProviders,
     retry: false,
   });
 }

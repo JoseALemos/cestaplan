@@ -63,9 +63,10 @@ def test_no_record_blocks(db_session: Session) -> None:
 
 def test_kill_switch_blocks_even_when_cleared(db_session: Session) -> None:
     approver = _approver(db_session)
-    _fully_cleared(db_session, "apify-mercadona", approver)
+    # Synthetic code: real matrix codes may already have a committed activation row.
+    _fully_cleared(db_session, "kill-switch-prov", approver)
     decision = evaluate_production(
-        db_session, "apify-mercadona", _settings(price_provider_kill_switch=True)
+        db_session, "kill-switch-prov", _settings(price_provider_kill_switch=True)
     )
     assert decision.allowed is False
     assert "kill_switch_on" in decision.reasons
@@ -73,8 +74,8 @@ def test_kill_switch_blocks_even_when_cleared(db_session: Session) -> None:
 
 def test_fully_cleared_is_allowed(db_session: Session) -> None:
     approver = _approver(db_session)
-    _fully_cleared(db_session, "parsebot-alcampo", approver)
-    decision = evaluate_production(db_session, "parsebot-alcampo", _settings())
+    _fully_cleared(db_session, "fully-cleared-prov", approver)
+    decision = evaluate_production(db_session, "fully-cleared-prov", _settings())
     assert decision.allowed is True
     assert decision.reasons == []
 

@@ -38,6 +38,7 @@ import type {
   OptimizationRunStatusResponse,
   PantryItemCreate,
   PantryItemResponse,
+  PriceProvider,
   PantryItemUpdate,
   PasswordRecoveryRequest,
   Recipe,
@@ -227,6 +228,10 @@ export function listIngredients(
 
 export function listRetailers(): Promise<Retailer[]> {
   return apiFetch<Retailer[]>("/api/v1/retailers");
+}
+
+export function listPriceProviders(): Promise<PriceProvider[]> {
+  return apiFetch<PriceProvider[]>("/api/v1/price-providers");
 }
 
 export function listStores(retailerId: Uuid): Promise<Store[]> {

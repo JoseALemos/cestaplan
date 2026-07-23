@@ -3,8 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
+import type { PriceProvider } from "@/lib/api/types";
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
-import { useRetailersQuery, useStoresQuery } from "@/lib/query/hooks/use-catalog";
+import {
+  usePriceProvidersQuery,
+  useRetailersQuery,
+  useStoresQuery,
+} from "@/lib/query/hooks/use-catalog";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -12,11 +17,61 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 
+// Badge → colour + a one-line honest caption. Mirrors the backend `_provider_badge`
+// wording (spec §6): a chain is never dressed up as more than its real integration state.
+const BADGE_STYLE: Record<string, { className: string; caption: string }> = {
+  Disponible: {
+    className: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
+    caption: "Precios reales verificados y costeo completo.",
+  },
+  Experimental: {
+    className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
+    caption: "Integración en pruebas; datos parciales, no aptos para costear planes.",
+  },
+  "Ofertas solamente": {
+    className: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
+    caption: "Solo folleto de ofertas: nunca es el precio completo de la tienda.",
+  },
+  "Configuración pendiente": {
+    className: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+    caption: "Falta credencial o URL de captura; sin datos todavía.",
+  },
+  "Sin cobertura en esta zona": {
+    className: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+    caption: "No hay cobertura de precios para esta zona.",
+  },
+};
+
+const FALLBACK_BADGE = "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+
+function ProviderBadge({ badge }: { badge: string }) {
+  const style = BADGE_STYLE[badge]?.className ?? FALLBACK_BADGE;
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${style}`}>{badge}</span>
+  );
+}
+
+function ChainStatusRow({ provider }: { provider: PriceProvider }) {
+  const caption = BADGE_STYLE[provider.badge]?.caption ?? "";
+  return (
+    <li className="flex items-start justify-between gap-3 py-2">
+      <div className="min-w-0">
+        <p className="font-medium text-ink capitalize">{provider.retailer}</p>
+        <p className="text-xs text-ink-muted">
+          {provider.full_catalog ? "Catálogo completo" : "Cobertura parcial"} · {caption}
+        </p>
+      </div>
+      <ProviderBadge badge={provider.badge} />
+    </li>
+  );
+}
+
 export default function TiendaPage() {
   const router = useRouter();
   const { state, setStore } = useOnboarding();
 
   const retailersQuery = useRetailersQuery();
+  const providersQuery = usePriceProvidersQuery();
   const [retailerId, setRetailerId] = useState<string>(state.store?.retailerId ?? "");
   const selectedRetailer = useMemo(
     () => retailersQuery.data?.find((retailer) => retailer.id === retailerId),
@@ -46,6 +101,7 @@ export default function TiendaPage() {
   };
 
   return (
+    <div className="flex flex-col gap-6">
     <Card>
       <CardHeader>
         <CardTitle>Selección de cadena</CardTitle>
@@ -108,5 +164,36 @@ export default function TiendaPage() {
         </Button>
       </div>
     </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Estado de las cadenas</CardTitle>
+          <CardDescription>
+            Las siete cadenas iniciales y su estado de integración. Solo las marcadas como
+            <strong> Disponible</strong> permiten costear un plan completo; el resto están en
+            pruebas, muestran solo ofertas o aún no tienen datos.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {providersQuery.isLoading ? (
+            <Skeleton className="h-40 w-full" />
+          ) : providersQuery.isError ? (
+            <Alert tone="warning" title="Estado de proveedores no disponible">
+              No hemos podido cargar el estado de las cadenas. Puedes continuar igualmente.
+            </Alert>
+          ) : (providersQuery.data ?? []).length === 0 ? (
+            <Alert tone="info">Todavía no hay proveedores dados de alta.</Alert>
+          ) : (
+            <ul className="divide-y divide-border">
+              {(providersQuery.data ?? [])
+                .filter((provider) => provider.catalog_scope !== "complementary")
+                .map((provider) => (
+                  <ChainStatusRow key={provider.provider} provider={provider} />
+                ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

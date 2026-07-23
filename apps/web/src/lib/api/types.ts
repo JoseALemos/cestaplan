@@ -271,6 +271,21 @@ export interface Retailer {
   costable_ingredient_count: number;
 }
 
+/** Onboarding-matrix status of a price provider/chain (spec §6 selector badges). */
+export interface PriceProvider {
+  provider: string;
+  retailer: string;
+  retailer_id: Uuid | null;
+  intended_role: string;
+  catalog_scope: "full" | "partial" | "complementary";
+  full_catalog: boolean;
+  activation_state: string;
+  transport_status: string;
+  mapper_status: string;
+  data_rights_status: string;
+  badge: string;
+}
+
 export type PriceCoverageLabel =
   | "completo"
   | "cobertura_alta"

@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
+from cestaplan_api.ingestion.providers.onboarding import RETAILER_MATRIX
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
@@ -22,6 +23,7 @@ from cestaplan_api.models import (
     Product,
     ProductBarcode,
     ProductPrice,
+    ProviderActivation,
     Recipe,
     Retailer,
     Store,
@@ -41,6 +43,54 @@ _COSTING_MIN_INGREDIENTS = 20
 
 def _s(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
+    """UI badge for a chain (§6). Partial sources never read as a full available catalogue."""
+    if activation is None or activation.transport_status in ("down", "unknown"):
+        return "Configuración pendiente"
+    if entry.catalog_scope == "partial":
+        return "Ofertas solamente"
+    if entry.intended_role == "development_fallback":
+        return "Disponible"
+    # dense/complementary but not production (transport_only/staging) -> experimental
+    return "Experimental"
+
+
+@router.get("/price-providers")
+def list_price_providers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
+    """Retailer onboarding matrix for the chain selector (§6): badge, scope, role, rights.
+
+    Surfaces every declared chain — not only the priced ones — so the UI can show which are
+    available, experimental, offers-only or pending configuration. A partial source is never
+    presented as a full costed catalogue.
+    """
+    activations = {
+        a.provider_code: a for a in db.execute(select(ProviderActivation)).scalars()
+    }
+    retailers = {r.slug: r for r in db.execute(select(Retailer)).scalars()}
+    out: list[dict[str, Any]] = []
+    for entry in RETAILER_MATRIX:
+        activation = activations.get(entry.provider_code)
+        retailer = retailers.get(entry.retailer_slug)
+        out.append(
+            {
+                "provider": entry.provider_code,
+                "retailer": entry.retailer_slug,
+                "retailer_id": str(retailer.public_id) if retailer is not None else None,
+                "intended_role": entry.intended_role,
+                "catalog_scope": entry.catalog_scope,
+                "full_catalog": entry.catalog_scope == "full",
+                "activation_state": activation.activation_state if activation else "disabled",
+                "transport_status": activation.transport_status if activation else "unknown",
+                "mapper_status": activation.mapper_status if activation else "unknown",
+                "data_rights_status": (
+                    activation.data_rights_status if activation else "under_review"
+                ),
+                "badge": _provider_badge(entry, activation),
+            }
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
