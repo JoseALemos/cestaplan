@@ -14,9 +14,13 @@ from typing import Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Repo root is four levels up from this file:
-# apps/api/src/cestaplan_api/config.py -> repo root
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+# Repo root is four levels up from this file in the source tree
+# (apps/api/src/cestaplan_api/config.py -> repo root). In a container the tree is
+# shallower (/app/src/cestaplan_api/config.py) and there is no repo-root .env — env vars
+# come from the environment — so fall back to the highest available parent instead of
+# indexing past the end (which would crash at import time).
+_CONFIG_PARENTS = Path(__file__).resolve().parents
+_REPO_ROOT = _CONFIG_PARENTS[4] if len(_CONFIG_PARENTS) > 4 else _CONFIG_PARENTS[-1]
 
 
 class Settings(BaseSettings):
