@@ -375,6 +375,18 @@ class PriceObservation(BaseModel):
         nullable=False,
         server_default="unverified",
     )
+    # §P: a staging import — never used by production plans, only internal validation.
+    staging_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # §T logical rollback (never a destructive DELETE): a rolled-back observation is ignored
+    # by current-price selection; ``closed_by_run_id`` is the run that closed this row's
+    # validity, so rolling that run back can re-open it and restore the prior projection.
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rolled_back_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("user.id"))
+    closed_by_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("crawl_run.id")
+    )
 
 
 class PromotionRule(BaseModel):
