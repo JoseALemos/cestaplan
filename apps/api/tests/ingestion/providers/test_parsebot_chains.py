@@ -18,8 +18,12 @@ import pytest
 
 from cestaplan_api.config import Settings
 from cestaplan_api.ingestion.contracts import PriceScope
-from cestaplan_api.ingestion.providers.contracts import Availability, ContentUnit
-from cestaplan_api.ingestion.providers.onboarding import measure_coverage
+from cestaplan_api.ingestion.providers.contracts import (
+    Availability,
+    ContentUnit,
+    ProductCostingMode,
+)
+from cestaplan_api.ingestion.providers.onboarding import classify_costing_mode, measure_coverage
 from cestaplan_api.ingestion.providers.parsebot import plans
 from cestaplan_api.ingestion.providers.parsebot.chains import (
     ParseBotAlcampoMapper,
@@ -179,12 +183,20 @@ def test_carrefour_barcode_and_promotion() -> None:
 
 
 def test_carrefour_packaged_net_content() -> None:
+    # A named fixed package (no bulk/weight evidence) -> fixed package, not variable weight.
     p = ParseBotCarrefourMapper().map_product(
-        _carrefour(net_content="500g", package_unit="g", package_quantity=500, measure_unit="ud"),
+        _carrefour(
+            name="Harina de trigo Carrefour 500 g",
+            net_content="500g",
+            package_unit="g",
+            package_quantity=500,
+            measure_unit="ud",
+        ),
         _NOW,
     )
     assert p.net_content_quantity == Decimal("500") and p.net_content_unit is ContentUnit.G
     assert p.variable_weight is False
+    assert classify_costing_mode(p) is ProductCostingMode.FIXED_PACKAGE
 
 
 def test_carrefour_missing_price_raises() -> None:

@@ -684,6 +684,9 @@ class ProviderActivation(BaseModel):
     identifier_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     barcode_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     observed_at_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    variable_weight_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    unresolved_costing_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     costing_eligible_product_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     costing_eligibility: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="unknown"

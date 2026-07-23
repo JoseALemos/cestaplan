@@ -291,6 +291,12 @@ export interface PriceProvider {
   package_quantity_coverage: string | null;
   package_unit_coverage: string | null;
   geographic_scope_coverage: string | null;
+  /** Aggregated per-product costing modes (audit): fixed packages, genuine variable weight/volume,
+   * and products that could NOT be resolved for costing. A bare unit_price is never costable. */
+  package_coverage: string | null;
+  variable_weight_coverage: string | null;
+  unresolved_costing_coverage: string | null;
+  costing_eligible_product_coverage: string | null;
   costing_eligibility: "unknown" | "insufficient" | "sufficient";
   production_eligibility: boolean;
   activation_state: string;

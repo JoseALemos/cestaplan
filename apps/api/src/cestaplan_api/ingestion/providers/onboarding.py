@@ -17,11 +17,48 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
-from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct
+from cestaplan_api.ingestion.providers.contracts import (
+    ContentUnit,
+    ExternalCatalogProduct,
+    ProductCostingMode,
+    SellUnit,
+)
 from cestaplan_api.models import ProviderActivation
 
-# A capture must clear these fractions (price + package quantity + unit) to be costable.
+# A capture must clear this fraction of individually-costable products to be costable overall.
 _COSTING_THRESHOLD = Decimal("0.8")
+_MASS_UNITS = (ContentUnit.G, ContentUnit.KG)
+_VOLUME_UNITS = (ContentUnit.ML, ContentUnit.L)
+
+
+def classify_costing_mode(p: ExternalCatalogProduct) -> ProductCostingMode:
+    """Decide how a single product can cost a recipe (spec audit) — confirmed fields only.
+
+    A bare ``unit_price`` is NEVER sufficient: a fixed package that merely shows a reference
+    price per kg/l is ``UNRESOLVED`` (its real content is unknown, so a fractional amount can't
+    be costed). Only a known net content (fixed package), a genuine sale by weight/volume, or a
+    known unit count makes a product costable.
+    """
+    if p.regular_price is None or not p.external_product_id:
+        return ProductCostingMode.UNRESOLVED
+    ncq, ncu = p.net_content_quantity, p.net_content_unit
+    # 1. fixed package with continuous content -> fraction-costable pro rata.
+    if ncq is not None and ncu in _MASS_UNITS + _VOLUME_UNITS:
+        return ProductCostingMode.FIXED_PACKAGE
+    # 2. a known count of discrete pieces (net content in units, or sold per unit with a count).
+    if ncq is not None and ncu is ContentUnit.UNIT:
+        return ProductCostingMode.DISCRETE_UNIT
+    if p.sell_unit is SellUnit.UNIT and p.package_quantity is not None:
+        return ProductCostingMode.DISCRETE_UNIT
+    # 3. genuine variable weight/volume: real sale-by-measure AND a confirmed unit price.
+    upu = (p.unit_price_unit or "").lower()
+    if p.variable_weight and p.unit_price is not None:
+        if p.sell_unit is SellUnit.WEIGHT and upu in ("kg", "g"):
+            return ProductCostingMode.VARIABLE_WEIGHT
+        if p.sell_unit is SellUnit.VOLUME and upu in ("l", "ml"):
+            return ProductCostingMode.VARIABLE_VOLUME
+    # 4. anything else (incl. a lone reference unit_price on a fixed package) cannot cost.
+    return ProductCostingMode.UNRESOLVED
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +183,12 @@ class CoverageObservation:
     identifier_coverage: Decimal | None = None
     barcode_coverage: Decimal | None = None
     observed_at_coverage: Decimal | None = None
-    # Fraction of products that could actually cost a recipe (price + id + verifiable content).
+    # Per-product costing modes aggregated (spec audit): fraction of fixed packages, of genuine
+    # variable-weight/volume items, and of products that could NOT be resolved for costing.
+    package_coverage: Decimal | None = None
+    variable_weight_coverage: Decimal | None = None
+    unresolved_costing_coverage: Decimal | None = None
+    # Fraction of products that could actually cost a recipe (any resolved mode).
     costing_eligible_product_coverage: Decimal | None = None
     costing_eligibility: str = "unknown"  # unknown | insufficient | sufficient
 
@@ -158,17 +200,8 @@ def _ratio(n: int, total: int) -> Decimal | None:
 
 
 def _is_costable(p: ExternalCatalogProduct) -> bool:
-    """A product can cost a recipe when it has a price, an id and verifiable content/unit.
-
-    Two honest paths: a fixed package with known net content (qty+unit), or a weight/volume
-    item sold by a normalisable unit price. A comparison price alone (no sell-by-weight) does
-    NOT make a fixed package costable — its real content stays unknown.
-    """
-    if not p.external_product_id or p.regular_price is None:
-        return False
-    if p.net_content_quantity is not None and p.net_content_unit is not None:
-        return True
-    return bool(p.variable_weight and p.unit_price is not None and p.unit_price_unit)
+    """Costable iff its per-product costing mode is anything other than UNRESOLVED."""
+    return classify_costing_mode(p) is not ProductCostingMode.UNRESOLVED
 
 
 def _costing_eligibility(obs: CoverageObservation) -> str:
@@ -210,7 +243,16 @@ def measure_coverage(
     ident = sum(1 for p in products if p.external_product_id)
     barcode = sum(1 for p in products if p.barcode)
     observed_at = sum(1 for p in products if p.observed_at is not None)
-    costable = sum(1 for p in products if _is_costable(p))
+    # Classify EACH product first; aggregate the modes afterwards (never a global shortcut).
+    modes = [classify_costing_mode(p) for p in products]
+    fixed = sum(1 for m in modes if m is ProductCostingMode.FIXED_PACKAGE)
+    var = sum(
+        1
+        for m in modes
+        if m in (ProductCostingMode.VARIABLE_WEIGHT, ProductCostingMode.VARIABLE_VOLUME)
+    )
+    unresolved = sum(1 for m in modes if m is ProductCostingMode.UNRESOLVED)
+    costable = sum(1 for m in modes if m is not ProductCostingMode.UNRESOLVED)
     exhausted = captured < limit  # iteration ended before the cap -> we saw the whole path
     observed = "full" if (supports_full_catalog and exhausted) else "sample_only"
     obs = CoverageObservation(
@@ -222,6 +264,9 @@ def measure_coverage(
         identifier_coverage=_ratio(ident, captured),
         barcode_coverage=_ratio(barcode, captured),
         observed_at_coverage=_ratio(observed_at, captured),
+        package_coverage=_ratio(fixed, captured),
+        variable_weight_coverage=_ratio(var, captured),
+        unresolved_costing_coverage=_ratio(unresolved, captured),
         costing_eligible_product_coverage=_ratio(costable, captured),
     )
     obs.costing_eligibility = _costing_eligibility(obs)
@@ -337,6 +382,9 @@ def upsert_activation(
     row.identifier_coverage = obs.identifier_coverage
     row.barcode_coverage = obs.barcode_coverage
     row.observed_at_coverage = obs.observed_at_coverage
+    row.package_coverage = obs.package_coverage
+    row.variable_weight_coverage = obs.variable_weight_coverage
+    row.unresolved_costing_coverage = obs.unresolved_costing_coverage
     row.costing_eligible_product_coverage = obs.costing_eligible_product_coverage
     row.costing_eligibility = obs.costing_eligibility
     # Onboarding NEVER grants production eligibility (full gate + human approval required).
@@ -367,6 +415,7 @@ __all__ = [
     "MatrixEntry",
     "OnboardingMatrix",
     "ProviderOnboardingReport",
+    "classify_costing_mode",
     "config_status",
     "get_entry",
     "measure_coverage",

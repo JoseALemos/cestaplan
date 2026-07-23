@@ -116,6 +116,16 @@ def list_price_providers(user: CurrentUser, db: DbSession) -> list[dict[str, Any
                 "geographic_scope_coverage": (
                     _s(activation.geographic_scope_coverage) if activation else None
                 ),
+                "package_coverage": _s(activation.package_coverage) if activation else None,
+                "variable_weight_coverage": (
+                    _s(activation.variable_weight_coverage) if activation else None
+                ),
+                "unresolved_costing_coverage": (
+                    _s(activation.unresolved_costing_coverage) if activation else None
+                ),
+                "costing_eligible_product_coverage": (
+                    _s(activation.costing_eligible_product_coverage) if activation else None
+                ),
                 "costing_eligibility": (
                     activation.costing_eligibility if activation else "unknown"
                 ),

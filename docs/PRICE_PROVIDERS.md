@@ -87,13 +87,20 @@ capturas reales); el mapper de cada cadena está en `providers/parsebot/chains.p
 |---|---|---|---|---|---|---|
 | DIA | parsebot-dia | dense_candidate | search_products | sample_only | no | Experimental |
 | Alcampo | parsebot-alcampo | dense_candidate | search_products | sample_only | **sí** | Disponible para validación |
-| Carrefour | parsebot-carrefour | dense_candidate | get_products_by_category | sample_only | **sí** | Disponible para validación |
+| Carrefour | parsebot-carrefour | dense_candidate | get_products_by_category | sample_only | no¹ | Experimental |
 | Mercadona | apify-mercadona | dense_candidate | — (sin API Parse.bot) | — | — | Configuración pendiente / `blocked_by_missing_api` |
 | Lidl ES | parsebot-lidl | partial_offers | get_visible_products | sample_only | no | Ofertas solamente |
 | Aldi ES | parsebot-aldi | partial_offers | get_current_offers | sample_only | no | Ofertas solamente |
 | Deza | parsebot-deza | partial_offers | get_current_offers (sin precio) | — | — | Fuente insuficiente (`blocked_by_insufficient_source`) |
 | Open Prices | open-prices | complementary | — | — | — | complementaria |
 | MercaEjemplo | demo | complementary | — (fixtures) | full | sí | Disponible (dev) |
+
+¹ La cobertura de costeo se decide **por producto** (`ProductCostingMode`): `fixed_package`
+(contenido neto conocido), `variable_weight`/`variable_volume` (venta real a peso/volumen con
+`unit_price` confirmado), `discrete_unit` (nº de unidades) o `unresolved`. Un `unit_price` de
+referencia por kg/l sobre un envase fijo **no** basta para costear — queda `unresolved`. La
+elegibilidad agregada se calcula tras clasificar cada producto. La muestra de Carrefour
+(Frescos) trae 70 % de venta real a peso y 30 % de envases con €/kg informativo → `insufficient`.
 
 Ninguna cadena está activada en producción: `data_rights_status=under_review`,
 `production_eligibility=false`, `production_approved_at=null`. Sin API de Mercadona en la cuenta,

@@ -104,6 +104,27 @@ def _pct(text: object) -> Decimal | None:
     return _dec(m.group(1)) if m else None
 
 
+# Textual evidence that an item is genuinely sold loose (by weight/volume), not a fixed package.
+_VARIABLE_MARKERS = ("granel", "al peso", "a peso", "aprox", "/kg", "/ kg", "por kg", "por peso")
+
+
+def _variable_sale_kind(name: object, up_unit: str | None) -> SellUnit | None:
+    """SellUnit.WEIGHT/VOLUME when the NAME evidences a real sale by weight/volume, else None.
+
+    A bare unit price is never enough: without textual evidence that the item is sold loose
+    (e.g. 'a granel', 'al peso', '… aprox') the reference €/kg is only informational, so the
+    product is not treated as variable-weight.
+    """
+    n = str(name or "").lower()
+    if not any(m in n for m in _VARIABLE_MARKERS):
+        return None
+    if up_unit in ("kg", "g"):
+        return SellUnit.WEIGHT
+    if up_unit in ("l", "ml"):
+        return SellUnit.VOLUME
+    return None
+
+
 def _to_dt(value: object, *, fallback: datetime) -> datetime:
     try:
         return datetime.fromisoformat(str(value))
@@ -255,10 +276,13 @@ class ParseBotCarrefourMapper(_BaseParseBotMapper):
         if regular is None:
             raise UnsupportedSchemaError("carrefour record without a decodable price")
         qty, unit = self._net_content(r)
-        measure = str(r.get("measure_unit") or "").lower()
-        variable = unit is None and measure in ("kg", "g", "l", "ml")
         up_unit = _UNIT_PRICE_UNITS.get(str(r.get("unit_price_unit") or "").lower())
         up = _dec(r.get("unit_price"))
+        # Only a genuine sale by weight/volume (name evidence + a unit price) is variable; a
+        # reference €/kg on a fixed package is NOT enough (audit) -> stays a package.
+        sale_kind = _variable_sale_kind(r.get("name"), up_unit) if (up and up_unit) else None
+        variable = sale_kind is not None
+        sell_unit = sale_kind or SellUnit.PACKAGE
         return ExternalCatalogProduct(
             provider=self.provider_code,
             retailer_slug=self.retailer_slug,
@@ -267,7 +291,7 @@ class ParseBotCarrefourMapper(_BaseParseBotMapper):
             brand=r.get("brand") or None,
             category=r.get("category") or None,
             barcode=r.get("ean") or None,
-            sell_unit=SellUnit.WEIGHT if variable else SellUnit.PACKAGE,
+            sell_unit=sell_unit,
             regular_price=regular,
             promotional_price=promo if (promo and promo < regular) else None,
             loyalty_price=_dec(r.get("loyalty_price")),
