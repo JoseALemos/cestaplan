@@ -43,6 +43,7 @@ from cestaplan_api.models.ingestion import (
     PromotionRule,
     RawCapture,
     StoreResolution,
+    SupplierFieldMapping,
 )
 from cestaplan_api.models.jobs import GenerationJob
 from cestaplan_api.models.plan import (
@@ -110,6 +111,7 @@ __all__ = [
     "Retailer",
     "Store",
     "StoreResolution",
+    "SupplierFieldMapping",
     "TimestampMixin",
     "UUIDMixin",
     # usage / metering

@@ -287,7 +287,22 @@ class ProductVariant(BaseModel):
     package_quantity: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     package_unit: Mapped[str | None] = mapped_column(Text)
     package_count: Mapped[int | None] = mapped_column(Integer)
+    # How the variant is sold: as a fixed package, a counted unit, or by weight/volume.
+    # One of SELL_UNITS; drives how the planner turns a recipe quantity into a cost.
     sell_unit: Mapped[str | None] = mapped_column(Text)
+    # Net content of the variant regardless of how it is sold (e.g. a 400 g can sold as
+    # one "unit" still has net_content_quantity=400, net_content_unit="g"). This is what
+    # lets the engine cost a recipe measured in g/ml against a counted product.
+    net_content_quantity: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    net_content_unit: Mapped[str | None] = mapped_column(Text)
+    # True when the item is sold by variable weight (e.g. fresh fish billed at the till);
+    # its price is a unit_price and the package_quantity is nominal.
+    variable_weight: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Reference price per unit_price_unit (e.g. 2.30 €/kg), when the supplier provides it.
+    unit_price: Mapped[Decimal | None] = mapped_column(money())
+    unit_price_unit: Mapped[str | None] = mapped_column(Text)
     image_url: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
@@ -489,3 +504,41 @@ class CoverageSnapshot(BaseModel):
     status: Mapped[str] = mapped_column(
         enum_col(*COVERAGE_STATUS, name="coverage_snapshot_status"), nullable=False
     )
+
+
+# How a variant is sold/measured. Kept as documented string sets (validated on import)
+# rather than DB enums, so a new supplier vocabulary never needs a migration.
+SELL_UNITS = ("package", "unit", "weight", "volume")
+# How an ingredient<->product mapping was produced, for audit and review triage.
+MATCH_METHODS = ("exact", "barcode", "token", "manual", "supplier_declared", "ai")
+
+
+class SupplierFieldMapping(BaseModel):
+    """Provider-agnostic map from a supplier's payload to our product/price contract.
+
+    A licensed feed/catalogue arrives in the supplier's own shape. This row declares, per
+    source, which supplier field feeds each of our canonical product/price fields (dotted
+    paths allowed) plus optional unit aliases, so the importers stay provider-agnostic and
+    never hardcode a supplier schema. It deliberately does NOT map ``canonical_name``: the
+    recipe-ingredient link is resolved later by the mapping/review pipeline.
+    """
+
+    __tablename__ = "supplier_field_mapping"
+    __table_args__ = (
+        Index("ux_supplier_field_mapping_source_name", "source_name", unique=True),
+    )
+
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    data_source_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("data_source.id")
+    )
+    # our canonical field -> supplier field (dotted path allowed), e.g.
+    # {"product_name": "title", "amount": "price.value", "net_content_unit": "unit"}.
+    field_map: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # supplier unit string -> our unit code, e.g. {"gramo": "g", "litro": "l"}.
+    unit_aliases: Mapped[dict | None] = mapped_column(JSONB)
+    default_currency: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    notes: Mapped[str | None] = mapped_column(Text)

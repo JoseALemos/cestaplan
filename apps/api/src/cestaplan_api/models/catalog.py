@@ -296,16 +296,31 @@ class IngredientProductMapping(BaseModel):
         Index("ix_ing_map_ingredient_rank", "ingredient_id", "preference_rank"),
     )
 
+    # canonical_ingredient_id in the spec: the internal recipe-ingredient this maps to.
     ingredient_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("ingredient.id"), nullable=False
     )
     product_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("product.id"), nullable=False
     )
+    # The specific sellable variant this mapping resolves to (licensed-feed path). Nullable
+    # for legacy demo/import mappings that predate the variant model.
+    product_variant_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("product_variant.id")
+    )
     retailer_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("retailer.id"))
     conversion_factor: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
     preference_rank: Mapped[int | None] = mapped_column(Integer)
     confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # How the mapping was produced (see MATCH_METHODS) and its human/machine review state.
+    match_method: Mapped[str | None] = mapped_column(Text)
+    verification_status: Mapped[str] = mapped_column(
+        enum_col(*VERIFICATION_STATUS, name="ing_map_verification_status"),
+        nullable=False,
+        server_default="unverified",
+    )
+    verified_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("user.id"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
