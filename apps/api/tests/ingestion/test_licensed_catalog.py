@@ -120,7 +120,12 @@ def test_csv_importer_parses_and_reports_bad_rows() -> None:
 
 
 def test_json_importer_items_path() -> None:
-    raw = '{"data": {"items": [' + '{"sku":"J1","title":"Vinagre 750 ml","precio":{"valor":"0.87","moneda":"EUR"},"envase":{"cantidad":"750","unidad":"ml"}}' + "]}}"
+    item = (
+        '{"sku":"J1","title":"Vinagre 750 ml",'
+        '"precio":{"valor":"0.87","moneda":"EUR"},'
+        '"envase":{"cantidad":"750","unidad":"ml"}}'
+    )
+    raw = '{"data": {"items": [' + item + "]}}"
     importer = JsonLicensedCatalogImporter(items_path="data.items")
     records, errors = importer.to_records(raw, _MAP)
     assert errors == []

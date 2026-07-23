@@ -91,7 +91,9 @@ def test_non_admin_forbidden(client: TestClient, db_session: Session) -> None:
     assert client.post(
         "/api/v1/auth/register", json={"email": "u@x.com", "password": "correct-horse-battery"}
     ).status_code == 201
-    client.post("/api/v1/auth/login", json={"email": "u@x.com", "password": "correct-horse-battery"})
+    client.post(
+        "/api/v1/auth/login", json={"email": "u@x.com", "password": "correct-horse-battery"}
+    )
     assert client.get("/api/v1/admin/licensed/review-queue").status_code == 403
 
 
