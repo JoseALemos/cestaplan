@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root is four levels up from this file:
@@ -32,6 +33,22 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str = "postgresql+psycopg://cestaplan:cestaplan@localhost:5432/cestaplan"
+
+    @field_validator("database_url")
+    @classmethod
+    def _pin_psycopg_driver(cls, value: str) -> str:
+        """Force the psycopg (v3) driver onto bare Postgres URLs.
+
+        Managed hosts (Railway, Render, Heroku, Fly) hand out ``postgres://`` or
+        ``postgresql://`` URLs. SQLAlchemy maps those to the legacy ``psycopg2`` dialect,
+        which is not installed — only ``psycopg`` v3 is. Rewrite the scheme so the same
+        URL works whether it comes from a managed provider or the local default.
+        """
+        if value.startswith("postgres://"):
+            value = "postgresql://" + value[len("postgres://") :]
+        if value.startswith("postgresql://"):
+            value = "postgresql+psycopg://" + value[len("postgresql://") :]
+        return value
 
     # --- API / web ---
     api_host: str = "0.0.0.0"
