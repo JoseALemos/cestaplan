@@ -227,7 +227,7 @@ Estados `JobStatus`: `queued` · `locked` · `completed` · `failed` · `dead_le
 | Conector | Retailer | Estado | Notas |
 |----------|----------|--------|-------|
 | `DemoFixtureConnector` | `demofixturemart` | **Activo** | Sintético, sin red; siempre registrado (`DEMO_ALWAYS_ENABLED`). |
-| `OpenPricesConnector` | Open Prices (ODbL) | **En incorporación** | Fuente pública real y legal. Hoy Open Prices se ingiere como `open_dataset` vía `python -m cestaplan_api.scripts.sync_open_prices`; su envoltura como `RetailerConnector` del framework se está añadiendo. |
+| `OpenPricesConnector` | Open Prices (ODbL) | **Implementado (activo)** | Fuente pública real y legal (`open_dataset`). Implementado como `RetailerConnector` (FASE C) en `ingestion/connectors/openprices.py` y registrado; también sincronizable por `python -m cestaplan_api.scripts.sync_open_prices`. |
 | Mercadona / Carrefour / Lidl | — | `permission_required` | Framework presente, **desactivado**; sus endpoints de datos están prohibidos por `robots.txt`. Nunca se rastrean. |
 | Dia / Alcampo / Deza | — | `partial_only` / `unsupported` | Evaluación por fuente pendiente. Ver la matriz. |
 

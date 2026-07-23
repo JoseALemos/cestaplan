@@ -60,7 +60,7 @@ de datos colaborativa de precios (proyecto Open Food Facts). Hoy se ingiere como
 `DataSource` de tipo `open_dataset` mediante `python -m
 cestaplan_api.scripts.sync_open_prices` (cron `open-prices-sync`, ver
 [`RAILWAY_PRICE_SYNC.md`](RAILWAY_PRICE_SYNC.md)); su envoltura como
-`RetailerConnector` del framework de ingesta se está añadiendo como **primer conector
+`RetailerConnector` del framework de ingesta está **implementado** como **primer conector
 real**. Cobertura desigual: se reporta con honestidad vía `CoverageSnapshot`, nunca
 como completa. Es la única fuente de precios reales activa del proyecto.
 

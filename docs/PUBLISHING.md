@@ -24,6 +24,12 @@ Marca cada punto antes de crear el repositorio público.
 - [ ] **`.env.example` no contiene secretos reales**, sólo plantillas.
 - [ ] Revisado que no hay volcados de base de datos, catálogos comerciales ni datos de
       usuarios reales en `data/` (sólo demo sintético `is_synthetic=true`).
+- [ ] **Subsistema de precios (ingesta) seguro por defecto:** conectores **desactivados
+      por defecto** (`SCRAPING_ENABLED`, `PRICE_SYNC_ENABLED` y todos los
+      `*_CONNECTOR_ENABLED` en `false`); **sin scraping de fuentes bloqueadas**
+      (`permission_required`/`unsupported` no rastrean, habilitarlos por API devuelve
+      409); **auditoría de secretos limpia** (redacción de cabeceras/cookies/tokens, sin
+      claves de feed reales en el árbol ni en `.env.example`).
 
 ### Licencias y comunidad
 
@@ -38,12 +44,18 @@ Marca cada punto antes de crear el repositorio público.
       es MIT pero los datos **no** heredan esa licencia; Open Food Facts y Open Prices
       son **ODbL** (atribución + share-alike); los catálogos comerciales son
       `proprietary` y no se redistribuyen.
+- [ ] **Documentación de la ingesta de precios presente y enlazada** desde el `README.md`:
+      `docs/PRICE_INGESTION.md`, `docs/CONNECTOR_ARCHITECTURE.md`,
+      `docs/RETAILER_SOURCE_MATRIX.md`, `docs/SCRAPING_POLICY.md`,
+      `docs/DATA_RETENTION.md`, `docs/PRICE_QUALITY.md`, `docs/RAILWAY_PRICE_SYNC.md`,
+      `docs/INCIDENT_RESPONSE.md`, `docs/FASE_F_DEPLOYMENT.md`,
+      `docs/PRICE_SUBSYSTEM_AUDIT.md` y ADR `docs/adr/0008-price-ingestion-subsystem.md`.
 - [ ] **`README.md`** y **`CHANGELOG.md`** actualizados y sin enlaces rotos.
 
 ### Integración continua
 
 - [ ] **CI en verde** localmente: `make lint`, `make typecheck`, `make test`
-      (290 tests de backend + suites JS) pasan.
+      (~547 tests de backend, incluida la ingesta de precios, + suites JS) pasan.
 - [ ] El workflow `.github/workflows/ci.yml` existe y apunta a las ramas correctas.
 
 ---
@@ -134,7 +146,7 @@ verde; si no, actívalo en **Settings → Actions → General** (permitir workfl
 ## 3. Después de publicar
 
 - [ ] Rellenar el badge de CI del `README.md` con el badge real del workflow.
-- [ ] Actualizar los enlaces `[Unreleased]` / `[0.1.0]` del `CHANGELOG.md` con la URL
-      real del repositorio.
-- [ ] Crear el release `v0.1.0` (`gh release create v0.1.0 --generate-notes`).
+- [ ] Actualizar los enlaces `[Unreleased]` / `[0.2.0]` / `[0.1.0]` del `CHANGELOG.md`
+      con la URL real del repositorio.
+- [ ] Crear el release `v0.2.0` (`gh release create v0.2.0 --generate-notes`).
 - [ ] Añadir la descripción social / imagen del repositorio (opcional).

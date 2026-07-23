@@ -91,6 +91,14 @@ lo dice en lugar de inventarlo.
   **valida**. Es **opcional**: con la IA desactivada o no disponible, el sistema
   **recae en recetas semilla** y todo lo crítico sigue funcionando.
 
+### Ingesta de precios (opcional, desacoplada)
+
+- **Subsistema responsable de ingesta de precios**: framework de conectores
+  (`RetailerConnector`), `HttpFetcher` resiliente, pipeline con historial append-only
+  y cuarentena de anomalías, cola/scheduler/worker en Postgres, y APIs de admin y de
+  consumo (`resolve-basket`). **No hace scraping** de fuentes bloqueadas y viene
+  **apagado por defecto**. Ver [Subsistema de precios (ingesta)](#subsistema-de-precios-ingesta).
+
 ### Producto / pantallas
 
 - **Onboarding** guiado: cadena → miembros del hogar → alergias/dietas →
@@ -150,6 +158,113 @@ El **coste completo funciona con un catálogo denso**:
 CestaPlan **prefiere decir "no tengo este precio" antes que inventarlo**. Cuando falta
 un precio, la línea entra en "coste estimado" o queda sin coste conocido, nunca en `0`.
 
+## Subsistema de precios (ingesta)
+
+Desacoplado del motor de comidas, CestaPlan incluye un **subsistema responsable de
+ingesta de precios**: la infraestructura para descubrir, capturar, parsear, normalizar,
+validar y versionar precios de supermercado **desde fuentes legales y públicas**, con
+procedencia completa y **sin inventar datos**. Vive en
+`apps/api/src/cestaplan_api/ingestion/` (+ `jobs/`) y alimenta las proyecciones
+`ProductPrice` que consume el motor; el motor sigue funcionando aunque la ingesta esté
+apagada. Documentación operativa completa en
+[docs/PRICE_INGESTION.md](./docs/PRICE_INGESTION.md).
+
+**No es un scraper.** El subsistema **no realiza scraping de fuentes bloqueadas ni
+elude** CAPTCHA, muros de login, anti-bot ni `robots.txt`: los **detecta y reporta,
+nunca los resuelve**. Una fuente que prohíbe el acceso a sus endpoints de datos se
+**detiene y se marca** (`permission_required`), con el conector presente pero
+**desactivado**. Detalle en [docs/SCRAPING_POLICY.md](./docs/SCRAPING_POLICY.md).
+
+### Framework de conectores y pipeline
+
+- Contrato `RetailerConnector` (clase abstracta, sin ORM) con `capabilities()` y
+  `source_policy()` honestos y **no-ops seguros** por defecto (degradación elegante).
+- `HttpFetcher` resiliente y **único punto de red**: backoff exponencial + jitter,
+  conditional-GET (ETag/If-Modified-Since + hash de cuerpo), **circuit breaker** por
+  dominio, **guardia SSRF** (rechaza IPs privadas/loopback y esquemas no http(s)),
+  lista blanca de dominios, **detección de bloqueo/CAPTCHA que nunca resuelve** y
+  **redacción de secretos** (cabeceras `Authorization`/`Cookie`/tokens) antes de
+  persistir o devolver nada.
+- Pipeline: `Discovery → Store Resolution → Capture (RawCapture con retención) →
+  Parse → Normalize (€/kg·€/l·€/ud, promociones como modelo con fechas de validez) →
+  Validate → Anomaly → Quarantine/Accept → Matching → History → Current → Coverage`.
+  El **historial `PriceObservation` es append-only**; una anomalía severa o una
+  validación fallida va a **cuarentena** y **nunca reemplaza el último-bueno**.
+- `CurrentPriceService` expone frescura (`fresh`/`stale`/`expired`) y
+  `PriceCoverageService` escribe `CoverageSnapshot` **honestos** (parcial se reporta
+  como `partial`, nunca como `complete`).
+- Cola `CrawlJob` en **Postgres** (`SELECT … FOR UPDATE SKIP LOCKED`, heartbeat,
+  backoff, `dead_letter`), **scheduler** idempotente (advisory lock + freshness por
+  `(retailer, store, run_type)`) y **worker** con aislamiento por job. Diseño en
+  [docs/CONNECTOR_ARCHITECTURE.md](./docs/CONNECTOR_ARCHITECTURE.md).
+
+### Conectores (estado honesto)
+
+Seis conectores registrados; **tres operan** y **tres son de ofertas, desactivados**.
+Ninguna cadena real se rastrea. Matriz completa en
+[docs/RETAILER_SOURCE_MATRIX.md](./docs/RETAILER_SOURCE_MATRIX.md).
+
+| `retailer_code` | Tipo | ¿Opera? | Base legal |
+|-----------------|------|:-------:|------------|
+| `demofixturemart` | Demo sintético, **sin red** | **Sí** (siempre registrado) | Dato sintético |
+| `open_prices` | `open_dataset` real (**ODbL**, con atribución) | **Sí** | Pública — Open Prices (Open Food Facts). Única fuente de **precios reales** activa; escasa. |
+| `csv_feed` | Feed de operador (CSV/JSON) | **Sí** | `authorized` — feed que el operador **aporta legítimamente** |
+| `lidl_offers` / `aldi_offers` | Ofertas (parcial, nunca catálogo completo) | **No** | `permission_required` — desactivados; nunca rastrean |
+| `deza` | Regional; ruta real = **import por admin** | **No** | `unsupported` (scraping) / `permission_required` |
+
+Los conectores de **catálogo** de Mercadona, Carrefour y Lidl son
+`permission_required`: su `robots.txt` prohíbe sus endpoints de datos
+(`/api`, `/supermercado/ajax`, `/user-api`), así que existen como framework pero
+**nunca se ejecutan**. Activar su flag opt-in **no** los pone a rastrear; la API de
+admin devuelve **409** al intentar habilitar un conector `permission_required`/
+`unsupported`.
+
+### APIs
+
+- **Administración** (`/api/v1/admin/*`, admin + CSRF):
+  `connectors` (listar / `enable` / `disable` / `health-check`), `crawls`
+  (`cancel` / `retry`), `anomalies` (`approve` / `reject`), `coverage`, `sources`
+  (footing legal y fechas de revisión de términos/`robots`), `prices/manual` (registrar
+  un precio tecleado por el operador, append-only y auditado).
+- **Consumo de precios** (`/api/v1/*`): `stores/{id}/coverage`,
+  `stores/{id}/catalog-status`, `products/search`, `products/{id}/prices`,
+  `prices/current` (con frescura) y `POST prices/resolve-basket` (resuelve una cesta a
+  precios actuales, listando honestamente lo **no resuelto**, nunca fabricado).
+
+### Cómo se ejecuta (todo opt-in, apagado por defecto)
+
+Módulos Python del paquete `cestaplan_api`, en Railway como dos servicios sin dominio
+público (ver [docs/RAILWAY_PRICE_SYNC.md](./docs/RAILWAY_PRICE_SYNC.md) y
+[docs/FASE_F_DEPLOYMENT.md](./docs/FASE_F_DEPLOYMENT.md)):
+
+```bash
+python -m cestaplan_api.jobs.schedule_daily_price_sync   # scheduler (cron diario idempotente)
+python -m cestaplan_api.jobs.crawl_worker                # worker de la cola (demonio)
+python -m cestaplan_api.jobs.sync_retailer  --retailer <slug>   # forzar un retailer ahora
+python -m cestaplan_api.jobs.sync_store     --store-id <uuid>   # forzar una tienda
+python -m cestaplan_api.jobs.retry_failed   --run-id  <uuid>    # re-encolar dead-letter
+python -m cestaplan_api.jobs.reprocess_capture --capture-id <uuid>   # re-parsear una captura
+python -m cestaplan_api.jobs.connector_health                   # salud por conector
+```
+
+`SCRAPING_ENABLED`, `PRICE_SYNC_ENABLED` y todos los `*_CONNECTOR_ENABLED` vienen a
+`false` por defecto: activar un conector es una decisión consciente del operador y
+**sólo** para fuentes cuya evaluación (términos + `robots.txt`) lo permita.
+
+### Realidad honesta de los datos
+
+Los **precios reales completos por cadena no son accesibles legalmente** hoy (sin feed
+oficial; `robots.txt` de las grandes prohíbe sus endpoints). El coste al 100 % de un
+plan sólo se logra con un **catálogo denso**: la **demo**, un **`csv_feed`** que aportes
+con derechos, o un **feed comercial licenciado**. **Open Prices** es real y legal pero
+**escaso** (cubre sobre todo productos que las recetas no compran), así que sobre una
+cadena real la cobertura es casi nula — y se muestra como tal, nunca como completa.
+Auditoría de producción y escenarios de fallo verificados en
+[docs/PRICE_SUBSYSTEM_AUDIT.md](./docs/PRICE_SUBSYSTEM_AUDIT.md); calidad, frescura y
+anomalías en [docs/PRICE_QUALITY.md](./docs/PRICE_QUALITY.md); retención de capturas en
+[docs/DATA_RETENTION.md](./docs/DATA_RETENTION.md); runbook de incidentes en
+[docs/INCIDENT_RESPONSE.md](./docs/INCIDENT_RESPONSE.md).
+
 ## Stack
 
 | Capa | Tecnología |
@@ -158,7 +273,7 @@ un precio, la línea entra en "coste estimado" o queda sin coste conocido, nunca
 | Backend | Python 3.12 + FastAPI + Pydantic v2 + SQLAlchemy 2 + Alembic + HTTPX + SDK oficial de OpenAI |
 | Base de datos | PostgreSQL (cola de trabajos con `SELECT FOR UPDATE SKIP LOCKED`, sin Redis) |
 | Contratos | Fuente única en `packages/contracts`: JSON Schema desde Pydantic v2 → tipos TS + esquemas Zod |
-| Calidad | Ruff + Pyright (Python) · ESLint + Prettier + Vitest + Playwright (JS) · Pytest (**290 tests de backend**) |
+| Calidad | Ruff + Pyright (Python) · ESLint + Prettier + Vitest + Playwright (JS) · Pytest (**~547 tests de backend**, incluida la ingesta de precios) |
 | Infra | Docker + docker-compose + GitHub Actions + Railway |
 | Monorepo | pnpm workspaces + Turborepo (JS) · uv + Python 3.12 (backend) |
 
@@ -288,8 +403,18 @@ El modelo **no** se hardcodea en la lógica de negocio: se configura vía
 | [docs/ADAPTER_GUIDE.md](./docs/ADAPTER_GUIDE.md) | Guía de adaptadores de supermercado |
 | [docs/RECIPES_GUIDE.md](./docs/RECIPES_GUIDE.md) | Guía para contribuir recetas |
 | [docs/PRICE_SOURCES_GUIDE.md](./docs/PRICE_SOURCES_GUIDE.md) | Guía de fuentes de precios |
+| [docs/PRICE_INGESTION.md](./docs/PRICE_INGESTION.md) | Subsistema de ingesta de precios (visión general, pipeline, comandos) |
+| [docs/CONNECTOR_ARCHITECTURE.md](./docs/CONNECTOR_ARCHITECTURE.md) | Contrato `RetailerConnector`, `HttpFetcher`, cola/scheduler/worker |
+| [docs/RETAILER_SOURCE_MATRIX.md](./docs/RETAILER_SOURCE_MATRIX.md) | Matriz honesta por supermercado (fuente, autorización, estado) |
+| [docs/SCRAPING_POLICY.md](./docs/SCRAPING_POLICY.md) | Política estricta de acceso a fuentes (no scraping de bloqueadas) |
+| [docs/DATA_RETENTION.md](./docs/DATA_RETENTION.md) | Retención de capturas crudas y minimización de datos |
+| [docs/PRICE_QUALITY.md](./docs/PRICE_QUALITY.md) | Ámbito, tipo, frescura, cobertura y anomalías de precios |
+| [docs/RAILWAY_PRICE_SYNC.md](./docs/RAILWAY_PRICE_SYNC.md) | Despliegue del scheduler-cron y el worker de ingesta en Railway |
+| [docs/INCIDENT_RESPONSE.md](./docs/INCIDENT_RESPONSE.md) | Runbook de incidentes de la ingesta en producción |
+| [docs/FASE_F_DEPLOYMENT.md](./docs/FASE_F_DEPLOYMENT.md) | Playbook operativo de despliegue de la ingesta |
+| [docs/PRICE_SUBSYSTEM_AUDIT.md](./docs/PRICE_SUBSYSTEM_AUDIT.md) | Auditoría de producción y escenarios de fallo verificados |
 | [docs/ROADMAP.md](./docs/ROADMAP.md) | Hoja de ruta por fases |
-| [docs/adr/](./docs/adr/) | Architecture Decision Records |
+| [docs/adr/](./docs/adr/) | Architecture Decision Records (incl. `0008-price-ingestion-subsystem`) |
 
 Historial de cambios: [CHANGELOG.md](./CHANGELOG.md).
 
