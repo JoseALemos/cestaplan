@@ -19,37 +19,29 @@ from typing import Any
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.ingestion.providers.apify.client import ApifyClient
-from cestaplan_api.ingestion.providers.parsebot.client import ParseBotClient
+from cestaplan_api.ingestion.providers.parsebot import plans
 from cestaplan_api.ingestion.providers.sample_capture import (
     build_capture_artifacts,
     path_is_safe,
 )
 
-_SUPPORTED = ("parsebot-dia", "parsebot-alcampo", "apify-mercadona")
+_SUPPORTED = (
+    "parsebot-dia",
+    "parsebot-alcampo",
+    "parsebot-carrefour",
+    "parsebot-aldi",
+    "parsebot-lidl",
+    "parsebot-deza",
+    "apify-mercadona",
+)
 
 
 def _fetch_raw(provider: str, limit: int, query: str) -> list[Any]:
-    """Do ONE minimal, bounded call to the provider using env credentials only."""
+    """Do a minimal, bounded capture using env credentials only (via the chain's plan)."""
     settings = get_settings()
     if provider.startswith("parsebot-"):
-        if not settings.parse_bot_api_key:
-            raise RuntimeError("PARSE_BOT_API_KEY no está configurada")
-        base = (
-            settings.parse_bot_dia_base_url
-            if provider == "parsebot-dia"
-            else settings.parse_bot_alcampo_base_url
-        )
-        if not base:
-            raise RuntimeError(f"base URL de {provider} no configurada")
-        client = ParseBotClient(base_url=base, api_key=settings.parse_bot_api_key)
-        # Observed DIA contract: /search_products requires `query` and returns the products
-        # under data.search_items (see docs/PARSEBOT_INTEGRATION.md).
-        data = client.get_json("/search_products", {"query": query, "limit": limit})
-        inner = data.get("data", data) if isinstance(data, dict) else data
-        records = inner.get("search_items", []) if isinstance(inner, dict) else inner
-        if not isinstance(records, list):
-            raise RuntimeError("respuesta inesperada: no se encontró la lista de productos")
-        return list(records)[:limit]
+        # The per-chain capture plan owns the endpoint(s)/params/list extraction (plans.py).
+        return plans.capture_records(provider, settings, limit=limit, query=query)
     if provider == "apify-mercadona":
         if not settings.apify_api_token:
             raise RuntimeError("APIFY_API_TOKEN no está configurada")

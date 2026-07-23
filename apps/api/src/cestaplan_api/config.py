@@ -184,6 +184,9 @@ class Settings(BaseSettings):
     parse_bot_lidl_base_url: str = ""
     parse_bot_aldi_base_url: str = ""
     parse_bot_deza_base_url: str = ""
+    # Dev-only postal code used to resolve location for chains that price by zone (Carrefour).
+    # Never a production default; only for bounded onboarding captures.
+    price_provider_test_postal_code: str = "14007"
     # Apify (Mercadona actor) — Bearer token, actor id configurable, cost/quota caps.
     apify_enabled: bool = False
     apify_api_token: str = ""
