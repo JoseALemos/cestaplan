@@ -43,3 +43,9 @@ htmlcov/
 # --- Local data (never commit imported catalogues) ---
 data/imports/*
 !data/imports/.gitkeep
+
+# --- Provider samples / raw responses (spec §M) — never committed ---
+.local/
+provider-samples/
+raw-provider-responses/
+*.provider-secret.json

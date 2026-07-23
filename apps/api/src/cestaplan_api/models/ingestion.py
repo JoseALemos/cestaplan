@@ -586,3 +586,56 @@ class ProviderUsage(BaseModel):
     crawl_run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("crawl_run.id")
     )
+
+
+# Provider activation vocabularies (documented Text sets; validated in the activation gate).
+DATA_RIGHTS_STATUS = (
+    "unknown",
+    "under_review",
+    "development_only",
+    "commercial_use_allowed",
+    "display_allowed",
+    "storage_allowed",
+    "redistribution_forbidden",
+    "rejected",
+)
+TRANSPORT_STATUS = ("unknown", "operational", "degraded", "down")
+MAPPER_STATUS = ("unknown", "pending", "blocked", "verified")
+DATA_QUALITY_STATUS = ("unknown", "accepted", "degraded", "insufficient", "quarantined")
+
+
+class ProviderActivation(BaseModel):
+    """Production-activation gate for a price provider (spec §O).
+
+    Independent of whether the API merely works: a provider reaches production only when
+    transport is operational, its mapper is verified, data quality is accepted, its data
+    rights are compatible with the intended use, and a human has approved it
+    (``production_approved_at``/``by``). ``development_only`` allows dev use without approval.
+    """
+
+    __tablename__ = "provider_activation"
+    __table_args__ = (
+        Index("ux_provider_activation_code", "provider_code", unique=True),
+    )
+
+    provider_code: Mapped[str] = mapped_column(Text, nullable=False)
+    transport_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    mapper_status: Mapped[str] = mapped_column(Text, nullable=False, server_default="unknown")
+    data_quality_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    data_rights_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    development_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    production_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    production_approved_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("user.id")
+    )
+    notes: Mapped[str | None] = mapped_column(Text)

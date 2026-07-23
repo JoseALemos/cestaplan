@@ -31,10 +31,15 @@ class ProviderResponseError(ProviderError):
     """Malformed/unexpected response (HTML when JSON expected, truncated, block page)."""
 
 
+class ProviderNotActivated(ProviderError):
+    """A production sync was attempted for a provider that has not passed the activation gate."""
+
+
 __all__ = [
     "NotSupportedError",
     "ProviderAuthError",
     "ProviderError",
+    "ProviderNotActivated",
     "ProviderQuotaExceeded",
     "ProviderRateLimited",
     "ProviderResponseError",

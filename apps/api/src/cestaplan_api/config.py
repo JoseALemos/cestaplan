@@ -153,6 +153,20 @@ class Settings(BaseSettings):
     price_stale_hours: int = 48
     price_expired_hours: int = 168
     price_sync_max_concurrency: int = 2
+    # Safeguards (FASE 2A, spec §O/§R/§S). A threshold <= 0 disables that particular check.
+    price_provider_kill_switch: bool = False  # §S: hard stop for all external providers
+    provider_require_rights_approval: bool = True  # §O: block prod sync without rights approval
+    price_provider_max_daily_cost_eur: float = 0.0  # §S: 0 = per-provider caps only
+    price_provider_max_daily_requests: int = 0
+    price_provider_max_products_per_run: int = 1000
+    price_provider_max_execution_seconds: int = 900
+    price_provider_max_retries: int = 3
+    # §R quality floors (ratios 0..1) below which a provider is not a main catalogue.
+    provider_min_price_coverage: float = 0.95
+    provider_min_package_coverage: float = 0.80
+    provider_min_barcode_coverage: float = 0.0
+    provider_min_observed_at_coverage: float = 0.95
+    provider_max_catalog_drop_ratio: float = 0.50  # anomalous drop vs previous sync
     # Parse.bot (DIA / Alcampo) — X-API-Key, base URLs configurable.
     parse_bot_enabled: bool = False
     parse_bot_api_key: str = ""
