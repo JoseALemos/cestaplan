@@ -44,7 +44,7 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
     MatrixEntry(
         "parsebot-dia",
         "dia",
-        "dense_catalog",
+        "dense_candidate",
         "full",
         "transport_only",
         ("products", "categories", "search", "product_details", "prices", "promotions"),
@@ -54,7 +54,7 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
     MatrixEntry(
         "parsebot-alcampo",
         "alcampo",
-        "dense_catalog",
+        "dense_candidate",
         "full",
         "transport_only",
         ("products", "categories", "search", "product_details", "prices", "promotions", "stores"),
@@ -64,7 +64,7 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
     MatrixEntry(
         "apify-mercadona",
         "mercadona",
-        "dense_catalog_experimental",
+        "dense_candidate",
         "full",
         "disabled",
         ("products", "prices"),
@@ -73,10 +73,10 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
     MatrixEntry(
         "parsebot-carrefour",
         "carrefour",
-        "dense_catalog_candidate",
+        "dense_candidate",
         "full",
-        "disabled",
-        ("products", "prices"),
+        "transport_only",
+        ("products", "categories", "prices", "promotions", "stores"),
         needs_credentials=True,
         needs_base_url=True,
     ),
@@ -85,8 +85,8 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
         "lidl",
         "partial_offers",
         "partial",
-        "disabled",
-        ("promotions",),
+        "transport_only",
+        ("products", "prices", "promotions", "stores"),
         needs_credentials=True,
         needs_base_url=True,
     ),
@@ -95,8 +95,8 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
         "aldi",
         "partial_offers",
         "partial",
-        "disabled",
-        ("promotions",),
+        "transport_only",
+        ("promotions", "prices"),
         needs_credentials=True,
         needs_base_url=True,
     ),
@@ -143,6 +143,11 @@ class CoverageObservation:
     package_quantity_coverage: Decimal | None = None
     package_unit_coverage: Decimal | None = None
     geographic_scope_coverage: Decimal | None = None
+    identifier_coverage: Decimal | None = None
+    barcode_coverage: Decimal | None = None
+    observed_at_coverage: Decimal | None = None
+    # Fraction of products that could actually cost a recipe (price + id + verifiable content).
+    costing_eligible_product_coverage: Decimal | None = None
     costing_eligibility: str = "unknown"  # unknown | insufficient | sufficient
 
 
@@ -152,17 +157,32 @@ def _ratio(n: int, total: int) -> Decimal | None:
     return (Decimal(n) / Decimal(total)).quantize(Decimal("0.0001"))
 
 
-def _costing_eligibility(obs: CoverageObservation) -> str:
-    """Costable only with a real observed scope AND high price/package coverage.
+def _is_costable(p: ExternalCatalogProduct) -> bool:
+    """A product can cost a recipe when it has a price, an id and verifiable content/unit.
 
-    A ``sample_only``/``unknown`` scope is never costable — a handful of records cannot prove
-    catalogue breadth. Geographic coverage is deliberately excluded here (it gates localisation,
-    not whether a recipe can be priced).
+    Two honest paths: a fixed package with known net content (qty+unit), or a weight/volume
+    item sold by a normalisable unit price. A comparison price alone (no sell-by-weight) does
+    NOT make a fixed package costable — its real content stays unknown.
     """
-    if obs.observed_catalog_scope not in ("full", "partial"):
-        return "insufficient"
-    needed = (obs.price_coverage, obs.package_quantity_coverage, obs.package_unit_coverage)
-    if any(v is None or v < _COSTING_THRESHOLD for v in needed):
+    if not p.external_product_id or p.regular_price is None:
+        return False
+    if p.net_content_quantity is not None and p.net_content_unit is not None:
+        return True
+    return bool(p.variable_weight and p.unit_price is not None and p.unit_price_unit)
+
+
+def _costing_eligibility(obs: CoverageObservation) -> str:
+    """Costable when enough products are individually costable AND priced (per §12).
+
+    Eligibility is a per-PRODUCT property (price + id + verifiable content), NOT catalogue
+    breadth: a bounded sample may be perfectly costable even while ``observed_catalog_scope``
+    stays ``sample_only``. Geographic coverage is tracked separately (localisation), and does
+    not gate costing here.
+    """
+    cov = obs.costing_eligible_product_coverage
+    if cov is None or obs.price_coverage is None:
+        return "unknown"
+    if cov < _COSTING_THRESHOLD or obs.price_coverage < _COSTING_THRESHOLD:
         return "insufficient"
     return "sufficient"
 
@@ -177,15 +197,20 @@ def measure_coverage(
 ) -> CoverageObservation:
     """Derive observed coverage + costing eligibility from a real capture (not from intent).
 
-    Hitting the capture limit, or a source without full-catalogue support, means ``sample_only``:
-    breadth is unproven. Package-content coverage (net quantity/unit) is what makes a price
-    costable for a recipe; geographic coverage is tracked separately for localisation.
+    Onboarding captures are bounded, so ``observed_catalog_scope`` is ``sample_only`` unless a
+    full-catalogue source was exhausted below the limit — breadth is never claimed from a
+    handful of records. Costing eligibility is decided per product (price + id + verifiable
+    content/unit); geographic coverage is tracked separately for localisation.
     """
     if captured <= 0:
         return CoverageObservation()
     priced = sum(1 for p in products if p.regular_price is not None)
     qty = sum(1 for p in products if p.net_content_quantity is not None)
     unit = sum(1 for p in products if p.net_content_unit is not None)
+    ident = sum(1 for p in products if p.external_product_id)
+    barcode = sum(1 for p in products if p.barcode)
+    observed_at = sum(1 for p in products if p.observed_at is not None)
+    costable = sum(1 for p in products if _is_costable(p))
     exhausted = captured < limit  # iteration ended before the cap -> we saw the whole path
     observed = "full" if (supports_full_catalog and exhausted) else "sample_only"
     obs = CoverageObservation(
@@ -194,6 +219,10 @@ def measure_coverage(
         package_quantity_coverage=_ratio(qty, captured),
         package_unit_coverage=_ratio(unit, captured),
         geographic_scope_coverage=Decimal("1.0000") if supports_store_scope else Decimal("0.0000"),
+        identifier_coverage=_ratio(ident, captured),
+        barcode_coverage=_ratio(barcode, captured),
+        observed_at_coverage=_ratio(observed_at, captured),
+        costing_eligible_product_coverage=_ratio(costable, captured),
     )
     obs.costing_eligibility = _costing_eligibility(obs)
     return obs
@@ -305,6 +334,10 @@ def upsert_activation(
     row.package_quantity_coverage = obs.package_quantity_coverage
     row.package_unit_coverage = obs.package_unit_coverage
     row.geographic_scope_coverage = obs.geographic_scope_coverage
+    row.identifier_coverage = obs.identifier_coverage
+    row.barcode_coverage = obs.barcode_coverage
+    row.observed_at_coverage = obs.observed_at_coverage
+    row.costing_eligible_product_coverage = obs.costing_eligible_product_coverage
     row.costing_eligibility = obs.costing_eligibility
     # Onboarding NEVER grants production eligibility (full gate + human approval required).
     row.production_eligibility = False

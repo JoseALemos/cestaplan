@@ -31,6 +31,10 @@ from cestaplan_api.ingestion.providers.onboarding import (
 from cestaplan_api.ingestion.providers.registry import registry
 from cestaplan_api.models import Retailer
 
+# Chains whose API is complete but whose schema lacks a costing-critical field (e.g. no price):
+# honestly blocked as insufficient source rather than "missing schema" (spec §8).
+INSUFFICIENT_SOURCE = {"parsebot-deza"}
+
 
 def _status_for(entry: MatrixEntry, captured: int) -> str:
     role = entry.intended_role
@@ -38,11 +42,9 @@ def _status_for(entry: MatrixEntry, captured: int) -> str:
         return "completed"
     if role == "complementary":
         return "partial"
-    if "experimental" in role:
-        return "experimental"
     if role == "partial_offers":
         return "partial"
-    if role.startswith("dense_catalog"):
+    if role.startswith("dense"):
         return "completed" if captured > 0 else "partial"
     return "completed"
 
@@ -75,6 +77,15 @@ def _onboard_one(db, entry: MatrixEntry, settings, limit: int) -> ProviderOnboar
         report.mapper_status = "blocked"
         upsert_activation(
             db, entry, now=datetime.now(UTC), transport_status="down", mapper_status="blocked"
+        )
+        return report
+
+    if entry.provider_code in INSUFFICIENT_SOURCE:
+        report.status = "blocked_by_insufficient_source"
+        report.mapper_status = "blocked_by_insufficient_source"
+        upsert_activation(
+            db, entry, now=datetime.now(UTC), transport_status="operational",
+            mapper_status="blocked",
         )
         return report
 
