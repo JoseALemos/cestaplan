@@ -510,7 +510,22 @@ class CoverageSnapshot(BaseModel):
 # rather than DB enums, so a new supplier vocabulary never needs a migration.
 SELL_UNITS = ("package", "unit", "weight", "volume")
 # How an ingredient<->product mapping was produced, for audit and review triage.
-MATCH_METHODS = ("exact", "barcode", "token", "manual", "supplier_declared", "ai")
+# Documented vocabulary (match_method is free Text, no DB enum) — superset covering the
+# provider-integration mapping methods (barcode_exact / normalized_name / alias_rule /
+# semantic_candidate / llm_suggested) plus the earlier licensed-import ones.
+MATCH_METHODS = (
+    "barcode_exact",
+    "manual",
+    "normalized_name",
+    "alias_rule",
+    "semantic_candidate",
+    "llm_suggested",
+    "exact",
+    "barcode",
+    "token",
+    "supplier_declared",
+    "ai",
+)
 
 
 class SupplierFieldMapping(BaseModel):
@@ -542,3 +557,32 @@ class SupplierFieldMapping(BaseModel):
         Boolean, nullable=False, server_default=text("true")
     )
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ProviderUsage(BaseModel):
+    """Cost/quota accounting for an external price provider operation (spec §11).
+
+    One row per provider call/run so daily-run, daily-cost and per-run quotas can be
+    enforced and surfaced in the admin API. Cost is Decimal money; never float.
+    """
+
+    __tablename__ = "provider_usage"
+    __table_args__ = (
+        Index("ix_provider_usage_provider_started", "provider", "started_at"),
+    )
+
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    request_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    product_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    estimated_cost: Mapped[Decimal | None] = mapped_column(money())
+    currency: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crawl_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("crawl_run.id")
+    )

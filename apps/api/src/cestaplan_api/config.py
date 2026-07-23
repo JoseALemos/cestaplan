@@ -147,6 +147,37 @@ class Settings(BaseSettings):
     aldi_offers_connector_enabled: bool = False
     deza_connector_enabled: bool = False
 
+    # --- External price providers (FASE 1+, spec §17). All OFF by default; secrets empty.
+    # No provider is an official retailer API; see docs/PRICE_PROVIDERS.md. ---
+    price_providers_enabled: bool = False
+    price_stale_hours: int = 48
+    price_expired_hours: int = 168
+    price_sync_max_concurrency: int = 2
+    # Parse.bot (DIA / Alcampo) — X-API-Key, base URLs configurable.
+    parse_bot_enabled: bool = False
+    parse_bot_api_key: str = ""
+    parse_bot_timeout_seconds: float = 30.0
+    parse_bot_max_retries: int = 3
+    parse_bot_dia_enabled: bool = False
+    parse_bot_alcampo_enabled: bool = False
+    parse_bot_dia_base_url: str = ""
+    parse_bot_alcampo_base_url: str = ""
+    # Apify (Mercadona actor) — Bearer token, actor id configurable, cost/quota caps.
+    apify_enabled: bool = False
+    apify_api_token: str = ""
+    apify_base_url: str = "https://api.apify.com/v2"
+    apify_mercadona_enabled: bool = False
+    apify_mercadona_actor_id: str = "studio-amba~mercadona-scraper"
+    apify_mercadona_default_postal_code: str = ""
+    apify_max_wait_seconds: int = 900
+    apify_poll_interval_seconds: float = 10.0
+    apify_max_results_per_run: int = 1000
+    apify_max_daily_runs: int = 5
+    apify_max_daily_cost_eur: float = 10.0
+    # Open Prices (Open Food Facts) — observations/tickets/cross-validation only.
+    open_prices_enabled: bool = False
+    open_prices_base_url: str = "https://prices.openfoodfacts.org/api/v1"
+
     # --- Cloud metering / quotas (enforced only when deployment_mode == "cloud") ---
     # A value <= 0 disables that particular limit.
     cloud_monthly_generation_limit: int = 100
