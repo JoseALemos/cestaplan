@@ -38,6 +38,7 @@ export interface UserResponse {
   display_name: string | null;
   locale: string;
   status: string;
+  is_admin: boolean;
   created_at: IsoDateTime;
 }
 

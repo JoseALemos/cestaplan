@@ -34,6 +34,7 @@ class UserResponse(BaseModel):
     display_name: str | None
     locale: str
     status: str
+    is_admin: bool
     created_at: datetime
 
     @classmethod
@@ -44,6 +45,7 @@ class UserResponse(BaseModel):
             display_name=user.display_name,
             locale=user.locale,
             status=user.status,
+            is_admin=user.is_admin,
             created_at=user.created_at,
         )
 

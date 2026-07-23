@@ -10,7 +10,6 @@ import {
   listAdminSources,
   rollbackAdminImport,
 } from "@/lib/api/endpoints";
-import { ApiError } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth/auth-context";
 import { queryKeys } from "@/lib/query/keys";
 import type { CreateAdminImportInput, Uuid } from "@/lib/api/types";
@@ -42,18 +41,21 @@ export interface AdminAccessState {
   isLoading: boolean;
 }
 
-/** Derives admin access from the `/admin/sources` probe for gating pages and nav. */
+/**
+ * Admin access comes straight from the authenticated user's `is_admin` flag on
+ * `GET /me`. (It used to be inferred from whether `GET /admin/sources` 403'd,
+ * which cached a stale "forbidden" across a mid-session grant.) The flag is tied
+ * to the `/me` query, so it refreshes on login/logout with no extra request.
+ */
 export function useIsAdminQuery(): AdminAccessState {
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const sourcesQuery = useAdminSourcesQuery();
-
-  const isForbidden = sourcesQuery.error instanceof ApiError && sourcesQuery.error.status === 403;
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
 
   return {
-    isAdmin: isAuthenticated && sourcesQuery.isSuccess,
-    isForbidden,
-    isError: sourcesQuery.isError && !isForbidden,
-    isLoading: authLoading || (isAuthenticated && sourcesQuery.isLoading),
+    isAdmin,
+    isForbidden: isAuthenticated && !isAdmin,
+    isError: false,
+    isLoading: authLoading,
   };
 }
 
