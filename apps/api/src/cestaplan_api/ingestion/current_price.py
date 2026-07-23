@@ -103,10 +103,16 @@ class CurrentPriceService:
         store_id: int | None = None,
         scope: str | None = None,
         as_of: datetime,
+        staging: bool = False,
     ) -> CurrentPrice | None:
-        """Latest VALID observation for a variant at a store/scope, or ``None`` if none."""
+        """Latest VALID observation for a variant at a store/scope, or ``None`` if none.
+
+        ``staging=False`` (default) is the production view and NEVER sees ``staging_only`` rows.
+        ``staging=True`` reads ONLY staging rows, for shadow/coverage evaluation — never used to
+        cost a production plan.
+        """
         obs = self._latest_valid(
-            db, product_variant_id, store_id=store_id, scope=scope
+            db, product_variant_id, store_id=store_id, scope=scope, staging=staging
         )
         if obs is None:
             return None
@@ -203,14 +209,15 @@ class CurrentPriceService:
         *,
         store_id: int | None = None,
         scope: str | None = None,
+        staging: bool = False,
     ) -> PriceObservation | None:
         stmt = (
             select(PriceObservation)
             .where(
                 PriceObservation.product_variant_id == product_variant_id,
                 PriceObservation.verification_status != "disputed",
-                # Staging imports (§P) are never used for production plans/prices.
-                PriceObservation.staging_only.is_(False),
+                # Production view excludes staging imports (§P); staging view reads only them.
+                PriceObservation.staging_only.is_(staging),
             )
             .order_by(
                 PriceObservation.valid_until.is_(None).desc(),

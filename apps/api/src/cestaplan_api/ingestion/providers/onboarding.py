@@ -61,6 +61,36 @@ def classify_costing_mode(p: ExternalCatalogProduct) -> ProductCostingMode:
     return ProductCostingMode.UNRESOLVED
 
 
+def classify_variant_costing_mode(
+    *,
+    sell_unit: str | None,
+    variable_weight: bool,
+    net_content_quantity: Decimal | None,
+    net_content_unit: str | None,
+    unit_price: Decimal | None,
+    unit_price_unit: str | None,
+    has_price: bool,
+) -> ProductCostingMode:
+    """Same costing rules as :func:`classify_costing_mode`, but from stored ``ProductVariant``
+    fields (strings) + whether a usable price exists. A bare ``unit_price`` is never enough."""
+    if not has_price:
+        return ProductCostingMode.UNRESOLVED
+    ncu = (net_content_unit or "").lower()
+    if net_content_quantity is not None and ncu in ("g", "kg", "ml", "l"):
+        return ProductCostingMode.FIXED_PACKAGE
+    if net_content_quantity is not None and ncu in ("unit", "ud"):
+        return ProductCostingMode.DISCRETE_UNIT
+    if (sell_unit or "").lower() == "unit":
+        return ProductCostingMode.DISCRETE_UNIT
+    upu = (unit_price_unit or "").lower()
+    if variable_weight and unit_price is not None:
+        if (sell_unit or "").lower() == "weight" and upu in ("kg", "g"):
+            return ProductCostingMode.VARIABLE_WEIGHT
+        if (sell_unit or "").lower() == "volume" and upu in ("l", "ml"):
+            return ProductCostingMode.VARIABLE_VOLUME
+    return ProductCostingMode.UNRESOLVED
+
+
 @dataclass(frozen=True, slots=True)
 class MatrixEntry:
     provider_code: str
@@ -416,6 +446,7 @@ __all__ = [
     "OnboardingMatrix",
     "ProviderOnboardingReport",
     "classify_costing_mode",
+    "classify_variant_costing_mode",
     "config_status",
     "get_entry",
     "measure_coverage",
