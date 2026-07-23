@@ -150,7 +150,10 @@ class Settings(BaseSettings):
     # --- External price providers (FASE 1+, spec §17). All OFF by default; secrets empty.
     # No provider is an official retailer API; see docs/PRICE_PROVIDERS.md. ---
     price_providers_enabled: bool = False
-    price_stale_hours: int = 48
+    # §W freshness bands (hours). fresh < fresh; aging < aging; stale < expired; else expired.
+    price_fresh_hours: int = 24
+    price_aging_hours: int = 48
+    price_stale_hours: int = 168  # boundary into 'expired'
     price_expired_hours: int = 168
     price_sync_max_concurrency: int = 2
     # Safeguards (FASE 2A, spec §O/§R/§S). A threshold <= 0 disables that particular check.
