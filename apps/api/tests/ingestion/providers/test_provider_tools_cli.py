@@ -18,13 +18,20 @@ from cestaplan_api.tools import (
 )
 
 
-# --- §M capture (no creds in the test env) --------------------------------- #
-def test_capture_refuses_without_credentials(tmp_path: Path, capsys) -> None:
-    out = tmp_path / "raw.json"  # tmp is a safe (git-ignored-style) path
-    rc = capture_provider_sample.run("parsebot-dia", 10, str(out), allow_versioned=False)
-    assert rc == 1
-    assert not out.exists()  # nothing written, nothing imported
-    assert "PARSE_BOT_API_KEY" in capsys.readouterr().out
+# --- §M capture (credential forced empty so the test is env-independent) --- #
+def test_capture_refuses_without_credentials(tmp_path: Path, capsys, monkeypatch) -> None:
+    from cestaplan_api.config import get_settings
+
+    monkeypatch.setenv("PARSE_BOT_API_KEY", "")  # override any ambient/.env value
+    get_settings.cache_clear()
+    try:
+        out = tmp_path / "raw.json"  # tmp is a safe (git-ignored-style) path
+        rc = capture_provider_sample.run("parsebot-dia", 10, str(out), allow_versioned=False)
+        assert rc == 1
+        assert not out.exists()  # nothing written, nothing imported
+        assert "PARSE_BOT_API_KEY" in capsys.readouterr().out
+    finally:
+        get_settings.cache_clear()
 
 
 def test_capture_rejects_versioned_path() -> None:

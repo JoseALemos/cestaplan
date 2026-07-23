@@ -28,7 +28,7 @@ from cestaplan_api.ingestion.providers.sample_capture import (
 _SUPPORTED = ("parsebot-dia", "parsebot-alcampo", "apify-mercadona")
 
 
-def _fetch_raw(provider: str, limit: int) -> list[Any]:
+def _fetch_raw(provider: str, limit: int, query: str) -> list[Any]:
     """Do ONE minimal, bounded call to the provider using env credentials only."""
     settings = get_settings()
     if provider.startswith("parsebot-"):
@@ -42,10 +42,13 @@ def _fetch_raw(provider: str, limit: int) -> list[Any]:
         if not base:
             raise RuntimeError(f"base URL de {provider} no configurada")
         client = ParseBotClient(base_url=base, api_key=settings.parse_bot_api_key)
-        data = client.get_json("/search_products", {"limit": limit})
-        records = (
-            data if isinstance(data, list) else data.get("products", data.get("items", [data]))
-        )
+        # Observed DIA contract: /search_products requires `query` and returns the products
+        # under data.search_items (see docs/PARSEBOT_INTEGRATION.md).
+        data = client.get_json("/search_products", {"query": query, "limit": limit})
+        inner = data.get("data", data) if isinstance(data, dict) else data
+        records = inner.get("search_items", []) if isinstance(inner, dict) else inner
+        if not isinstance(records, list):
+            raise RuntimeError("respuesta inesperada: no se encontró la lista de productos")
         return list(records)[:limit]
     if provider == "apify-mercadona":
         if not settings.apify_api_token:
@@ -62,7 +65,7 @@ def _fetch_raw(provider: str, limit: int) -> list[Any]:
     raise RuntimeError(f"captura no soportada para {provider!r}")
 
 
-def run(provider: str, limit: int, output: str, allow_versioned: bool) -> int:
+def run(provider: str, limit: int, output: str, allow_versioned: bool, query: str = "leche") -> int:
     if provider not in _SUPPORTED:
         print(f"Proveedor no soportado para captura: {provider!r} (soportados: {_SUPPORTED})")
         return 1
@@ -76,7 +79,7 @@ def run(provider: str, limit: int, output: str, allow_versioned: bool) -> int:
         )
         return 1
     try:
-        records = _fetch_raw(provider, limit)
+        records = _fetch_raw(provider, limit, query)
     except RuntimeError as exc:
         print(f"No se capturó nada: {exc}")
         return 1
@@ -108,8 +111,9 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--output", required=True)
     p.add_argument("--allow-sanitized-fixture-export", action="store_true")
+    p.add_argument("--query", default="leche", help="search term for search-based providers")
     a = p.parse_args()
-    raise SystemExit(run(a.provider, a.limit, a.output, a.allow_sanitized_fixture_export))
+    raise SystemExit(run(a.provider, a.limit, a.output, a.allow_sanitized_fixture_export, a.query))
 
 
 if __name__ == "__main__":

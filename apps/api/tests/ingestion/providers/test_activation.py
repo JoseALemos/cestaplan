@@ -56,7 +56,7 @@ def _fully_cleared(db: Session, code: str, approver_id: int) -> ProviderActivati
 
 
 def test_no_record_blocks(db_session: Session) -> None:
-    decision = evaluate_production(db_session, "parsebot-dia", _settings())
+    decision = evaluate_production(db_session, "no-such-provider-zzz", _settings())
     assert decision.allowed is False
     assert "no_activation_record" in decision.reasons
 

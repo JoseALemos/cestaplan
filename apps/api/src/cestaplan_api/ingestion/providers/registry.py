@@ -58,10 +58,14 @@ from cestaplan_api.ingestion.providers.demo.provider import DemoCatalogProvider 
 from cestaplan_api.ingestion.providers.open_prices.provider import (  # noqa: E402
     OpenPricesProvider,
 )
+from cestaplan_api.ingestion.providers.parsebot.dia import ParseBotDiaProvider  # noqa: E402
 
 register_default(DemoCatalogProvider.provider_code, DemoCatalogProvider)
 # Open Prices needs no credentials (public ODbL API); enablement is via OPEN_PRICES_ENABLED
 # at the call site, not here.
 register_default(OpenPricesProvider.provider_code, OpenPricesProvider)
+# Parse.bot DIA (third-party scraper API). Only usable when configured; the provider returns
+# a not-configured health status / raises on iterate when the key/base URL are absent.
+register_default(ParseBotDiaProvider.provider_code, ParseBotDiaProvider)
 
 __all__ = ["ProviderRegistry", "register_default", "registry"]

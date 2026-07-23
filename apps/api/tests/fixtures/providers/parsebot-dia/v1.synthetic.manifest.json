@@ -1,0 +1,17 @@
+{
+  "provider": "parsebot-dia",
+  "fixture_version": "v1",
+  "schema_fingerprint": "993f40de74ec6ce9a242512128f1628f11ee773fda82998ca32bd2115ec54dd4",
+  "captured_at": null,
+  "sanitized_at": null,
+  "sanitizer_version": "1",
+  "manually_reviewed": true,
+  "reviewed_by": null,
+  "contains_real_product_names": false,
+  "contains_real_prices": false,
+  "contains_personal_data": false,
+  "redistribution_status": "synthetic_only",
+  "source_rights_status": "synthetic_only",
+  "synthetic_structure": true,
+  "notes": "Generated from a schema report; no real values."
+}

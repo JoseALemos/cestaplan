@@ -1,0 +1,36 @@
+[
+  {
+    "allergens": [
+      {
+        "name": "SYNTHETIC"
+      }
+    ],
+    "brand": "SYNTHETIC",
+    "brand_type": "SYNTHETIC",
+    "dia_brand": false,
+    "display_name": "SYNTHETIC",
+    "image": "SYNTHETIC",
+    "l1_category_description": "SYNTHETIC",
+    "l2_category_description": "SYNTHETIC",
+    "object_id": "SYNTHETIC",
+    "prices": {
+      "currency": "SYNTHETIC",
+      "discount_percentage": 0,
+      "is_club_price": false,
+      "is_promo_price": false,
+      "measure_unit": "SYNTHETIC",
+      "price": 0.0,
+      "price_per_unit": 0.0,
+      "strikethrough_price": 0.0
+    },
+    "product_info": "SYNTHETIC",
+    "sku_id": "SYNTHETIC",
+    "stamp_code": "SYNTHETIC",
+    "stamp_color": "SYNTHETIC",
+    "stamp_description": "SYNTHETIC",
+    "stamp_text_color": "SYNTHETIC",
+    "units_in_cart": 0,
+    "units_in_stock": 0,
+    "url": "SYNTHETIC"
+  }
+]
