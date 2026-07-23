@@ -37,6 +37,7 @@ from cestaplan_api.models import (
     Retailer,
     SupplierFieldMapping,
 )
+from cestaplan_api.services.readiness import GateConfig, evaluate_readiness
 from cestaplan_api.services.sample_import import run_sample_import
 
 router = APIRouter(prefix="/api/v1/admin/licensed", tags=["admin", "licensed"])
@@ -310,3 +311,28 @@ def coverage(admin: AdminUser, db: DbSession) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Readiness gate (FASE 5)
+# --------------------------------------------------------------------------- #
+@router.get("/readiness/{retailer_id}")
+def readiness(
+    retailer_id: uuid.UUID,
+    admin: AdminUser,
+    db: DbSession,
+    min_coverage: float = 0.60,
+    license_verified: bool = False,
+) -> dict[str, Any]:
+    """Evaluate the 8 exit criteria for a chain. ``can_retire_demo`` is True only if all pass.
+
+    ``license_verified`` is the operator's attestation that the licence is signed (a real
+    contract cannot be checked programmatically); ``min_coverage`` is the agreed floor.
+    """
+    retailer = _get_retailer(db, retailer_id)
+    report = evaluate_readiness(
+        db,
+        retailer,
+        GateConfig(min_ingredient_coverage=min_coverage, license_verified=license_verified),
+    )
+    return report.as_dict()
