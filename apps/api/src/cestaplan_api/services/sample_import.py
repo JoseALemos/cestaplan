@@ -119,9 +119,9 @@ class SampleImportReport:
                 for e in self.row_errors
             ],
             "duplicates": list(self.duplicates),
-            "unit_warnings": [i.__dict__ for i in self.unit_warnings],
-            "price_warnings": [i.__dict__ for i in self.price_warnings],
-            "geo_warnings": [i.__dict__ for i in self.geo_warnings],
+            "unit_warnings": [_issue_dict(i) for i in self.unit_warnings],
+            "price_warnings": [_issue_dict(i) for i in self.price_warnings],
+            "geo_warnings": [_issue_dict(i) for i in self.geo_warnings],
             "persist": self.persist.as_dict(),
             "coverage": {
                 "total_rows": self.total_rows,
@@ -138,8 +138,22 @@ class SampleImportReport:
                 "ingredients_covered": self.ingredients_covered,
                 "review_queue_size": len(self.review_queue),
             },
-            "review_queue": [c.__dict__ for c in self.review_queue],
+            "review_queue": [_candidate_dict(c) for c in self.review_queue],
         }
+
+
+def _issue_dict(issue: Issue) -> dict[str, object]:
+    return {"code": issue.code, "message": issue.message, "external_id": issue.external_id}
+
+
+def _candidate_dict(candidate: MappingCandidate) -> dict[str, object]:
+    return {
+        "external_id": candidate.external_id,
+        "product_name": candidate.product_name,
+        "canonical_name": candidate.canonical_name,
+        "confidence": str(candidate.confidence),
+        "match_method": candidate.match_method,
+    }
 
 
 def run_sample_import(

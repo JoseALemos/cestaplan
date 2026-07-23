@@ -15,6 +15,7 @@ from cestaplan_api.routers import (
     households,
     ingestion_admin,
     invitations,
+    licensed_admin,
     pantry,
     plans,
     prices,
@@ -49,6 +50,7 @@ app.include_router(usage.router)
 app.include_router(pantry.router)
 app.include_router(prices.router)
 app.include_router(ingestion_admin.router)
+app.include_router(licensed_admin.router)
 
 
 @app.get("/health", tags=["system"])
