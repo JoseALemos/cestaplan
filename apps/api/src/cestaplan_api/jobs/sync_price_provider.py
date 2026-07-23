@@ -23,18 +23,18 @@ from cestaplan_api.models import Retailer
 from cestaplan_api.services.provider_sync import SyncMode, run_provider_sync
 
 
-def run(provider_code: str, retailer_slug: str, mode: SyncMode, limit: int | None) -> int:
+def run(provider_code: str, retailer_slug: str | None, mode: SyncMode, limit: int | None) -> int:
     if not registry.has(provider_code):
         print(f"Proveedor desconocido: {provider_code!r} (conocidos: {registry.codes()})")
         return 1
     with SessionLocal() as db:
-        retailer = (
-            db.execute(select(Retailer).where(Retailer.slug == retailer_slug)).scalars().first()
-        )
-        if retailer is None:
-            print(f"Retailer no encontrado: {retailer_slug!r}")
-            return 1
         provider = registry.get(provider_code)
+        # Default the retailer to the provider's own declared retailer (metadata) when omitted.
+        slug = retailer_slug or provider.get_source_metadata().retailer_slug
+        retailer = db.execute(select(Retailer).where(Retailer.slug == slug)).scalars().first()
+        if retailer is None:
+            print(f"Retailer no encontrado: {slug!r}")
+            return 1
         report = run_provider_sync(
             db,
             provider,
@@ -52,7 +52,7 @@ def run(provider_code: str, retailer_slug: str, mode: SyncMode, limit: int | Non
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sincroniza precios de un proveedor externo.")
     parser.add_argument("--provider", required=True)
-    parser.add_argument("--retailer", required=True)
+    parser.add_argument("--retailer", default=None)  # defaults to the provider's own retailer
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--staging-import", action="store_true")
     parser.add_argument("--limit", type=int, default=None)

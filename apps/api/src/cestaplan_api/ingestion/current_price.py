@@ -209,6 +209,8 @@ class CurrentPriceService:
             .where(
                 PriceObservation.product_variant_id == product_variant_id,
                 PriceObservation.verification_status != "disputed",
+                # Staging imports (§P) are never used for production plans/prices.
+                PriceObservation.staging_only.is_(False),
             )
             .order_by(
                 PriceObservation.valid_until.is_(None).desc(),

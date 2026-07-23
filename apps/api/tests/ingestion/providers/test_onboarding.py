@@ -51,8 +51,9 @@ def _product(*, qty: Decimal | None, unit: ContentUnit | None) -> ExternalCatalo
     )
 
 
-def test_sample_capture_is_never_costable() -> None:
-    # A source without full-catalogue support -> sample_only regardless of package coverage.
+def test_sample_only_can_still_be_costable_per_product() -> None:
+    # §9/§12: a bounded sample stays observed=sample_only (breadth unproven) but IS costable
+    # when each product carries price + id + verifiable content. Breadth != per-product costing.
     products = [_product(qty=Decimal("500"), unit=ContentUnit.G) for _ in range(10)]
     cov = measure_coverage(
         products,
@@ -61,8 +62,9 @@ def test_sample_capture_is_never_costable() -> None:
         supports_full_catalog=False,
         supports_store_scope=False,
     )
-    assert cov.observed_catalog_scope == "sample_only"
-    assert cov.costing_eligibility == "insufficient"
+    assert cov.observed_catalog_scope == "sample_only"  # never "full" from a sample
+    assert cov.costing_eligibility == "sufficient"  # every product has price + content
+    assert cov.costing_eligible_product_coverage == Decimal("1.0000")
     assert cov.geographic_scope_coverage == Decimal("0.0000")
 
 
@@ -170,8 +172,8 @@ def test_upsert_activation_records_matrix_without_activating_production(
     )
     assert row.intended_role == "partial_offers"
     assert row.intended_catalog_scope == "partial"
-    assert row.activation_state == "disabled"
-    assert row.expected_capabilities == ["promotions"]
+    assert row.activation_state == "transport_only"  # configured/capturing, never production
+    assert row.expected_capabilities == ["products", "prices", "promotions", "stores"]
     assert row.data_rights_status == "under_review"  # never auto-cleared
     assert row.production_approved_at is None and row.production_approved_by is None
     # No capture -> observed coverage unknown, never costable, never production-eligible.
