@@ -45,10 +45,13 @@ export default function GenerarPlanPage() {
     () => retailersQuery.data?.find((retailer) => retailer.id === retailerId),
     [retailersQuery.data, retailerId],
   );
-  const retailerOptions = (retailersQuery.data ?? []).map((retailer) => ({
-    value: retailer.id,
-    label: retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name,
-  }));
+  const retailerOptions = (retailersQuery.data ?? []).map((retailer) => {
+    const base = retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name;
+    return {
+      value: retailer.id,
+      label: retailer.costing_supported ? base : `${base} — solo visor de precios`,
+    };
+  });
   // Read-only context only: how many of the chain's stores contribute prices.
   const storesQuery = useStoresQuery(retailerId || undefined);
   const storeCount = storesQuery.data?.length ?? null;
@@ -187,6 +190,14 @@ export default function GenerarPlanPage() {
                         } con datos. La tienda concreta da igual.`
                       : "Usaremos los precios más recientes de la cadena. La tienda concreta da igual."}
                 </p>
+              ) : null}
+
+              {selectedRetailer && !selectedRetailer.costing_supported ? (
+                <Alert tone="warning" title="Solo visor de precios reales">
+                  Esta cadena tiene precios reales pero escasos y sin contenido por envase:
+                  el plan saldrá con cobertura baja. Para un plan costeado al 100 %, elige
+                  <strong> MercaEjemplo</strong> o un catálogo importado.
+                </Alert>
               ) : null}
             </div>
 

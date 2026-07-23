@@ -18,6 +18,7 @@ from cestaplan_api.deps import CurrentUser, DbSession
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
+    IngredientProductMapping,
     Product,
     ProductBarcode,
     ProductPrice,
@@ -28,6 +29,14 @@ from cestaplan_api.models import (
 from cestaplan_api.services.open_prices_sync import ensure_open_prices_data_source
 
 router = APIRouter(prefix="/api/v1", tags=["catalog"])
+
+# Package units the engine can cost a recipe against (mass/volume). Products priced
+# in a counted unit ("unit") or with no net content — typical of sparse real-chain
+# data from Open Prices — cannot be turned into a per-ingredient cost.
+_COSTABLE_UNITS = ("g", "kg", "mg", "ml", "l", "cl")
+# A retailer needs at least this many ingredients priced in a costable unit before we
+# advertise it as able to cost whole plans (vs. being only a real-price viewer).
+_COSTING_MIN_INGREDIENTS = 20
 
 
 def _s(value: Any) -> str | None:
@@ -51,14 +60,43 @@ def list_retailers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
         .where(Retailer.is_active.is_(True), Retailer.id.in_(priced_retailer_ids))
         .order_by(Retailer.name)
     ).scalars().all()
-    return [
-        {
-            "id": str(r.public_id),
-            "name": r.name,
-            "is_synthetic": r.is_synthetic,
-        }
-        for r in retailers
-    ]
+
+    # How many distinct ingredients each retailer prices in a costable (mass/volume)
+    # unit — the basis for whether it can cost whole plans or is only a price viewer.
+    costable_rows = db.execute(
+        select(
+            ProductPrice.retailer_id,
+            func.count(func.distinct(IngredientProductMapping.ingredient_id)),
+        )
+        .join(Product, Product.id == ProductPrice.product_id)
+        .join(
+            IngredientProductMapping,
+            IngredientProductMapping.product_id == Product.id,
+        )
+        .where(
+            IngredientProductMapping.is_active.is_(True),
+            Product.deleted_at.is_(None),
+            func.lower(ProductPrice.package_unit).in_(_COSTABLE_UNITS),
+        )
+        .group_by(ProductPrice.retailer_id)
+    ).all()
+    costable_by_retailer: dict[int, int] = {row[0]: row[1] for row in costable_rows}
+
+    result: list[dict[str, Any]] = []
+    for r in retailers:
+        costable = costable_by_retailer.get(r.id, 0)
+        result.append(
+            {
+                "id": str(r.public_id),
+                "name": r.name,
+                "is_synthetic": r.is_synthetic,
+                # True: prices enough ingredients to cost a plan. False: real-price
+                # viewer only (sparse chain data), so plans show low coverage.
+                "costing_supported": costable >= _COSTING_MIN_INGREDIENTS,
+                "costable_ingredient_count": costable,
+            }
+        )
+    return result
 
 
 @router.get("/retailers/{retailer_id}/stores")

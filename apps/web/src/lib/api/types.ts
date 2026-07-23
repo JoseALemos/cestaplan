@@ -264,6 +264,10 @@ export interface Retailer {
   id: Uuid;
   name: string;
   is_synthetic: boolean;
+  /** True when the chain prices enough ingredients to cost whole plans; false = real-price viewer only. */
+  costing_supported: boolean;
+  /** Distinct ingredients this chain prices in a costable (mass/volume) unit. */
+  costable_ingredient_count: number;
 }
 
 export type PriceCoverageLabel =

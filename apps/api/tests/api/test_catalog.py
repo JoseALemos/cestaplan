@@ -100,6 +100,10 @@ def test_list_retailers_and_stores(db_session: Session) -> None:
     demo = next(r for r in body if r["is_synthetic"])
     assert uuid.UUID(demo["id"])
     assert demo["name"]
+    # Costing metadata: whether the chain prices enough ingredients to cost plans.
+    assert isinstance(demo["costing_supported"], bool)
+    assert isinstance(demo["costable_ingredient_count"], int)
+    assert demo["costable_ingredient_count"] >= 0
 
     stores = client.get(f"/api/v1/retailers/{demo['id']}/stores")
     assert stores.status_code == 200, stores.text

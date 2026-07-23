@@ -28,10 +28,14 @@ export default function TiendaPage() {
   const storesQuery = useStoresQuery(retailerId || undefined);
   const storeCount = storesQuery.data?.length ?? null;
 
-  const retailerOptions = (retailersQuery.data ?? []).map((retailer) => ({
-    value: retailer.id,
-    label: retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name,
-  }));
+  const retailerOptions = (retailersQuery.data ?? []).map((retailer) => {
+    const base = retailer.is_synthetic ? `${retailer.name} (datos sintéticos)` : retailer.name;
+    return {
+      value: retailer.id,
+      // Flag chains we can't cost so the choice is informed before generating.
+      label: retailer.costing_supported ? base : `${base} — solo visor de precios`,
+    };
+  });
 
   const onContinue = () => {
     setStore({
@@ -85,6 +89,14 @@ export default function TiendaPage() {
                   : "Usaremos los precios más recientes de la cadena. La tienda concreta da igual."}
             </p>
           </div>
+        ) : null}
+
+        {selectedRetailer && !selectedRetailer.costing_supported ? (
+          <Alert tone="warning" title="Solo visor de precios reales">
+            Esta cadena tiene precios reales pero escasos y sin contenido por envase, así
+            que los planes saldrán con cobertura baja y coste poco fiable. Para planes
+            costeados al 100 %, elige <strong>MercaEjemplo</strong> o un catálogo importado.
+          </Alert>
         ) : null}
       </CardContent>
       <div className="mt-2 flex items-center justify-between">
