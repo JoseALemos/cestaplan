@@ -68,19 +68,37 @@ En la interfaz DIA se muestra como **Experimental** — "datos disponibles para 
 pero cobertura insuficiente para calcular planes" — y **nunca** como *Disponible* mientras
 `costing_eligibility` no sea `sufficient`.
 
-## Matriz de cadenas (estado inicial)
+## Descubrimiento automático de APIs (Parse.bot)
 
-| Cadena | Proveedor | Intención | Estado inicial | Oficial |
-|---|---|---|---|---|
-| DIA | parsebot | `full` | capturable; `sample_only`, no costeable | no |
-| Alcampo | parsebot | `full` | bloqueada (falta base URL) | no |
-| Mercadona | apify | `full` | bloqueada (faltan credenciales) | no |
-| Carrefour ES | parsebot | `full` | bloqueada (falta base URL) | no |
-| Lidl ES | parsebot | `partial` | bloqueada; solo ofertas | no |
-| Aldi ES | parsebot | `partial` | bloqueada; solo ofertas | no |
-| Deza | parsebot | `partial` | bloqueada; requiere feed autorizado | no |
-| Open Prices | open_prices | `complementary` | complementaria (observaciones/validación) | no |
-| MercaEjemplo | demo | `complementary` | disponible (fixtures sintéticas) | sí (propio) |
+Las base URL no se introducen a mano: se descubren con la API de gestión de Parse.bot
+(`GET /dispatch/tasks` + `/dispatch/tasks/{id}`, cabecera `X-API-Key`). Por cada tarea
+`completed` con `generated_api` y dominio **español**, se asocia la cadena por dominio de
+`source_url` (dia.es, compraonline.alcampo.es, carrefour.es, lidl.es, aldi.es, dezacalidad.es)
+y se configura `PARSE_BOT_<CADENA>_BASE_URL` desde `execution_base_url` (edición atómica del
+`.env`, sin tocar la clave). El inventario sanitizado se guarda en `.local/parsebot-discovery/`
+(fuera de Git). No se aceptan dominios no españoles. Cada plan de captura vive en
+`providers/parsebot/plans.py` (endpoint + params + extracción de la lista, confirmados contra
+capturas reales); el mapper de cada cadena está en `providers/parsebot/chains.py`, fijado a los
+`schema_fingerprint` observados.
+
+## Matriz de cadenas (estado tras onboarding real)
+
+| Cadena | Proveedor | Intención | Endpoint muestra | Observado | Costeable | Estado |
+|---|---|---|---|---|---|---|
+| DIA | parsebot-dia | dense_candidate | search_products | sample_only | no | Experimental |
+| Alcampo | parsebot-alcampo | dense_candidate | search_products | sample_only | **sí** | Disponible para validación |
+| Carrefour | parsebot-carrefour | dense_candidate | get_products_by_category | sample_only | **sí** | Disponible para validación |
+| Mercadona | apify-mercadona | dense_candidate | — (sin API Parse.bot) | — | — | Configuración pendiente / `blocked_by_missing_api` |
+| Lidl ES | parsebot-lidl | partial_offers | get_visible_products | sample_only | no | Ofertas solamente |
+| Aldi ES | parsebot-aldi | partial_offers | get_current_offers | sample_only | no | Ofertas solamente |
+| Deza | parsebot-deza | partial_offers | get_current_offers (sin precio) | — | — | Fuente insuficiente (`blocked_by_insufficient_source`) |
+| Open Prices | open-prices | complementary | — | — | — | complementaria |
+| MercaEjemplo | demo | complementary | — (fixtures) | full | sí | Disponible (dev) |
+
+Ninguna cadena está activada en producción: `data_rights_status=under_review`,
+`production_eligibility=false`, `production_approved_at=null`. Sin API de Mercadona en la cuenta,
+`apify-mercadona` permanece desactivada. Deza publica etiquetas de promoción sin precio, así que
+no se implementa mapper (no se solicita a la fuente un campo que la web no muestra).
 
 No se convierten APIs de Carrefour Francia/Bélgica, Lidl EE. UU. o Aldi Reino Unido en
 fuentes para España. Una fuente `partial` (solo folleto de ofertas) nunca se presenta como el

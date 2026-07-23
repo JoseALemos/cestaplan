@@ -18,11 +18,11 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 // Badge → colour + a one-line honest caption. Mirrors the backend `_provider_badge`
-// wording (spec §6): a chain is never dressed up as more than its real integration state.
+// wording (spec §16): a chain is never dressed up as more than its real integration state.
 const BADGE_STYLE: Record<string, { className: string; caption: string }> = {
-  Disponible: {
+  "Disponible para validación": {
     className: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
-    caption: "Precios reales verificados y costeo completo.",
+    caption: "Cobertura suficiente para costear planes (en validación, aún no en producción).",
   },
   Experimental: {
     className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
@@ -38,9 +38,17 @@ const BADGE_STYLE: Record<string, { className: string; caption: string }> = {
     className: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
     caption: "Falta credencial o URL de captura; sin datos todavía.",
   },
-  "Sin cobertura en esta zona": {
+  "Fuente insuficiente": {
+    className: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200",
+    caption: "La API responde pero su esquema no trae precio/envase suficientes.",
+  },
+  "Sin cobertura": {
     className: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
-    caption: "No hay cobertura de precios para esta zona.",
+    caption: "No hay una fuente de precios disponible para esta cadena.",
+  },
+  "Bloqueado por autenticación": {
+    className: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200",
+    caption: "La fuente exige iniciar sesión del supermercado; no se envían credenciales.",
   },
 };
 

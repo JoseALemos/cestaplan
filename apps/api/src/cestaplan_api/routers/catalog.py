@@ -45,20 +45,36 @@ def _s(value: Any) -> str | None:
     return str(value) if value is not None else None
 
 
-def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
-    """UI badge for a chain (§6). Badge reflects OBSERVED costing eligibility, not intent.
+# All badge strings the UI understands (spec §16). "Sin cobertura" and "Bloqueado por
+# autenticación" are reserved for providers that report those states (none do yet).
+PROVIDER_BADGES = (
+    "Disponible para validación",
+    "Experimental",
+    "Ofertas solamente",
+    "Configuración pendiente",
+    "Fuente insuficiente",
+    "Sin cobertura",
+    "Bloqueado por autenticación",
+)
 
-    A chain is only "Disponible" (usable to cost a basket) when its measured costing_eligibility
-    is ``sufficient``. A source captured only as a sample stays "Experimental" — a full-intent
-    catalogue is never dressed up as available on the strength of a handful of records. Partial
-    (offers-only) sources always read as "Ofertas solamente".
+
+def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
+    """UI badge for a chain (§16). Reflects OBSERVED costing eligibility, never intent.
+
+    A chain reads "Disponible para validación" (usable to cost a basket) only when its measured
+    ``costing_eligibility`` is ``sufficient``. A configured source whose sample is priced but not
+    costable stays "Experimental"; an offers-only (partial) source is "Ofertas solamente"; a
+    source whose API works but lacks costing-critical fields is "Fuente insuficiente". Nothing is
+    dressed up as available on the strength of a handful of records.
     """
     if activation is None or activation.transport_status in ("down", "unknown"):
         return "Configuración pendiente"
+    if activation.mapper_status == "blocked":
+        return "Fuente insuficiente"  # API reachable but schema lacks costing-critical fields
     if entry.intended_catalog_scope == "partial":
         return "Ofertas solamente"
     if activation.costing_eligibility == "sufficient":
-        return "Disponible"
+        return "Disponible para validación"
     # Configured/captured but coverage is insufficient to cost plans -> experimental.
     return "Experimental"
 
