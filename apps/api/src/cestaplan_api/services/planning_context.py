@@ -43,6 +43,7 @@ from cestaplan_api.services.candidate_providers import (
 from cestaplan_engine import (
     BudgetDTO,
     CatalogProductDTO,
+    IngredientConversionDTO,
     MealRequirementDTO,
     MemberDTO,
     NutritionDTO,
@@ -125,7 +126,7 @@ def build_plan_input(
         candidates=bundle.candidates,
         pantry=_build_pantry(db, household_id),
         favorites=_build_favorites(db, household_id),
-        conversions=[],
+        conversions=_build_conversions(db),
         nutrition_target=_build_nutrition_target(db, household_id),
         seed=seed,
         as_of=effective_as_of,
@@ -301,6 +302,32 @@ def _latest_prices(db: Session, retailer_id: int | None) -> dict[int, ProductPri
     for price in rows:
         latest.setdefault(price.product_id, price)
     return latest
+
+
+def _build_conversions(db: Session) -> list[IngredientConversionDTO]:
+    """Density-based ml<->g conversions for ingredients that declare a density.
+
+    Lets the engine price a recipe measured in one dimension against a product
+    packaged in the other (e.g. a recipe's ``ml`` of milk against a product sold
+    by ``g``) instead of leaving the line unpriced. It never guesses: only
+    ingredients with an explicit ``density_g_per_ml`` contribute, and the
+    :class:`UnitConverter` derives the reverse (g->ml) from each factor.
+    """
+    rows = db.execute(
+        select(Ingredient.canonical_name, Ingredient.density_g_per_ml).where(
+            Ingredient.density_g_per_ml.is_not(None)
+        )
+    ).all()
+    return [
+        IngredientConversionDTO(
+            canonical_name=name,
+            from_unit="ml",
+            to_unit="g",
+            factor=density,
+        )
+        for name, density in rows
+        if density is not None and density > 0
+    ]
 
 
 def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductDTO]:
