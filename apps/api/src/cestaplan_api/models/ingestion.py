@@ -614,6 +614,12 @@ DATA_RIGHTS_STATUS = (
 TRANSPORT_STATUS = ("unknown", "operational", "degraded", "down")
 MAPPER_STATUS = ("unknown", "pending", "blocked", "verified")
 DATA_QUALITY_STATUS = ("unknown", "accepted", "degraded", "insufficient", "quarantined")
+# Coverage semantics (spec: separate *intended* scope from *observed* coverage). A tiny
+# sample capture is NEVER "full": ``observed_catalog_scope`` and ``costing_eligibility`` are
+# measured from the real capture, not declared. Documented Text sets, validated on write.
+INTENDED_CATALOG_SCOPE = ("full", "partial", "complementary")
+OBSERVED_CATALOG_SCOPE = ("unknown", "sample_only", "partial", "full")
+COSTING_ELIGIBILITY = ("unknown", "insufficient", "sufficient")
 
 
 class ProviderActivation(BaseModel):
@@ -650,14 +656,35 @@ class ProviderActivation(BaseModel):
     production_approved_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("user.id")
     )
-    # Onboarding matrix (retailer roll-out): the intended role, whether the source is a full
-    # or partial catalogue, the roll-out stage and the declared capabilities. Kept as free
-    # Text/JSONB (documented vocabularies) so the matrix evolves without a migration per value.
+    # Onboarding matrix (retailer roll-out): the intended role, the roll-out stage and the
+    # declared capabilities. Kept as free Text/JSONB (documented vocabularies) so the matrix
+    # evolves without a migration per value.
     intended_role: Mapped[str | None] = mapped_column(Text)
-    catalog_scope: Mapped[str | None] = mapped_column(Text)  # full | partial | complementary
+    # DECLARED intent — what the source is meant to be (full | partial | complementary). This
+    # is NOT evidence of coverage; a full-intent chain still starts with a sample-only capture.
+    intended_catalog_scope: Mapped[str | None] = mapped_column(Text)
     # disabled | transport_only | shadow | staging | production_partial | production_primary
     activation_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="disabled"
     )
     expected_capabilities: Mapped[list | None] = mapped_column(JSONB)
+    # OBSERVED coverage — measured from the real capture, never declared. A 10-record sample is
+    # ``sample_only``, not ``full``. The ratios are fractions in [0,1] over the captured set;
+    # ``geographic_scope_coverage`` reflects per-store/zone localisation (0 when the source
+    # carries no store scope). ``costing_eligibility`` gates whether the chain can cost whole
+    # plans; ``production_eligibility`` is only ever true after the full production gate — never
+    # set by onboarding.
+    observed_catalog_scope: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    price_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_quantity_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_unit_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    geographic_scope_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    costing_eligibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    production_eligibility: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     notes: Mapped[str | None] = mapped_column(Text)

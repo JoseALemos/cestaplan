@@ -26,7 +26,9 @@ const BADGE_STYLE: Record<string, { className: string; caption: string }> = {
   },
   Experimental: {
     className: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
-    caption: "Integración en pruebas; datos parciales, no aptos para costear planes.",
+    caption:
+      "Integración experimental: datos disponibles para validación, pero cobertura " +
+      "insuficiente para calcular planes.",
   },
   "Ofertas solamente": {
     className: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
@@ -51,15 +53,30 @@ function ProviderBadge({ badge }: { badge: string }) {
   );
 }
 
+// Honest, one-word description of what was actually OBSERVED — never the declared intent.
+const OBSERVED_SCOPE_LABEL: Record<PriceProvider["observed_catalog_scope"], string> = {
+  full: "Catálogo completo observado",
+  partial: "Cobertura parcial observada",
+  sample_only: "Solo muestra capturada",
+  unknown: "Sin datos capturados",
+};
+
 function ChainStatusRow({ provider }: { provider: PriceProvider }) {
   const caption = BADGE_STYLE[provider.badge]?.caption ?? "";
+  const scopeLabel = OBSERVED_SCOPE_LABEL[provider.observed_catalog_scope];
+  // Never claim a chain can cost plans unless the measured eligibility says so.
+  const costable =
+    provider.costing_eligibility === "sufficient"
+      ? "apta para costear planes"
+      : "no apta para costear planes";
   return (
     <li className="flex items-start justify-between gap-3 py-2">
       <div className="min-w-0">
         <p className="font-medium text-ink capitalize">{provider.retailer}</p>
         <p className="text-xs text-ink-muted">
-          {provider.full_catalog ? "Catálogo completo" : "Cobertura parcial"} · {caption}
+          {scopeLabel} · {costable}
         </p>
+        <p className="text-xs text-ink-muted">{caption}</p>
       </div>
       <ProviderBadge badge={provider.badge} />
     </li>
@@ -186,7 +203,7 @@ export default function TiendaPage() {
           ) : (
             <ul className="divide-y divide-border">
               {(providersQuery.data ?? [])
-                .filter((provider) => provider.catalog_scope !== "complementary")
+                .filter((provider) => provider.intended_catalog_scope !== "complementary")
                 .map((provider) => (
                   <ChainStatusRow key={provider.provider} provider={provider} />
                 ))}

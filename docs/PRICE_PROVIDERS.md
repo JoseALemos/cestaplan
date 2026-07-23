@@ -34,21 +34,65 @@ histórico `PriceObservation`).
 Registro: `providers/registry.py` (`registry.get(code)`, `registry.codes()`). El proveedor
 `demo` está siempre disponible (fixtures sintéticas, sin red).
 
+## Semántica de cobertura (intención declarada ≠ cobertura observada)
+
+Un error fácil y grave sería marcar una cadena como "cobertura completa" a partir de una
+captura de diez registros. Por eso separamos **lo declarado** de **lo observado**, y solo lo
+observado (medido de una captura real) decide si una cadena puede costear planes. Los campos
+viven en `ProviderActivation` y se exponen en `GET /api/v1/price-providers`:
+
+| Campo | Origen | Significado |
+|---|---|---|
+| `intended_catalog_scope` | declarado (matriz) | `full` / `partial` / `complementary`: para qué se incorpora la fuente. **No** es evidencia de cobertura. |
+| `observed_catalog_scope` | medido | `unknown` / `sample_only` / `partial` / `full`. Una captura que toca el límite, o de una fuente sin catálogo completo, es `sample_only`. |
+| `price_coverage` | medido | fracción de la muestra con precio. |
+| `package_quantity_coverage` | medido | fracción con cantidad de contenido neto (necesaria para costear por g/ml). |
+| `package_unit_coverage` | medido | fracción con unidad de contenido neto. |
+| `geographic_scope_coverage` | medido | localización por tienda/zona (0 si la fuente no tiene ámbito de tienda). **No** condiciona el costeo, solo la localización. |
+| `costing_eligibility` | derivado | `unknown` / `insufficient` / `sufficient`. `sufficient` exige scope observado real (no muestra) **y** alta cobertura de precio + envase. |
+| `production_eligibility` | derivado | solo `true` tras el gate de producción completo + aprobación humana. El onboarding **nunca** lo pone a `true`. |
+
+`measure_coverage()` (en `providers/onboarding.py`) computa estos valores desde los
+`ExternalCatalogProduct` capturados; jamás desde la intención.
+
+### Estado de Parse.bot DIA
+
+Salvo que los datos demuestren lo contrario:
+
+- `intended_catalog_scope = full`
+- `observed_catalog_scope = sample_only` (captura acotada de ~10 registros)
+- `costing_eligibility = insufficient` (sin contenido por envase ni ámbito de tienda)
+- `production_eligibility = false`
+
+En la interfaz DIA se muestra como **Experimental** — "datos disponibles para validación,
+pero cobertura insuficiente para calcular planes" — y **nunca** como *Disponible* mientras
+`costing_eligibility` no sea `sufficient`.
+
 ## Matriz de cadenas (estado inicial)
 
-| Cadena | Proveedor | Estado | Oficial |
-|---|---|---|---|
-| DIA | parsebot | `active_when_configured` | no |
-| Alcampo | parsebot | `active_when_configured` | no |
-| Mercadona | apify | `experimental` | no |
-| Open Prices | open_prices | `complementary` (solo observaciones/tickets/validación) | no |
-| Carrefour ES | — | `unsupported` | — |
-| Lidl ES | — | `partial_source_required` | — |
-| Aldi ES | — | `partial_source_required` | — |
-| Deza | — | `authorized_feed_required` | — |
+| Cadena | Proveedor | Intención | Estado inicial | Oficial |
+|---|---|---|---|---|
+| DIA | parsebot | `full` | capturable; `sample_only`, no costeable | no |
+| Alcampo | parsebot | `full` | bloqueada (falta base URL) | no |
+| Mercadona | apify | `full` | bloqueada (faltan credenciales) | no |
+| Carrefour ES | parsebot | `full` | bloqueada (falta base URL) | no |
+| Lidl ES | parsebot | `partial` | bloqueada; solo ofertas | no |
+| Aldi ES | parsebot | `partial` | bloqueada; solo ofertas | no |
+| Deza | parsebot | `partial` | bloqueada; requiere feed autorizado | no |
+| Open Prices | open_prices | `complementary` | complementaria (observaciones/validación) | no |
+| MercaEjemplo | demo | `complementary` | disponible (fixtures sintéticas) | sí (propio) |
 
 No se convierten APIs de Carrefour Francia/Bélgica, Lidl EE. UU. o Aldi Reino Unido en
-fuentes para España.
+fuentes para España. Una fuente `partial` (solo folleto de ofertas) nunca se presenta como el
+precio completo de la tienda.
+
+## Alta de las siete cadenas
+
+`python -m cestaplan_api.tools.onboard_all_retailers --limit-per-provider 10 --continue-on-error`
+recorre cada proveedor de forma independiente: comprueba configuración (sin exponer secretos),
+hace una captura acotada solo donde está configurado, mide la cobertura observada, persiste la
+activación (derechos `under_review`, producción nunca activada) e imprime la matriz final. El
+fallo de una cadena no bloquea a las demás.
 
 ## Plan por fases
 

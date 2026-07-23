@@ -46,14 +46,20 @@ def _s(value: Any) -> str | None:
 
 
 def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
-    """UI badge for a chain (§6). Partial sources never read as a full available catalogue."""
+    """UI badge for a chain (§6). Badge reflects OBSERVED costing eligibility, not intent.
+
+    A chain is only "Disponible" (usable to cost a basket) when its measured costing_eligibility
+    is ``sufficient``. A source captured only as a sample stays "Experimental" — a full-intent
+    catalogue is never dressed up as available on the strength of a handful of records. Partial
+    (offers-only) sources always read as "Ofertas solamente".
+    """
     if activation is None or activation.transport_status in ("down", "unknown"):
         return "Configuración pendiente"
-    if entry.catalog_scope == "partial":
+    if entry.intended_catalog_scope == "partial":
         return "Ofertas solamente"
-    if entry.intended_role == "development_fallback":
+    if activation.costing_eligibility == "sufficient":
         return "Disponible"
-    # dense/complementary but not production (transport_only/staging) -> experimental
+    # Configured/captured but coverage is insufficient to cost plans -> experimental.
     return "Experimental"
 
 
@@ -79,8 +85,27 @@ def list_price_providers(user: CurrentUser, db: DbSession) -> list[dict[str, Any
                 "retailer": entry.retailer_slug,
                 "retailer_id": str(retailer.public_id) if retailer is not None else None,
                 "intended_role": entry.intended_role,
-                "catalog_scope": entry.catalog_scope,
-                "full_catalog": entry.catalog_scope == "full",
+                # Declared intent vs. what was actually observed — kept strictly separate.
+                "intended_catalog_scope": entry.intended_catalog_scope,
+                "observed_catalog_scope": (
+                    activation.observed_catalog_scope if activation else "unknown"
+                ),
+                "price_coverage": _s(activation.price_coverage) if activation else None,
+                "package_quantity_coverage": (
+                    _s(activation.package_quantity_coverage) if activation else None
+                ),
+                "package_unit_coverage": (
+                    _s(activation.package_unit_coverage) if activation else None
+                ),
+                "geographic_scope_coverage": (
+                    _s(activation.geographic_scope_coverage) if activation else None
+                ),
+                "costing_eligibility": (
+                    activation.costing_eligibility if activation else "unknown"
+                ),
+                "production_eligibility": (
+                    bool(activation.production_eligibility) if activation else False
+                ),
                 "activation_state": activation.activation_state if activation else "disabled",
                 "transport_status": activation.transport_status if activation else "unknown",
                 "mapper_status": activation.mapper_status if activation else "unknown",

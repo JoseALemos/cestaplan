@@ -271,14 +271,28 @@ export interface Retailer {
   costable_ingredient_count: number;
 }
 
-/** Onboarding-matrix status of a price provider/chain (spec §6 selector badges). */
+/**
+ * Onboarding-matrix status of a price provider/chain (spec §6 selector badges).
+ *
+ * DECLARED intent (`intended_catalog_scope`) is kept strictly separate from OBSERVED
+ * coverage measured from a real capture (`observed_catalog_scope` + the *_coverage ratios).
+ * A chain is only costable when `costing_eligibility === "sufficient"`; a sample-only capture
+ * is never presented as a full, usable catalogue. Coverage ratios are strings in [0,1] (or
+ * null when not measured) — display only, never parsed for storage.
+ */
 export interface PriceProvider {
   provider: string;
   retailer: string;
   retailer_id: Uuid | null;
   intended_role: string;
-  catalog_scope: "full" | "partial" | "complementary";
-  full_catalog: boolean;
+  intended_catalog_scope: "full" | "partial" | "complementary";
+  observed_catalog_scope: "unknown" | "sample_only" | "partial" | "full";
+  price_coverage: string | null;
+  package_quantity_coverage: string | null;
+  package_unit_coverage: string | null;
+  geographic_scope_coverage: string | null;
+  costing_eligibility: "unknown" | "insufficient" | "sufficient";
+  production_eligibility: boolean;
   activation_state: string;
   transport_status: string;
   mapper_status: string;

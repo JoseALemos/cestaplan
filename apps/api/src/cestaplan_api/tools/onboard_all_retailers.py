@@ -25,6 +25,7 @@ from cestaplan_api.ingestion.providers.onboarding import (
     OnboardingMatrix,
     ProviderOnboardingReport,
     config_status,
+    measure_coverage,
     upsert_activation,
 )
 from cestaplan_api.ingestion.providers.registry import registry
@@ -63,7 +64,7 @@ def _onboard_one(db, entry: MatrixEntry, settings, limit: int) -> ProviderOnboar
         provider_code=entry.provider_code,
         retailer_slug=entry.retailer_slug,
         intended_role=entry.intended_role,
-        catalog_scope=entry.catalog_scope,
+        intended_catalog_scope=entry.intended_catalog_scope,
         configured=cfg.configured,
         rights="under_review",
     )
@@ -101,8 +102,17 @@ def _onboard_one(db, entry: MatrixEntry, settings, limit: int) -> ProviderOnboar
         )
         return report
 
+    coverage = measure_coverage(
+        products,
+        captured=len(products),
+        limit=limit,
+        supports_full_catalog=provider.supports_full_catalog(),
+        supports_store_scope=provider.supports_store_scope(),
+    )
     report.captured = len(products)
     report.mapper_status = "verified" if products else "unknown"
+    report.observed_catalog_scope = coverage.observed_catalog_scope
+    report.costing_eligibility = coverage.costing_eligibility
     report.status = _status_for(entry, len(products))
     upsert_activation(
         db,
@@ -110,9 +120,11 @@ def _onboard_one(db, entry: MatrixEntry, settings, limit: int) -> ProviderOnboar
         now=datetime.now(UTC),
         transport_status="operational",
         mapper_status=report.mapper_status,
-        data_quality_status="insufficient"
-        if entry.catalog_scope != "complementary"
-        else "accepted",
+        # Data quality follows the OBSERVED costing eligibility, never the declared intent.
+        data_quality_status="accepted" if coverage.costing_eligibility == "sufficient" else (
+            "degraded" if coverage.observed_catalog_scope != "unknown" else "insufficient"
+        ),
+        coverage=coverage,
     )
     return report
 
@@ -132,7 +144,7 @@ def run(limit: int, continue_on_error: bool) -> int:
                         entry.provider_code,
                         entry.retailer_slug,
                         entry.intended_role,
-                        entry.catalog_scope,
+                        entry.intended_catalog_scope,
                         configured=False,
                         status="failed",
                         error=type(exc).__name__,
@@ -141,13 +153,18 @@ def run(limit: int, continue_on_error: bool) -> int:
         db.commit()
 
     print(json.dumps(matrix.as_dict(), indent=2, ensure_ascii=False))
-    print("\n| Cadena | Proveedor | Configurado | Estado | Capturados | Scope | Derechos |")
-    print("|---|---|---|---|---|---|---|")
+    header = (
+        "\n| Cadena | Proveedor | Configurado | Estado | Capturados | "
+        "Scope declarado | Scope observado | Costeable | Derechos |"
+    )
+    print(header)
+    print("|---|---|---|---|---|---|---|---|---|")
     for r in matrix.rows:
         cap = "-" if r.captured is None else str(r.captured)
         print(
             f"| {r.retailer_slug} | {r.provider_code} | {r.configured} | {r.status} | "
-            f"{cap} | {r.catalog_scope} | {r.rights} |"
+            f"{cap} | {r.intended_catalog_scope} | {r.observed_catalog_scope} | "
+            f"{r.costing_eligibility} | {r.rights} |"
         )
     return 0
 

@@ -8,14 +8,20 @@ a real capture. Nothing here activates production or shows a secret.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
+from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct
 from cestaplan_api.models import ProviderActivation
+
+# A capture must clear these fractions (price + package quantity + unit) to be costable.
+_COSTING_THRESHOLD = Decimal("0.8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +29,8 @@ class MatrixEntry:
     provider_code: str
     retailer_slug: str
     intended_role: str
-    catalog_scope: str  # full | partial | complementary
+    # DECLARED intent only — never evidence of observed coverage. full | partial | complementary
+    intended_catalog_scope: str
     activation_state: str  # disabled | transport_only | shadow | ...
     capabilities: tuple[str, ...] = ()
     rights: str = "under_review"
@@ -128,6 +135,71 @@ _MATRIX_BY_CODE = {e.provider_code: e for e in RETAILER_MATRIX}
 
 
 @dataclass(slots=True)
+class CoverageObservation:
+    """Coverage MEASURED from a real (bounded) capture — never declared from intent."""
+
+    observed_catalog_scope: str = "unknown"  # unknown | sample_only | partial | full
+    price_coverage: Decimal | None = None
+    package_quantity_coverage: Decimal | None = None
+    package_unit_coverage: Decimal | None = None
+    geographic_scope_coverage: Decimal | None = None
+    costing_eligibility: str = "unknown"  # unknown | insufficient | sufficient
+
+
+def _ratio(n: int, total: int) -> Decimal | None:
+    if total <= 0:
+        return None
+    return (Decimal(n) / Decimal(total)).quantize(Decimal("0.0001"))
+
+
+def _costing_eligibility(obs: CoverageObservation) -> str:
+    """Costable only with a real observed scope AND high price/package coverage.
+
+    A ``sample_only``/``unknown`` scope is never costable — a handful of records cannot prove
+    catalogue breadth. Geographic coverage is deliberately excluded here (it gates localisation,
+    not whether a recipe can be priced).
+    """
+    if obs.observed_catalog_scope not in ("full", "partial"):
+        return "insufficient"
+    needed = (obs.price_coverage, obs.package_quantity_coverage, obs.package_unit_coverage)
+    if any(v is None or v < _COSTING_THRESHOLD for v in needed):
+        return "insufficient"
+    return "sufficient"
+
+
+def measure_coverage(
+    products: Sequence[ExternalCatalogProduct],
+    *,
+    captured: int,
+    limit: int,
+    supports_full_catalog: bool,
+    supports_store_scope: bool,
+) -> CoverageObservation:
+    """Derive observed coverage + costing eligibility from a real capture (not from intent).
+
+    Hitting the capture limit, or a source without full-catalogue support, means ``sample_only``:
+    breadth is unproven. Package-content coverage (net quantity/unit) is what makes a price
+    costable for a recipe; geographic coverage is tracked separately for localisation.
+    """
+    if captured <= 0:
+        return CoverageObservation()
+    priced = sum(1 for p in products if p.regular_price is not None)
+    qty = sum(1 for p in products if p.net_content_quantity is not None)
+    unit = sum(1 for p in products if p.net_content_unit is not None)
+    exhausted = captured < limit  # iteration ended before the cap -> we saw the whole path
+    observed = "full" if (supports_full_catalog and exhausted) else "sample_only"
+    obs = CoverageObservation(
+        observed_catalog_scope=observed,
+        price_coverage=_ratio(priced, captured),
+        package_quantity_coverage=_ratio(qty, captured),
+        package_unit_coverage=_ratio(unit, captured),
+        geographic_scope_coverage=Decimal("1.0000") if supports_store_scope else Decimal("0.0000"),
+    )
+    obs.costing_eligibility = _costing_eligibility(obs)
+    return obs
+
+
+@dataclass(slots=True)
 class ConfigStatus:
     configured: bool
     blocked_reason: str | None = None
@@ -157,12 +229,16 @@ class ProviderOnboardingReport:
     provider_code: str
     retailer_slug: str
     intended_role: str
-    catalog_scope: str
+    intended_catalog_scope: str
     configured: bool
     status: str = "not_started"
     captured: int | None = None
     schema_fingerprint: str | None = None
     mapper_status: str = "unknown"
+    # Observed coverage from the real capture — distinct from the declared intent above.
+    observed_catalog_scope: str = "unknown"
+    costing_eligibility: str = "unknown"
+    production_eligibility: bool = False
     rights: str = "under_review"
     error: str | None = None
 
@@ -171,12 +247,15 @@ class ProviderOnboardingReport:
             "provider": self.provider_code,
             "retailer": self.retailer_slug,
             "intended_role": self.intended_role,
-            "catalog_scope": self.catalog_scope,
+            "intended_catalog_scope": self.intended_catalog_scope,
             "configured": self.configured,
             "status": self.status,
             "captured": self.captured,
             "schema_fingerprint": self.schema_fingerprint,
             "mapper_status": self.mapper_status,
+            "observed_catalog_scope": self.observed_catalog_scope,
+            "costing_eligibility": self.costing_eligibility,
+            "production_eligibility": self.production_eligibility,
             "rights": self.rights,
             "error": self.error,
         }
@@ -199,8 +278,14 @@ def upsert_activation(
     transport_status: str = "unknown",
     mapper_status: str = "unknown",
     data_quality_status: str = "unknown",
+    coverage: CoverageObservation | None = None,
 ) -> ProviderActivation:
-    """Create/update the ProviderActivation row from the matrix (rights stay under review)."""
+    """Create/update the ProviderActivation row from the matrix (rights stay under review).
+
+    Records the DECLARED intent (``intended_catalog_scope``) and, when a real capture was made,
+    the OBSERVED coverage + costing eligibility. Production eligibility is never granted here —
+    it requires the full production gate and a human approval.
+    """
     row = db.execute(
         select(ProviderActivation).where(ProviderActivation.provider_code == entry.provider_code)
     ).scalar_one_or_none()
@@ -208,12 +293,21 @@ def upsert_activation(
         row = ProviderActivation(provider_code=entry.provider_code)
         db.add(row)
     row.intended_role = entry.intended_role
-    row.catalog_scope = entry.catalog_scope
+    row.intended_catalog_scope = entry.intended_catalog_scope
     row.activation_state = entry.activation_state
     row.expected_capabilities = list(entry.capabilities)
     row.transport_status = transport_status
     row.mapper_status = mapper_status
     row.data_quality_status = data_quality_status
+    obs = coverage or CoverageObservation()
+    row.observed_catalog_scope = obs.observed_catalog_scope
+    row.price_coverage = obs.price_coverage
+    row.package_quantity_coverage = obs.package_quantity_coverage
+    row.package_unit_coverage = obs.package_unit_coverage
+    row.geographic_scope_coverage = obs.geographic_scope_coverage
+    row.costing_eligibility = obs.costing_eligibility
+    # Onboarding NEVER grants production eligibility (full gate + human approval required).
+    row.production_eligibility = False
     # Rights are NEVER auto-cleared here — always operator-reviewed (§O/§11).
     if row.data_rights_status in (None, "unknown"):
         row.data_rights_status = "under_review"
@@ -236,10 +330,12 @@ def _now_iso() -> str:
 __all__ = [
     "RETAILER_MATRIX",
     "ConfigStatus",
+    "CoverageObservation",
     "MatrixEntry",
     "OnboardingMatrix",
     "ProviderOnboardingReport",
     "config_status",
     "get_entry",
+    "measure_coverage",
     "upsert_activation",
 ]
