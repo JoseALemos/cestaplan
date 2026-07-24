@@ -577,7 +577,8 @@ export interface MealPlanDetail {
   budget: MealPlanBudget;
   run?: { id?: Uuid; status?: OptimizationRunStatus } | null;
   planned_meals: PlannedMeal[];
-  totals: MealPlanTotals;
+  /** Null until the optimizer has computed cost totals for the plan. */
+  totals: MealPlanTotals | null;
   budget_diff: MoneyString | number;
   coverage: MealPlanCoverage;
   /** Per-day macros vs the household nutrition target. Null when no member set a goal. */

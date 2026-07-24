@@ -42,8 +42,15 @@ export function Select({
   className,
   required,
   ref,
+  value,
+  defaultValue,
   ...props
 }: SelectProps) {
+  // A select must be EITHER controlled (`value`) OR uncontrolled (`defaultValue`), never both.
+  const controlProps =
+    value !== undefined
+      ? { value }
+      : { defaultValue: defaultValue ?? (placeholder ? "" : undefined) };
   const generatedId = useId();
   const selectId = id ?? generatedId;
   const hintId = hint ? `${selectId}-hint` : undefined;
@@ -64,7 +71,6 @@ export function Select({
           ref={ref}
           id={selectId}
           required={required}
-          defaultValue={props.defaultValue ?? (placeholder ? "" : undefined)}
           aria-invalid={Boolean(error) || undefined}
           aria-describedby={cn(hintId, errorId) || undefined}
           className={cn(
@@ -74,6 +80,7 @@ export function Select({
             error && "border-error focus-visible:ring-error",
             className,
           )}
+          {...controlProps}
           {...props}
         >
           {placeholder ? (

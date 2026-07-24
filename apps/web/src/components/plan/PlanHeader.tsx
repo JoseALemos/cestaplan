@@ -42,7 +42,7 @@ export function PlanHeader({ plan, onRegenerate, regenerating }: PlanHeaderProps
           <div className="rounded-md border border-border p-3">
             <p className="text-xs text-ink-muted">Coste conocido</p>
             <p className="font-display text-display-sm text-ink">
-              {formatMoney(plan.totals.cost_total?.known, currency)}
+              {formatMoney(plan.totals?.cost_total?.known, currency)}
             </p>
           </div>
           <div className="rounded-md border border-border p-3">
