@@ -9,6 +9,9 @@ provider's candidate explosion is not critical. It never touches production.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -19,7 +22,10 @@ from sqlalchemy.orm import Session
 from cestaplan_api.config import Settings, get_settings
 from cestaplan_api.models import ProviderIngredientMapping, ProviderUsage
 from cestaplan_api.services import mapping_review as mr
-from cestaplan_api.services.ingredient_dictionary import classify_mapping
+from cestaplan_api.services.ingredient_dictionary import (
+    classify_mapping,
+    normalize_provider_category,
+)
 
 # Sanitised detail fields we keep (never headers/cookies/tokens/raw bodies).
 _ALLOWED_DETAIL = (
@@ -42,11 +48,82 @@ _ALLOWED_DETAIL = (
     "brand",
 )
 # Detail endpoint per provider (already-discovered contracts); others are unavailable.
+# Alcampo's endpoint is `get_product_details` (plural) per the discovered API spec.
 _DETAIL_ENDPOINT = {
-    "parsebot-alcampo": "/get_product_detail",
+    "parsebot-alcampo": "/get_product_details",
     "parsebot-carrefour": "/get_product_detail",
     "parsebot-dia": "/get_product_detail",
 }
+
+# Costing-relevant detail fields per provider + the fingerprint of that observed shape. An
+# UNKNOWN fingerprint blocks ONLY enrichment (never the search mapper / whole provider).
+_DETAIL_CONTRACT_FIELDS = {
+    "parsebot-alcampo": ("name", "packSizeDescription", "type", "price", "unitPrice"),
+}
+_DETAIL_CONTRACT_FINGERPRINT = {
+    "parsebot-alcampo": "c9b95670f56909b83802cecf30fa718771f83fedaf73ca3457b74ff6f134fe3c",
+}
+_UNIT_PRICE_UNITS = {
+    "fop.price.per.kg": "kg",
+    "fop.price.per.kilo": "kg",
+    "per_kilo": "kg",
+    "fop.price.per.litre": "l",
+    "per_litre": "l",
+    "kg": "kg",
+    "l": "l",
+    "g": "g",
+    "ml": "ml",
+}
+_SIZE_UNIT_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(ml|cl|l|kg|g)\b", re.I)
+
+
+def _typed_skeleton(value: Any) -> Any:
+    """Presence+type skeleton of a payload (values discarded) for a stable contract fingerprint."""
+    if isinstance(value, dict):
+        return {k: _typed_skeleton(value[k]) for k in sorted(value)}
+    if isinstance(value, list):
+        return [_typed_skeleton(value[0])] if value else []
+    return type(value).__name__
+
+
+def detail_contract_fingerprint(inner: dict[str, Any], fields: tuple[str, ...]) -> str:
+    """SHA-256 of the typed skeleton of the costing-relevant subset — never any value."""
+    subset = {k: _typed_skeleton(inner[k]) for k in fields if k in inner}
+    return hashlib.sha256(json.dumps(subset, sort_keys=True).encode()).hexdigest()
+
+
+def _adapt_alcampo_detail(inner: dict[str, Any]) -> dict[str, Any]:
+    """Translate Alcampo's raw detail fields into our sanitized vocabulary (pinned fingerprint)."""
+    out: dict[str, Any] = {}
+    if inner.get("brand"):
+        out["brand"] = str(inner["brand"])
+    cats = inner.get("categoryPath")
+    if isinstance(cats, list) and cats:
+        code = normalize_provider_category(str(cats[-1]))
+        if code:
+            out["category"] = code
+    size = inner.get("packSizeDescription")
+    if size:
+        out["net_content"] = str(size)
+        m = _SIZE_UNIT_RE.search(str(size))
+        if m:
+            out["unit"] = m.group(1).lower()
+    amount = (inner.get("price") or {}).get("amount")
+    if amount is not None:
+        out["price"] = str(amount)
+    up = inner.get("unitPrice") or {}
+    up_amount = (up.get("price") or {}).get("amount")
+    if up_amount is not None:
+        out["unit_price"] = str(up_amount)
+        upu = _UNIT_PRICE_UNITS.get(str(up.get("unit") or up.get("unitName") or "").lower())
+        if upu:
+            out["unit_price_unit"] = upu
+    if inner.get("ingredients"):
+        out["ingredients"] = str(inner["ingredients"])
+    return out
+
+
+_DETAIL_ADAPTERS = {"parsebot-alcampo": _adapt_alcampo_detail}
 
 
 class DetailFetcher(Protocol):
@@ -123,7 +200,14 @@ def _default_detail_fetcher(
     inner = data.get("data", data) if isinstance(data, dict) else data
     if not isinstance(inner, dict):
         raise EnrichmentFailed("non_json_or_shape")
-    return inner
+    # Pin the detail contract by fingerprint: an unknown shape blocks ONLY enrichment.
+    expected = _DETAIL_CONTRACT_FINGERPRINT.get(provider_code)
+    if expected is not None:
+        fields = _DETAIL_CONTRACT_FIELDS.get(provider_code, ())
+        if detail_contract_fingerprint(inner, fields) != expected:
+            raise EnrichmentFailed("detail_contract_unknown")
+    adapter = _DETAIL_ADAPTERS.get(provider_code)
+    return adapter(inner) if adapter is not None else inner
 
 
 def _sanitize(detail: dict[str, Any]) -> dict[str, Any]:
