@@ -26,9 +26,14 @@ RUN pnpm install --frozen-lockfile
 
 # ---------- Builder: produce the standalone server ----------
 FROM base AS builder
-# Public API base URL is compiled into the client bundle here.
+# Public API base URL is compiled into the client bundle here (the browser value: /api-proxy).
 ARG NEXT_PUBLIC_API_BASE_URL
+# Server-only API upstream for the /api-proxy rewrite. Required by next.config.ts at build time;
+# NOT inlined into the client bundle. Must be passed as a build arg (Railway injects the service
+# variable into a matching ARG), or `next build` throws in resolveApiUpstream under production.
+ARG API_UPSTREAM_URL
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL \
+    API_UPSTREAM_URL=$API_UPSTREAM_URL \
     NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
