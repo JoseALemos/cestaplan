@@ -43,6 +43,17 @@ La UI traduce las acciones tipadas (`ActionCode`) — nunca muestra el slug ni u
 y solo permite **Reintentar** cuando la precondición determinista puede haber cambiado
 (`genuine_budget_infeasibility`, `optimizer_error`).
 
+**Sin cadena no hay plan.** El preflight exige cadena: si `retailer_id=None`, se detiene en
+`no_retailer_selected` **antes** de construir el catálogo o consultar precios — no se mezclan precios
+de otras cadenas (un plan siempre se calcula contra una única cadena; `_latest_prices(None)` devuelve
+un catálogo vacío). Orden exacto: `no_active_recipes → no_retailer_selected → retailer_without_catalog →
+no_mapped_products → no_product_prices → no_costable_recipes → insufficient_recipe_variety → ok`.
+
+**`no_compatible_recipes` NO es del preflight.** Corresponde al **filtrado real de candidatos** del
+motor (alérgenos/dieta/equipamiento/tipo de comida) y lo emite el enriquecimiento de la infeasibility
+del motor (`plan_service._enrich_infeasibility`). El preflight nunca aproxima la compatibilidad
+contando recetas públicas.
+
 ## 3. Panel de preparación (admin)
 
 `GET /api/v1/admin/planner-readiness` (`services/catalog_readiness.py`) resume: recetas activas /

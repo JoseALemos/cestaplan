@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from cestaplan_api.models import (
     IngredientProductMapping,
     MealPlan,
+    Product,
     ProductPrice,
     Recipe,
     RecipeIngredient,
@@ -34,6 +35,10 @@ class PreflightCode(StrEnum):
     engine layer, not from this preflight, but share the vocabulary so the UI keys on one enum."""
 
     NO_ACTIVE_RECIPES = "no_active_recipes"
+    # no_compatible_recipes is NOT decided by this preflight: it belongs to the engine's real
+    # candidate filtering (allergens/diet/equipment/meal-type) and is emitted by the engine's
+    # infeasibility enrichment (plan_service._enrich_infeasibility). The preflight never
+    # approximates compatibility by counting public recipes.
     NO_COMPATIBLE_RECIPES = "no_compatible_recipes"
     NO_RETAILER_SELECTED = "no_retailer_selected"
     RETAILER_WITHOUT_CATALOG = "retailer_without_catalog"
@@ -141,17 +146,23 @@ def evaluate(
     *,
     recipes_active: int,
     retailer_selected: bool,
+    productive_products: int,
     approved_mappings: int,
     productive_prices: int,
     costable_recipes: int,
     requested_meal_types: int,
     retailer_slug: str | None = None,
 ) -> PreflightOutcome:
-    """Pure decision over already-gathered counts (order: recipes → retailer catalogue → mapped
-    products → prices → costable → variety). Budget is NEVER evaluated here, so the budget message
-    can never surface for an empty catalogue. Deterministic and unit-testable without a DB."""
+    """Pure decision over already-gathered counts. Order (spec):
+    recipes → retailer selected → chain catalogue → mapped products → prices → costable → variety.
+
+    A plan is ALWAYS priced against a single chain: no ``retailer_selected`` stops here BEFORE any
+    catalogue/price/budget check, so prices of other chains can never let it through, and the
+    budget message can never surface for an empty catalogue. Deterministic; testable without a DB.
+    """
     counts = {
         "recipes_active": recipes_active,
+        "productive_products": productive_products,
         "approved_mappings": approved_mappings,
         "productive_prices": productive_prices,
         "costable_recipes": costable_recipes,
@@ -159,7 +170,9 @@ def evaluate(
     }
     if recipes_active == 0:
         return _fail(PreflightCode.NO_ACTIVE_RECIPES, counts)
-    if retailer_selected and productive_prices == 0:
+    if not retailer_selected:
+        return _fail(PreflightCode.NO_RETAILER_SELECTED, counts)
+    if productive_products == 0:
         return _fail(PreflightCode.RETAILER_WITHOUT_CATALOG, counts, retailer=retailer_slug)
     if approved_mappings == 0:
         return _fail(PreflightCode.NO_MAPPED_PRODUCTS, counts)
@@ -177,10 +190,7 @@ def evaluate(
 
 
 def run_preflight(db: Session, meal_plan: MealPlan) -> PreflightOutcome:
-    """Gather productive-catalog counts (read-only) and evaluate the deterministic preflight."""
-    retailer_id = meal_plan.retailer_id
-    price_where = [ProductPrice.retailer_id == retailer_id] if retailer_id is not None else []
-
+    """Gather productive-catalog counts (read-only, strictly retailer-scoped) and evaluate."""
     recipes_active = int(
         db.scalar(select(func.count()).select_from(Recipe).where(Recipe.is_public.is_(True))) or 0
     )
@@ -192,23 +202,53 @@ def run_preflight(db: Session, meal_plan: MealPlan) -> PreflightOutcome:
         )
         or 0
     )
-    productive_prices = int(
-        db.scalar(select(func.count()).select_from(ProductPrice).where(*price_where)) or 0
+    requested_meal_types = _requested_meal_type_count(db, meal_plan)
+    retailer_id = meal_plan.retailer_id
+
+    # A plan is always priced against a single chain; retailer_id=None never authorizes mixing
+    # prices across chains. With no chain selected we do NOT query prices at all — the catalogue
+    # counts stay 0 and the preflight stops at no_retailer_selected.
+    if retailer_id is None:
+        return evaluate(
+            recipes_active=recipes_active,
+            retailer_selected=False,
+            productive_products=0,
+            approved_mappings=approved_mappings,
+            productive_prices=0,
+            costable_recipes=0,
+            requested_meal_types=requested_meal_types,
+        )
+
+    productive_products = int(
+        db.scalar(
+            select(func.count())
+            .select_from(Product)
+            .where(Product.retailer_id == retailer_id, Product.deleted_at.is_(None))
+        )
+        or 0
     )
-    # Only compute the (heavier) costable set once the cheap preconditions could pass.
+    productive_prices = int(
+        db.scalar(
+            select(func.count()).select_from(ProductPrice).where(
+                ProductPrice.retailer_id == retailer_id
+            )
+        )
+        or 0
+    )
     costable = (
         _count_costable_recipes(db, retailer_id)
         if recipes_active and approved_mappings and productive_prices
         else 0
     )
-    retailer = db.get(Retailer, retailer_id) if retailer_id is not None else None
+    retailer = db.get(Retailer, retailer_id)
     return evaluate(
         recipes_active=recipes_active,
-        retailer_selected=retailer_id is not None,
+        retailer_selected=True,
+        productive_products=productive_products,
         approved_mappings=approved_mappings,
         productive_prices=productive_prices,
         costable_recipes=costable,
-        requested_meal_types=_requested_meal_type_count(db, meal_plan),
+        requested_meal_types=requested_meal_types,
         retailer_slug=getattr(retailer, "slug", None),
     )
 

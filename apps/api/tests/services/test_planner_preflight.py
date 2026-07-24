@@ -16,7 +16,8 @@ from cestaplan_api.services.planner_preflight import (
 
 _OK = {
     "recipes_active": 5,
-    "retailer_selected": False,
+    "retailer_selected": True,
+    "productive_products": 30,
     "approved_mappings": 10,
     "productive_prices": 20,
     "costable_recipes": 5,
@@ -48,8 +49,35 @@ def test_mappings_but_no_prices_is_no_product_prices() -> None:
 
 
 def test_selected_retailer_without_catalog() -> None:
-    out = evaluate(**{**_OK, "retailer_selected": True, "productive_prices": 0})
+    out = evaluate(**{**_OK, "retailer_selected": True, "productive_products": 0})
     assert out.code is PreflightCode.RETAILER_WITHOUT_CATALOG
+
+
+def test_no_retailer_selected_even_with_recipes_mappings_and_prices() -> None:
+    # A fully-stocked catalogue still cannot be planned without choosing a chain.
+    out = evaluate(**{**_OK, "retailer_selected": False})
+    assert out.code is PreflightCode.NO_RETAILER_SELECTED
+    assert ActionCode.CHANGE_STORE in out.suggested_actions
+    report = out.to_report()
+    assert report["minimum_budget"] is None
+    actions = report["suggested_actions"]
+    assert isinstance(actions, list) and "increase_budget" not in actions
+
+
+def test_no_retailer_selected_takes_priority_over_no_product_prices() -> None:
+    # No chain + nothing priced -> the missing chain wins (never no_product_prices/budget).
+    out = evaluate(
+        **{**_OK, "retailer_selected": False, "productive_products": 0, "productive_prices": 0}
+    )
+    assert out.code is PreflightCode.NO_RETAILER_SELECTED
+    assert out.code is not PreflightCode.NO_PRODUCT_PRICES
+
+
+def test_no_retailer_selected_is_not_retailer_without_catalog() -> None:
+    # retailer_without_catalog only applies to a SELECTED chain with an empty catalogue.
+    out = evaluate(**{**_OK, "retailer_selected": False, "productive_products": 0})
+    assert out.code is PreflightCode.NO_RETAILER_SELECTED
+    assert out.code is not PreflightCode.RETAILER_WITHOUT_CATALOG
 
 
 def test_prices_but_nothing_costable_is_no_costable_recipes() -> None:
@@ -109,7 +137,8 @@ def test_enrich_missing_candidate_is_not_budget() -> None:
     )
     assert report["code"] == "no_compatible_recipes"
     assert report["minimum_budget"] is None
-    assert "increase_budget" not in report["suggested_actions"]
+    actions = report["suggested_actions"]
+    assert isinstance(actions, list) and "increase_budget" not in actions
 
 
 def test_enrich_hard_constraint_conflict() -> None:

@@ -279,18 +279,22 @@ def _build_requirements(meal_plan: MealPlan) -> list[MealRequirementDTO]:
 # Catalog
 # --------------------------------------------------------------------------- #
 def _latest_prices(db: Session, retailer_id: int | None) -> dict[int, ProductPrice]:
-    """Most recent :class:`ProductPrice` per product across a whole retailer (chain).
+    """Most recent :class:`ProductPrice` per product WITHIN a single retailer (chain).
 
     History is append-only, so we take the newest observation per product aggregated over
     ALL of the chain's stores (the specific store is irrelevant: the plan is priced against
     the selected chain). Prices are scoped to ``retailer_id`` and never mixed across chains:
     a product with no price anywhere in the chain is simply absent (the catalog/coverage then
-    reflect it as without_price). When ``retailer_id`` is ``None`` (no chain resolved) the
-    unscoped latest price is used.
+    reflect it as without_price).
+
+    A plan is always calculated against a single chain; ``retailer_id=None`` never authorizes
+    mixing prices. With no chain resolved this returns an EMPTY catalogue (the planner preflight
+    stops on ``no_retailer_selected`` before reaching here — see ``planner_preflight``). Any
+    cross-chain global analysis must live in a separate, explicitly-named admin function.
     """
-    stmt = select(ProductPrice)
-    if retailer_id is not None:
-        stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
+    if retailer_id is None:
+        return {}
+    stmt = select(ProductPrice).where(ProductPrice.retailer_id == retailer_id)
     rows = db.execute(
         stmt.order_by(
             ProductPrice.product_id,
