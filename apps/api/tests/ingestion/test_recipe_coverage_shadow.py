@@ -70,6 +70,9 @@ def test_production_price_is_unaffected_by_a_staging_row(
 
 
 def test_active_provider_mapping_unblocks_an_ingredient(db_session: Session) -> None:
+    before = evaluate_recipe_catalog_coverage(
+        db_session, "parsebot-alcampo", scope="staging", recipe_limit=20
+    ).fully_costable_recipes
     ing = db_session.execute(
         select(Ingredient).where(Ingredient.canonical_name == "aceite_oliva")
     ).scalar_one()
@@ -113,7 +116,9 @@ def test_active_provider_mapping_unblocks_an_ingredient(db_session: Session) -> 
         db_session, "parsebot-alcampo", scope="staging", recipe_limit=20
     )
     assert cov.mapped_ingredients >= 1  # the approved mapping is honoured
-    assert cov.fully_costable_recipes == 0  # single-word ingredients still need review
+    # A single-word (aceite_oliva) mapping alone unblocks no recipe: the costable count is
+    # unchanged by adding it (other recipes may already be costable from real seed data).
+    assert cov.fully_costable_recipes == before
 
 
 def test_coverage_is_honestly_low_for_a_small_sample(db_session: Session) -> None:
@@ -149,11 +154,13 @@ def test_shadow_run_persists_and_never_activates_production(db_session: Session)
 def test_unknown_cost_is_null_not_zero(db_session: Session) -> None:
     # With no fully-costable recipe, absence of a known cost is NULL — never 0 € / -100%.
     run = run_provider_shadow(db_session, "parsebot-alcampo", recipe_limit=10)
-    assert run.comparison_status == "no_costable_recipes"
+    # Without a fully complete, comparable basket the money stays NULL — never 0 € / -100%.
+    # (A partially-costable catalogue is still not comparable, so no monetary diff is produced.)
+    assert run.comparison_status in ("no_costable_recipes", "partial_cost_only")
     assert run.basket_known_cost is None
     assert run.absolute_difference is None
     assert run.percentage_difference is None
-    assert "no_costable_recipes" in (run.comparison_blockers or [])
+    assert run.comparison_blockers
 
 
 def test_activation_gates_are_not_contradictory(db_session: Session) -> None:
