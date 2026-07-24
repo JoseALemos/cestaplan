@@ -191,6 +191,8 @@ def test_purchased_and_consumed_are_reported_separately(db_session: Session) -> 
     assert cmp.consumed_cost_difference != cmp.purchased_cost_difference  # distinct concepts
     assert cmp.reusable_leftover_value == Decimal("0.00")
     assert cmp.non_reusable_leftover_value == Decimal("0.00")
+    # The provider-side leftover is wholly unallocated for an isolated recipe (§1 invariant).
+    assert cmp.unallocated_leftover_value == cmp.provider.total_leftover_value
 
 
 def test_optional_counted_only_on_baseline_blocks_comparison(

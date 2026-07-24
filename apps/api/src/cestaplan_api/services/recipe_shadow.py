@@ -169,6 +169,7 @@ class RecipeShadowComparison:
     # Leftover (provider side; only amortizable inside a real plan).
     reusable_leftover_value: Decimal | None = None
     non_reusable_leftover_value: Decimal | None = None
+    unallocated_leftover_value: Decimal | None = None
     comparison_interpretation: str | None = None
     currency: str = "EUR"
 
@@ -389,10 +390,12 @@ def compare_recipe_shadow(
         comparison.consumed_cost_percentage = _pct(p_cons - b_cons, b_cons)
         comparison.reusable_leftover_value = provider.reusable_leftover_value
         comparison.non_reusable_leftover_value = provider.non_reusable_leftover_value
+        comparison.unallocated_leftover_value = provider.unallocated_leftover_value
         comparison.comparison_interpretation = (
             "purchased = desembolso inicial de envases completos; consumed = valor proporcional "
             "realmente utilizado. El sobrante NO se amortiza en una receta aislada "
-            "(reusable/non_reusable = 0); sólo un plan con reutilización real lo amortizaría."
+            "(reusable/non_reusable = 0; todo queda unallocated); sólo un plan con "
+            "reutilización real lo amortizaría."
         )
     return comparison
 

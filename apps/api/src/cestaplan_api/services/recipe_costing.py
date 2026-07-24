@@ -11,6 +11,12 @@ real purchasing rules:
 For every ingredient the engine records the purchased quantity, the consumed quantity, the surplus
 (and its value), the costing mode and the exact package maths, so the result is fully auditable.
 
+Leftover accounting invariant (§1): ``total_leftover_value = reusable_leftover_value +
+non_reusable_leftover_value + unallocated_leftover_value``. For an isolated recipe under
+``empty_pantry`` the leftover is wholly UNALLOCATED (reusable = non_reusable = 0); a non-zero
+reusable split only arises from a real allocation to a later recipe in a shared plan, and
+non_reusable only from evidence of waste/expiry/incompatibility.
+
 Hard rules (never violated):
 * never buy a fractional fixed package or discrete unit;
 * never use a zero/negative price, or an informational ``unit_price`` as a fixed-package price;
@@ -134,8 +140,10 @@ class RecipeCosting:
     total_purchase_cost: Decimal | None = None  # purchased_cost: full-package outlay
     total_consumed_cost: Decimal | None = None  # consumed_cost: proportional value used
     total_leftover_value: Decimal | None = None  # leftover_value: surplus value
+    # Accounting invariant: leftover_value = reusable + non_reusable + unallocated (§1).
     reusable_leftover_value: Decimal | None = None  # only amortizable under a real plan
-    non_reusable_leftover_value: Decimal | None = None  # inherently discarded leftover
+    non_reusable_leftover_value: Decimal | None = None  # only with waste/expiry/incompat evidence
+    unallocated_leftover_value: Decimal | None = None  # leftover with no proven destination
     total_surplus_value: Decimal | None = None  # alias of total_leftover_value (back-compat)
     cost_per_serving_purchase: Decimal | None = None
     cost_per_serving_consumed: Decimal | None = None
@@ -381,10 +389,12 @@ def cost_recipe(
         leftover = total_surplus.quantize(_CENT)
         result.total_leftover_value = leftover
         result.total_surplus_value = leftover  # back-compat alias
-        # For an isolated recipe leftover is NOT amortized: neither assumed reused nor wasted.
-        # A non-zero reusable/non-reusable split only arises inside a real shared plan.
+        # For an isolated recipe leftover is NOT amortized: neither reused nor proven wasted, so it
+        # is wholly UNALLOCATED. A non-zero reusable/non-reusable split only arises inside a real
+        # shared plan. Invariant: leftover = reusable + non_reusable + unallocated (§1).
         result.reusable_leftover_value = Decimal("0.00")
         result.non_reusable_leftover_value = Decimal("0.00")
+        result.unallocated_leftover_value = leftover
         servings = Decimal(result.servings or 1)
         result.cost_per_serving_purchase = (total_purchase / servings).quantize(_CENT)
         result.cost_per_serving_consumed = (total_consumed / servings).quantize(_CENT)

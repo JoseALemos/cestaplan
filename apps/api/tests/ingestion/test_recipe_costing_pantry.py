@@ -124,10 +124,20 @@ def test_three_money_concepts_are_separate(db_session: Session) -> None:
 def test_isolated_leftover_is_not_amortized(db_session: Session) -> None:
     recipe = _setup(db_session)
     r = cost_recipe(db_session, recipe, _PROV, pantry_policy=PantryPolicy.EMPTY_PANTRY)
-    # For a single recipe leftover is neither assumed reused nor wasted.
+    # For a single recipe leftover is neither assumed reused nor wasted -> wholly UNALLOCATED.
     assert r.reusable_leftover_value == Decimal("0.00")
     assert r.non_reusable_leftover_value == Decimal("0.00")
+    assert r.unallocated_leftover_value == r.total_leftover_value
     assert r.total_leftover_value == Decimal("3.12")  # the surplus value is still reported
+
+
+def test_leftover_accounting_invariant_holds(db_session: Session) -> None:
+    recipe = _setup(db_session)
+    r = cost_recipe(db_session, recipe, _PROV)
+    # leftover_value = reusable + non_reusable + unallocated (computed, not hard-coded).
+    assert r.total_leftover_value == (
+        r.reusable_leftover_value + r.non_reusable_leftover_value + r.unallocated_leftover_value
+    )
 
 
 def test_optional_is_excluded_from_the_costed_basket(db_session: Session) -> None:
