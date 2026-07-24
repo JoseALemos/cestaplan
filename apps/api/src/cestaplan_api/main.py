@@ -10,6 +10,7 @@ from cestaplan_api.config import get_settings
 from cestaplan_api.db import engine
 from cestaplan_api.routers import (
     admin,
+    admin_mappings,
     catalog,
     grocery,
     households,
@@ -46,6 +47,7 @@ app.include_router(plans.router)
 app.include_router(grocery.router)
 app.include_router(catalog.router)
 app.include_router(admin.router)
+app.include_router(admin_mappings.router)
 app.include_router(usage.router)
 app.include_router(pantry.router)
 app.include_router(prices.router)
