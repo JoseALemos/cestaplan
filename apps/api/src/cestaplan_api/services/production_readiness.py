@@ -23,6 +23,7 @@ from cestaplan_api.models import (
     Retailer,
     ShadowEvaluationRun,
 )
+from cestaplan_api.services.mapping_review import candidate_metrics
 from cestaplan_api.services.recipe_catalog_coverage import evaluate_recipe_catalog_coverage
 
 _APPROVED_RIGHTS = {"commercial_use_allowed", "display_allowed", "storage_allowed"}
@@ -140,8 +141,12 @@ def evaluate_production_readiness(
     observed = activation.observed_catalog_scope
     geo_ok = (activation.geographic_scope_coverage or Decimal("0")) >= Decimal("0.5")
     schema_drift_ok = activation.mapper_status == "verified"
+    # A critical candidate explosion (many products claimed by many ingredients) blocks and means
+    # nothing may auto-approve until reviewed (§2).
+    explosion_ok = bool(candidate_metrics(db, provider_code).get("auto_approval_allowed", True))
 
     checks: dict[str, bool] = {
+        "candidate_explosion_critical": explosion_ok,
         "rights_not_approved": report.rights_approved,
         "mapper_not_verified": report.mapper_verified,
         "fingerprint_unknown": report.fingerprint_known,
