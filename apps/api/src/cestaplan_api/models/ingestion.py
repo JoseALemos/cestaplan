@@ -610,7 +610,18 @@ DATA_RIGHTS_STATUS = (
     "storage_allowed",
     "redistribution_forbidden",
     "rejected",
+    # Community/open dataset (Open Prices) and our own synthetic demo catalogue. These are
+    # NOT "unknown"/"under_review": their rights basis is known and recorded.
+    "odbl",
+    "own_synthetic",
 )
+# Whether the rights basis has been operator-verified. ``verified`` means an authorized human
+# recorded the basis (a private agreement, an open licence, or own synthetic data) — it never
+# means "no attribution/obligations", only that the basis is known and not under review.
+AUTHORIZATION_STATUS = ("unknown", "pending", "verified", "rejected")
+# The legal footing for the recorded rights. Free Text (documented set) so new bases don't
+# need a migration: private_commercial_agreement | odbl | own_synthetic.
+LICENSE_BASIS = ("private_commercial_agreement", "odbl", "own_synthetic")
 TRANSPORT_STATUS = ("unknown", "operational", "degraded", "down")
 MAPPER_STATUS = ("unknown", "pending", "blocked", "verified")
 DATA_QUALITY_STATUS = ("unknown", "accepted", "degraded", "insufficient", "quarantined")
@@ -718,6 +729,34 @@ class ProviderActivation(BaseModel):
     production_eligibility: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # --- Rights / authorization (legal footing, kept independent of production activation) --- #
+    # Whether an authorized human has recorded the rights basis. ``verified`` never means
+    # "no obligations" — only that the basis is known and not under review.
+    authorization_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    # Legal footing for the recorded rights (private_commercial_agreement | odbl | own_synthetic).
+    license_basis: Mapped[str | None] = mapped_column(Text)
+    # Public-safe display names for the licence and the rights status (shown in the UI).
+    license_display_name: Mapped[str | None] = mapped_column(Text)
+    rights_display_name: Mapped[str | None] = mapped_column(Text)
+    # Explicit, orthogonal scope of what the recorded rights actually permit. JSONB so each
+    # permission is separate; ``attribution_required=null`` means "governed by a private
+    # agreement", never "no attribution" — it is NOT a claim that attribution is unnecessary.
+    rights_scope: Mapped[dict | None] = mapped_column(JSONB)
+    authorization_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorization_verified_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("user.id")
+    )
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Public attribution text to display (nullable). For private agreements this stays null
+    # until a concrete attribution requirement is recorded.
+    attribution_text_public: Mapped[str | None] = mapped_column(Text)
+    # INTERNAL-ONLY: never serialised to any non-admin surface. A private reference to the
+    # governing agreement/evidence, and free-form internal legal notes.
+    internal_evidence_reference: Mapped[str | None] = mapped_column(Text)
+    legal_notes_internal: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
 
 
