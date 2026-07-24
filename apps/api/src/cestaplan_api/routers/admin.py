@@ -36,8 +36,15 @@ from cestaplan_api.services import (
     ingredient_matching,
     open_prices_sync,
 )
+from cestaplan_api.services.catalog_readiness import catalog_readiness_report
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+
+@router.get("/planner-readiness")
+def planner_readiness(user: AdminUser, db: DbSession) -> dict[str, Any]:
+    """Catalog-readiness snapshot for the planner (admin-only). Read-only; invents nothing."""
+    return catalog_readiness_report(db)
 
 
 def _client_ip(request: Request) -> str | None:

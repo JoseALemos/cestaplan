@@ -8,6 +8,7 @@ import {
   getAdminImport,
   listAdminImports,
   listAdminSources,
+  listPlannerReadiness,
   rollbackAdminImport,
 } from "@/lib/api/endpoints";
 import { useAuth } from "@/lib/auth/auth-context";
@@ -57,6 +58,15 @@ export function useIsAdminQuery(): AdminAccessState {
     isError: false,
     isLoading: authLoading,
   };
+}
+
+export function useReadinessQuery() {
+  const { isAdmin } = useIsAdminQuery();
+  return useQuery({
+    queryKey: queryKeys.plannerReadiness(),
+    queryFn: listPlannerReadiness,
+    enabled: isAdmin,
+  });
 }
 
 export function useAdminImportsQuery() {
