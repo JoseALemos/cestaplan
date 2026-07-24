@@ -27,6 +27,7 @@ from cestaplan_api.ingestion.providers.contracts import (
 )
 from cestaplan_api.models import (
     ExternalProduct,
+    Ingredient,
     IngredientProductMapping,
     PriceObservation,
     Product,
@@ -52,7 +53,12 @@ from cestaplan_api.services.recipe_shadow import RecipeShadowStatus, compare_rec
 _NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
 _E2E = "test-e2e-prov"
 _BASE = "test-e2e-base"
-_AVENA, _LECHE, _PLATANO = 792, 779, 760
+_AVENA, _LECHE, _PLATANO = "avena_copos", "leche_entera", "platano"
+
+
+def _ing(db: Session, name: str) -> int:
+    """Resolve a seeded ingredient's id by canonical name (CI-safe; seed ids are serial)."""
+    return db.execute(select(Ingredient.id).where(Ingredient.canonical_name == name)).scalar_one()
 
 
 def _settings() -> Settings:
@@ -89,9 +95,10 @@ def _product(
 
 
 def _discover_one(
-    db: Session, rid: int, ing_id: int, key: str, product: ExternalCatalogProduct
+    db: Session, rid: int, ing_id: str, key: str, product: ExternalCatalogProduct
 ) -> ProviderIngredientMapping:
     """Drive the genuine discovery internals for one product (classify -> persist -> map)."""
+    ing_pk = _ing(db, ing_id)  # resolve canonical name -> seeded id (CI-safe)
     cand = classify_mapping(
         key,
         product_name=product.product_name,
@@ -101,7 +108,7 @@ def _discover_one(
     )
     pid, _vid = td._persist_product(db, rid, product, now=_NOW)
     active = cand.mapping_status == "auto_approved"
-    td._upsert_mapping(db, _E2E, _E2E, ing_id, key, product, pid, cand, active=active, now=_NOW)
+    td._upsert_mapping(db, _E2E, _E2E, ing_pk, key, product, pid, cand, active=active, now=_NOW)
     return db.execute(
         select(ProviderIngredientMapping).where(
             ProviderIngredientMapping.provider_code == _E2E,
@@ -156,7 +163,10 @@ def _baseline(db: Session) -> None:
         )
         db.add(
             IngredientProductMapping(
-                retailer_id=r.id, ingredient_id=ing_id, product_id=product.id, is_active=True
+                retailer_id=r.id,
+                ingredient_id=_ing(db, ing_id),
+                product_id=product.id,
+                is_active=True,
             )
         )
     db.flush()
@@ -174,7 +184,7 @@ def _recipe(db: Session) -> Recipe:
         db.add(
             RecipeIngredient(
                 recipe_id=recipe.id,
-                ingredient_id=ing_id,
+                ingredient_id=_ing(db, ing_id),
                 canonical_name=key,
                 display_name=key,
                 quantity=Decimal(qty),

@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import (
     ExternalProduct,
+    Ingredient,
     PriceObservation,
     Product,
     ProductVariant,
@@ -21,7 +23,12 @@ from cestaplan_api.services.recipe_costing import PantryPolicy, cost_recipe
 
 _NOW = datetime.now(UTC)
 _PROV = "test-pantry-prov"
-_AVENA, _LECHE, _PLATANO, _MIEL = 792, 779, 760, 823
+_AVENA, _LECHE, _PLATANO, _MIEL = "avena_copos", "leche_entera", "platano", "miel"
+
+
+def _ing(db: Session, name: str) -> int:
+    """Resolve a seeded ingredient's id by canonical name (CI-safe; seed ids are serial)."""
+    return db.execute(select(Ingredient.id).where(Ingredient.canonical_name == name)).scalar_one()
 
 
 def _setup(db: Session) -> Recipe:
@@ -69,7 +76,7 @@ def _setup(db: Session) -> Recipe:
         db.add(
             ProviderIngredientMapping(
                 provider_code=_PROV,
-                ingredient_id=ing_id,
+                ingredient_id=_ing(db, ing_id),
                 canonical_ingredient_key=key,
                 retailer_slug=_PROV,
                 external_product_id=ext.external_id,
@@ -94,7 +101,7 @@ def _setup(db: Session) -> Recipe:
         db.add(
             RecipeIngredient(
                 recipe_id=recipe.id,
-                ingredient_id=ing_id,
+                ingredient_id=_ing(db, ing_id),
                 canonical_name=key,
                 display_name=key,
                 quantity=Decimal(qty),

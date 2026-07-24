@@ -11,10 +11,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import (
     ExternalProduct,
+    Ingredient,
     PriceObservation,
     Product,
     ProductVariant,
@@ -29,7 +31,12 @@ _NOW = datetime.now(UTC)
 _PROV = "test-costing-prov"
 
 # Seed ingredient ids (present in the dev/test DB seed).
-_AVENA, _LECHE, _PLATANO, _MIEL = 792, 779, 760, 823
+_AVENA, _LECHE, _PLATANO, _MIEL = "avena_copos", "leche_entera", "platano", "miel"
+
+
+def _ing(db: Session, name: str) -> int:
+    """Resolve a seeded ingredient's id by canonical name (CI-safe; seed ids are serial)."""
+    return db.execute(select(Ingredient.id).where(Ingredient.canonical_name == name)).scalar_one()
 
 
 def _retailer(db: Session) -> int:
@@ -42,7 +49,7 @@ def _retailer(db: Session) -> int:
 def _add_product(
     db: Session,
     retailer_id: int,
-    ingredient_id: int,
+    ingredient_id: str,
     key: str,
     *,
     name: str,
@@ -93,7 +100,7 @@ def _add_product(
     db.add(
         ProviderIngredientMapping(
             provider_code=_PROV,
-            ingredient_id=ingredient_id,
+            ingredient_id=_ing(db, ingredient_id),
             canonical_ingredient_key=key,
             retailer_slug=_PROV,
             external_product_id=ext,
@@ -111,7 +118,7 @@ def _add_product(
 
 
 def _recipe(
-    db: Session, ings: list[tuple[int, str, str, str, str, bool]], *, servings: int = 2
+    db: Session, ings: list[tuple[str, str, str, str, str, bool]], *, servings: int = 2
 ) -> Recipe:
     recipe = Recipe(origin="seed", title="Test Recipe", servings=servings, is_synthetic=True)
     db.add(recipe)
@@ -120,7 +127,7 @@ def _recipe(
         db.add(
             RecipeIngredient(
                 recipe_id=recipe.id,
-                ingredient_id=ing_id,
+                ingredient_id=_ing(db, ing_id),
                 canonical_name=key,
                 display_name=display,
                 quantity=Decimal(qty),

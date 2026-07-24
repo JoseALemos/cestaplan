@@ -9,10 +9,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import (
     ExternalProduct,
+    Ingredient,
     IngredientProductMapping,
     PriceObservation,
     Product,
@@ -29,11 +31,16 @@ from cestaplan_api.services.recipe_shadow import RecipeShadowStatus, compare_rec
 _NOW = datetime.now(UTC)
 _PROV = "test-shadow-prov"
 _BASE = "test-shadow-base"
-_AVENA, _LECHE, _PLATANO = 792, 779, 760
+_AVENA, _LECHE, _PLATANO = "avena_copos", "leche_entera", "platano"
+
+
+def _ing(db: Session, name: str) -> int:
+    """Resolve a seeded ingredient's id by canonical name (CI-safe; seed ids are serial)."""
+    return db.execute(select(Ingredient.id).where(Ingredient.canonical_name == name)).scalar_one()
 
 
 def _provider_product(
-    db: Session, rid: int, ing_id: int, key: str, name: str, qty: str, unit: str, price: str
+    db: Session, rid: int, ing_id: str, key: str, name: str, qty: str, unit: str, price: str
 ) -> None:
     product = Product(name=name, is_synthetic=False)
     db.add(product)
@@ -70,7 +77,7 @@ def _provider_product(
     db.add(
         ProviderIngredientMapping(
             provider_code=_PROV,
-            ingredient_id=ing_id,
+            ingredient_id=_ing(db, ing_id),
             canonical_ingredient_key=key,
             retailer_slug=_PROV,
             external_product_id=ext.external_id,
@@ -87,7 +94,7 @@ def _provider_product(
 
 
 def _baseline_product(
-    db: Session, rid: int, store_id: int, ing_id: int, name: str, qty: str, unit: str, price: str
+    db: Session, rid: int, store_id: int, ing_id: str, name: str, qty: str, unit: str, price: str
 ) -> None:
     product = Product(
         name=name,
@@ -115,7 +122,7 @@ def _baseline_product(
     )
     db.add(
         IngredientProductMapping(
-            retailer_id=rid, ingredient_id=ing_id, product_id=product.id, is_active=True
+            retailer_id=rid, ingredient_id=_ing(db, ing_id), product_id=product.id, is_active=True
         )
     )
     db.flush()
@@ -133,7 +140,7 @@ def _recipe(db: Session) -> Recipe:
         db.add(
             RecipeIngredient(
                 recipe_id=recipe.id,
-                ingredient_id=ing_id,
+                ingredient_id=_ing(db, ing_id),
                 canonical_name=key,
                 display_name=key,
                 quantity=Decimal(qty),
