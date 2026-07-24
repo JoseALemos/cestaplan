@@ -19,6 +19,7 @@ from cestaplan_api.models import (
     PriceAnomaly,
     PriceObservation,
     ProviderActivation,
+    ProviderIngredientMapping,
     Retailer,
     ShadowEvaluationRun,
 )
@@ -121,19 +122,39 @@ def evaluate_production_readiness(
         hours=max_price_age_hours
     )
     report.rollback_tested = rollback_tested
+    # Pending mapping review: any candidate mapping still awaiting a human decision blocks.
+    pending_review = int(
+        db.execute(
+            select(func.count(ProviderIngredientMapping.id)).where(
+                ProviderIngredientMapping.provider_code == provider_code,
+                ProviderIngredientMapping.required_review.is_(True),
+                ProviderIngredientMapping.reviewed_at.is_(None),
+            )
+        ).scalar_one()
+    )
+    mapping_review_ok = pending_review == 0
+    # Scope unresolved / partial-catalogue / schema-drift risk from the observed activation.
+    scope_ok = activation.observed_catalog_scope in ("partial", "full")
+    partial_catalog = activation.observed_catalog_scope in ("sample_only", "partial")
+    schema_drift_ok = activation.mapper_status == "verified"
 
+    # Explicit canonical blocker keys (spec §11).
     checks = {
-        "derechos no aprobados": report.rights_approved,
-        "mapper no verificado": report.mapper_verified,
-        "fingerprint desconocido": report.fingerprint_known,
-        "anomalías críticas abiertas": report.no_critical_anomalies,
-        "cobertura de precio insuficiente": report.price_coverage_sufficient,
-        "cobertura de envases insuficiente": report.package_coverage_sufficient,
-        "cobertura de recetario insuficiente": report.recipe_coverage_sufficient,
-        "sincronizaciones consecutivas insuficientes": report.consecutive_successful_syncs_ok,
-        "antigüedad no aceptable": report.acceptable_age,
-        "rollback no probado": report.rollback_tested,
-        "shadow runs insuficientes": report.shadow_runs_ok,
+        "rights_not_approved": report.rights_approved,
+        "mapper_not_verified": report.mapper_verified,
+        "fingerprint_unknown": report.fingerprint_known,
+        "open_critical_anomalies": report.no_critical_anomalies,
+        "insufficient_price_coverage": report.price_coverage_sufficient,
+        "insufficient_package_coverage": report.package_coverage_sufficient,
+        "insufficient_recipe_coverage": report.recipe_coverage_sufficient,
+        "insufficient_mapping_review": mapping_review_ok,
+        "insufficient_consecutive_syncs": report.consecutive_successful_syncs_ok,
+        "unacceptable_age": report.acceptable_age,
+        "rollback_not_proven": report.rollback_tested,
+        "insufficient_shadow_runs": report.shadow_runs_ok,
+        "scope_unresolved": scope_ok,
+        "schema_drift_risk": schema_drift_ok,
+        "partial_catalog_only": not partial_catalog,
     }
     report.blocking_reasons = [reason for reason, ok in checks.items() if not ok]
     report.candidate_for_production_partial = not report.blocking_reasons

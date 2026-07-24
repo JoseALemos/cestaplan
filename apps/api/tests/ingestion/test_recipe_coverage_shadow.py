@@ -14,9 +14,14 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.models import (
+    ExternalProduct,
+    Ingredient,
     PriceObservation,
+    Product,
     ProductVariant,
     ProviderActivation,
+    ProviderIngredientMapping,
+    Retailer,
     ShadowEvaluationRun,
 )
 from cestaplan_api.services.production_readiness import evaluate_production_readiness
@@ -64,6 +69,53 @@ def test_production_price_is_unaffected_by_a_staging_row(
     assert prod is not None and prod.amount == Decimal("2.5000")  # staging never overrides it
 
 
+def test_active_provider_mapping_unblocks_an_ingredient(db_session: Session) -> None:
+    ing = db_session.execute(
+        select(Ingredient).where(Ingredient.canonical_name == "aceite_oliva")
+    ).scalar_one()
+    rid = db_session.execute(select(Retailer.id).where(Retailer.slug == "alcampo")).scalar_one()
+    product = Product(name="AOVE test 1L", is_synthetic=False)
+    db_session.add(product)
+    db_session.flush()
+    ext = ExternalProduct(retailer_id=rid, external_id="TEST-AOVE-COV")
+    db_session.add(ext)
+    db_session.flush()
+    var = ProductVariant(
+        retailer_id=rid,
+        external_product_id=ext.id,
+        product_id=product.id,
+        display_name="Aceite de oliva 1 L",
+        sell_unit="package",
+        net_content_quantity=Decimal("1000"),
+        net_content_unit="ml",
+    )
+    db_session.add(var)
+    db_session.flush()
+    db_session.add(_obs(var, amount="5.20", staging=True))
+    db_session.add(
+        ProviderIngredientMapping(
+            provider_code="parsebot-alcampo",
+            ingredient_id=ing.id,
+            canonical_ingredient_key="aceite_oliva",
+            retailer_slug="alcampo",
+            external_product_id="TEST-AOVE-COV",
+            normalized_product_id=product.id,
+            mapping_status="auto_approved",
+            mapping_method="exact_alias",
+            confidence_score=Decimal("0.96"),
+            unit_compatibility="compatible",
+            required_review=False,
+            active=True,
+        )
+    )
+    db_session.flush()
+    cov = evaluate_recipe_catalog_coverage(
+        db_session, "parsebot-alcampo", scope="staging", recipe_limit=20
+    )
+    assert cov.mapped_ingredients >= 1  # the approved mapping is honoured
+    assert cov.fully_costable_recipes == 0  # single-word ingredients still need review
+
+
 def test_coverage_is_honestly_low_for_a_small_sample(db_session: Session) -> None:
     cov = evaluate_recipe_catalog_coverage(
         db_session, "parsebot-alcampo", scope="staging", recipe_limit=10
@@ -86,9 +138,7 @@ def test_shadow_run_persists_and_never_activates_production(db_session: Session)
     assert run.baseline_provider == "demo"
     # Never touches production.
     activation = db_session.execute(
-        select(ProviderActivation).where(
-            ProviderActivation.provider_code == "parsebot-alcampo"
-        )
+        select(ProviderActivation).where(ProviderActivation.provider_code == "parsebot-alcampo")
     ).scalar_one()
     assert activation.activation_state == "shadow"
     assert activation.production_eligibility is False
@@ -96,10 +146,26 @@ def test_shadow_run_persists_and_never_activates_production(db_session: Session)
     assert before is None  # was not production-approved before either
 
 
-def test_shadow_compares_against_baseline(db_session: Session) -> None:
+def test_unknown_cost_is_null_not_zero(db_session: Session) -> None:
+    # With no fully-costable recipe, absence of a known cost is NULL — never 0 € / -100%.
     run = run_provider_shadow(db_session, "parsebot-alcampo", recipe_limit=10)
-    assert run.baseline_cost is not None and run.baseline_cost > 0  # demo baseline costs
-    assert run.absolute_difference == (run.basket_known_cost or Decimal("0")) - run.baseline_cost
+    assert run.comparison_status == "no_costable_recipes"
+    assert run.basket_known_cost is None
+    assert run.absolute_difference is None
+    assert run.percentage_difference is None
+    assert "no_costable_recipes" in (run.comparison_blockers or [])
+
+
+def test_activation_gates_are_not_contradictory(db_session: Session) -> None:
+    run_provider_shadow(db_session, "parsebot-alcampo", recipe_limit=5)
+    a = db_session.execute(
+        select(ProviderActivation).where(ProviderActivation.provider_code == "parsebot-alcampo")
+    ).scalar_one()
+    # Enabled up to shadow, production strictly OFF — orthogonal gates never contradict.
+    assert a.transport_enabled and a.capture_enabled and a.normalization_enabled
+    assert a.staging_enabled and a.shadow_enabled
+    assert a.production_enabled is False and a.production_approved is False
+    assert a.production_eligibility is False
 
 
 def test_readiness_reports_without_activating(db_session: Session) -> None:
@@ -111,7 +177,7 @@ def test_readiness_reports_without_activating(db_session: Session) -> None:
     report = evaluate_production_readiness(db_session, "parsebot-alcampo")
     assert report.candidate_for_production_partial is False
     assert report.would_change_state is False
-    assert "derechos no aprobados" in report.blocking_reasons
+    assert "rights_not_approved" in report.blocking_reasons
     after = db_session.execute(
         select(ProviderActivation.activation_state).where(
             ProviderActivation.provider_code == "parsebot-alcampo"

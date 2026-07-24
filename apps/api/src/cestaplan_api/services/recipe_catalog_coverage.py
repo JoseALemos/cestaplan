@@ -29,6 +29,7 @@ from cestaplan_api.models import (
     Ingredient,
     IngredientProductMapping,
     ProductVariant,
+    ProviderIngredientMapping,
     Recipe,
     RecipeIngredient,
     Retailer,
@@ -166,6 +167,19 @@ def evaluate_recipe_catalog_coverage(
             if ing_id is None or prod_id is None:
                 continue
             ing_to_products.setdefault(ing_id, []).append(prod_id)
+        # Also honour APPROVED provider mappings (auditable §3 layer, active only).
+        for ing_id, prod_id in db.execute(
+            select(
+                ProviderIngredientMapping.ingredient_id,
+                ProviderIngredientMapping.normalized_product_id,
+            ).where(
+                ProviderIngredientMapping.provider_code == provider_code,
+                ProviderIngredientMapping.active.is_(True),
+                ProviderIngredientMapping.normalized_product_id.is_not(None),
+            )
+        ).all():
+            if ing_id is not None and prod_id is not None:
+                ing_to_products.setdefault(ing_id, []).append(prod_id)
         for variant in db.execute(
             select(ProductVariant).where(
                 ProductVariant.retailer_id == retailer_id, ProductVariant.active.is_(True)
