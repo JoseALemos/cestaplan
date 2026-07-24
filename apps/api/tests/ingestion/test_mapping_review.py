@@ -6,11 +6,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import Ingredient, ProviderIngredientMapping, User
+from cestaplan_api.models import ProviderIngredientMapping, User
 from cestaplan_api.services import mapping_review as mr
+from tests.fixtures.provider_scenarios import (
+    ensure_test_ingredient,
+    seed_test_conflict_group,
+    seed_test_mapping_candidate,
+    seed_test_retailer,
+)
 
 _NOW = datetime(2026, 7, 24, tzinfo=UTC)
 
@@ -34,7 +39,7 @@ def _map(
     unit: str = "compatible",
     warnings: list[str] | None = None,
 ) -> ProviderIngredientMapping:
-    ing = db.execute(select(Ingredient).where(Ingredient.canonical_name == key)).scalar_one()
+    ing = ensure_test_ingredient(db, key)  # hermetic: create the ingredient if absent
     row = ProviderIngredientMapping(
         provider_code="parsebot-alcampo",
         ingredient_id=ing.id,
@@ -164,13 +169,28 @@ def test_audit_counts_multi_ingredient_products(db_session: Session) -> None:
 
 
 def test_candidate_metrics_are_per_provider_and_flag_explosion(db_session: Session) -> None:
+    # Hermetic scenario: Alcampo has a single clean candidate (one product -> one ingredient) so it
+    # stays 'ok'; Carrefour has three multi-ingredient products (ratio 1.0) so it is 'critical'.
+    seed_test_retailer(db_session, "alcampo")
+    seed_test_retailer(db_session, "carrefour")
+    voc = [ensure_test_ingredient(db_session, n) for n in ("tomate", "cebolla", "ajo")]
+    seed_test_mapping_candidate(
+        db_session, "parsebot-alcampo", voc[0], "ALC-CLEAN-1", retailer_slug="alcampo"
+    )
+    for i, ext in enumerate(("CX-1", "CX-2", "CX-3")):
+        seed_test_conflict_group(
+            db_session, "parsebot-carrefour", "carrefour", ext, [voc[i], voc[(i + 1) % 3]]
+        )
+
     a = mr.candidate_metrics(db_session, "parsebot-alcampo")
     c = mr.candidate_metrics(db_session, "parsebot-carrefour")
     # Documented ratios present and per-provider (never mixed).
     for m in (a, c):
         assert set(m) >= {
-            "candidate_pair_ratio", "multi_ingredient_product_ratio",
-            "average_candidates_per_conflict_group", "explosion_state",
+            "candidate_pair_ratio",
+            "multi_ingredient_product_ratio",
+            "average_candidates_per_conflict_group",
+            "explosion_state",
         }
     # Alcampo is clean; Carrefour's candidate explosion is critical and blocks auto-approval.
     assert a["explosion_state"] == "ok" and a["auto_approval_allowed"] is True

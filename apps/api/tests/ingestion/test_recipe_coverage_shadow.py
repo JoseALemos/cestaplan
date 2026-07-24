@@ -15,18 +15,22 @@ from sqlalchemy.orm import Session
 from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.models import (
     ExternalProduct,
-    Ingredient,
     PriceObservation,
     Product,
     ProductVariant,
     ProviderActivation,
     ProviderIngredientMapping,
-    Retailer,
     ShadowEvaluationRun,
 )
 from cestaplan_api.services.production_readiness import evaluate_production_readiness
 from cestaplan_api.services.provider_shadow import run_provider_shadow
 from cestaplan_api.services.recipe_catalog_coverage import evaluate_recipe_catalog_coverage
+from tests.fixtures.provider_scenarios import (
+    ensure_test_ingredient,
+    seed_test_provider_activation,
+    seed_test_recipe,
+    seed_test_retailer,
+)
 
 _NOW = datetime.now(UTC)
 
@@ -70,13 +74,19 @@ def test_production_price_is_unaffected_by_a_staging_row(
 
 
 def test_active_provider_mapping_unblocks_an_ingredient(db_session: Session) -> None:
+    # Hermetic: create the ingredient, the retailer and a recipe that needs an UNMAPPED second
+    # ingredient (so this recipe can never become fully costable from the aceite mapping alone).
+    ing = ensure_test_ingredient(db_session, "aceite_oliva", category_code="aceites_condimentos")
+    sal = ensure_test_ingredient(db_session, "sal", category_code="aceites_condimentos")
+    seed_test_recipe(
+        db_session,
+        "Cov Test Recipe",
+        [(ing, "10", "ml", False), (sal, "5", "g", False)],
+    )
     before = evaluate_recipe_catalog_coverage(
         db_session, "parsebot-alcampo", scope="staging", recipe_limit=20
     ).fully_costable_recipes
-    ing = db_session.execute(
-        select(Ingredient).where(Ingredient.canonical_name == "aceite_oliva")
-    ).scalar_one()
-    rid = db_session.execute(select(Retailer.id).where(Retailer.slug == "alcampo")).scalar_one()
+    rid = seed_test_retailer(db_session, "alcampo").id
     product = Product(name="AOVE test 1L", is_synthetic=False)
     db_session.add(product)
     db_session.flush()
@@ -122,6 +132,11 @@ def test_active_provider_mapping_unblocks_an_ingredient(db_session: Session) -> 
 
 
 def test_coverage_is_honestly_low_for_a_small_sample(db_session: Session) -> None:
+    # Hermetic: guarantee at least 10 synthetic recipes with an unmapped mandatory ingredient
+    # (harmless in the full suite: recipe_limit caps the evaluation at 10 lowest-id recipes).
+    probe = ensure_test_ingredient(db_session, "cov_probe_ingredient")
+    for i in range(10):
+        seed_test_recipe(db_session, f"Cov Sample {i}", [(probe, "100", "g", False)])
     cov = evaluate_recipe_catalog_coverage(
         db_session, "parsebot-alcampo", scope="staging", recipe_limit=10
     )
@@ -132,6 +147,7 @@ def test_coverage_is_honestly_low_for_a_small_sample(db_session: Session) -> Non
 
 
 def test_shadow_run_persists_and_never_activates_production(db_session: Session) -> None:
+    seed_test_provider_activation(db_session, "parsebot-alcampo")  # hermetic: create the activation
     before = db_session.execute(
         select(ProviderActivation.production_approved_at).where(
             ProviderActivation.provider_code == "parsebot-alcampo"
@@ -164,6 +180,7 @@ def test_unknown_cost_is_null_not_zero(db_session: Session) -> None:
 
 
 def test_activation_gates_are_not_contradictory(db_session: Session) -> None:
+    seed_test_provider_activation(db_session, "parsebot-alcampo")  # hermetic: create the activation
     run_provider_shadow(db_session, "parsebot-alcampo", recipe_limit=5)
     a = db_session.execute(
         select(ProviderActivation).where(ProviderActivation.provider_code == "parsebot-alcampo")
@@ -176,6 +193,7 @@ def test_activation_gates_are_not_contradictory(db_session: Session) -> None:
 
 
 def test_readiness_reports_without_activating(db_session: Session) -> None:
+    seed_test_provider_activation(db_session, "parsebot-alcampo")  # hermetic: create the activation
     before = db_session.execute(
         select(ProviderActivation.activation_state).where(
             ProviderActivation.provider_code == "parsebot-alcampo"

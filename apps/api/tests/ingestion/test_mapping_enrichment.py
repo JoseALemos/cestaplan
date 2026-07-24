@@ -10,9 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
-from cestaplan_api.models import Ingredient, ProviderIngredientMapping, ProviderUsage, User
+from cestaplan_api.models import ProviderIngredientMapping, ProviderUsage, User
 from cestaplan_api.services import mapping_enrichment as enr
 from cestaplan_api.services.mapping_enrichment import EnrichmentFailed
+from tests.fixtures.provider_scenarios import (
+    ensure_test_ingredient,
+    seed_test_conflict_group,
+    seed_test_retailer,
+)
 
 _NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
 
@@ -33,7 +38,7 @@ def _user(db: Session) -> int:
 def _cand(
     db: Session, *, provider: str, key: str, name: str, ext: str
 ) -> ProviderIngredientMapping:
-    ing = db.execute(select(Ingredient).where(Ingredient.canonical_name == key)).scalar_one()
+    ing = ensure_test_ingredient(db, key)  # hermetic: create the ingredient if absent
     row = ProviderIngredientMapping(
         provider_code=provider,
         ingredient_id=ing.id,
@@ -167,6 +172,18 @@ def test_alcampo_deterministic_autoapproves(db_session: Session) -> None:
 
 
 def test_carrefour_never_autoapproves_under_critical_explosion(db_session: Session) -> None:
+    # Hermetic: build a small Carrefour dataset whose multi-ingredient ratio exceeds the CRITICAL
+    # threshold (0.60). Three unique products each claimed by two ingredients -> ratio 1.0.
+    seed_test_retailer(db_session, "carrefour")
+    ings = [ensure_test_ingredient(db_session, n) for n in ("tomate", "cebolla", "ajo")]
+    for i, ext in enumerate(("EXPL-1", "EXPL-2", "EXPL-3")):
+        seed_test_conflict_group(
+            db_session, "parsebot-carrefour", "carrefour", ext, [ings[i], ings[(i + 1) % 3]]
+        )
+    assert (
+        enr.mr.candidate_metrics(db_session, "parsebot-carrefour")["explosion_state"] == "critical"
+    )
+
     row = _cand(
         db_session,
         provider="parsebot-carrefour",

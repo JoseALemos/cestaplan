@@ -24,6 +24,7 @@ from cestaplan_api.ingestion.providers.contracts import (
 )
 from cestaplan_api.models import PriceObservation, ProviderIngredientMapping, ProviderUsage
 from cestaplan_api.services import targeted_discovery as td
+from tests.fixtures.provider_scenarios import ensure_test_ingredient, seed_test_retailer
 
 _NOW = datetime.now(UTC)
 
@@ -57,7 +58,10 @@ _FAKE = [
 
 
 @pytest.fixture()
-def _no_network(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _no_network(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_session: Session) -> None:
+    # Hermetic: the retailer + ingredient the discovery resolves must exist explicitly.
+    seed_test_retailer(db_session, "alcampo")
+    ensure_test_ingredient(db_session, "platano", category_code="frutas")
     monkeypatch.setattr(td, "_LOCAL", tmp_path)  # never touch the real .local captures
 
     def _fake_capture(provider_code, settings, key, limit, out_dir):
