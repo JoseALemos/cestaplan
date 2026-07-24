@@ -16,11 +16,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from cestaplan_api.deps import AdminUser, DbSession, verify_csrf
+from cestaplan_api.ingestion.providers.contracts import ProductCostingMode
+from cestaplan_api.ingestion.providers.onboarding import classify_variant_costing_mode
 from cestaplan_api.models import (
     PriceObservation,
     ProductVariant,
     ProviderIngredientMapping,
 )
+from cestaplan_api.services import mapping_enrichment as enrich_svc
 from cestaplan_api.services import mapping_review as mr
 
 router = APIRouter(prefix="/api/v1/admin/ingredient-product-mappings", tags=["admin"])
@@ -65,6 +68,15 @@ def _variant_facts(db: DbSession, row: ProviderIngredientMapping) -> dict[str, A
         .scalars()
         .first()
     )
+    mode = classify_variant_costing_mode(
+        sell_unit=var.sell_unit,
+        variable_weight=var.variable_weight,
+        net_content_quantity=var.net_content_quantity,
+        net_content_unit=var.net_content_unit,
+        unit_price=var.unit_price,
+        unit_price_unit=var.unit_price_unit,
+        has_price=price is not None,
+    )
     return {
         "net_content": (
             f"{var.net_content_quantity}{var.net_content_unit}"
@@ -76,6 +88,8 @@ def _variant_facts(db: DbSession, row: ProviderIngredientMapping) -> dict[str, A
         "unit_price": None if var.unit_price is None else str(var.unit_price),
         "unit_price_unit": var.unit_price_unit,
         "price": None if price is None else str(price),
+        "product_costing_mode": mode.value,
+        "costing_eligible": mode is not ProductCostingMode.UNRESOLVED,
     }
 
 
@@ -114,6 +128,20 @@ def _serialize(db: DbSession, row: ProviderIngredientMapping, unlock: int) -> di
         "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
         "reviewed_by": row.reviewed_by,
         "recipes_potentially_unlocked": unlock,
+        "enrichment_status": row.enrichment_status,
+        "enrichment_requested_at": (
+            row.enrichment_requested_at.isoformat() if row.enrichment_requested_at else None
+        ),
+        "enrichment_requested_by": row.enrichment_requested_by,
+        "enrichment_completed_at": (
+            row.enrichment_completed_at.isoformat() if row.enrichment_completed_at else None
+        ),
+        "provider_endpoint": row.provider_endpoint,
+        "enrichment_error_category": row.enrichment_error_category,
+        "resolved_by_mapping_id": row.resolved_by_mapping_id,
+        "review_reason": row.review_reason,
+        "decision_history": (row.evidence_json or {}).get("revocations", []),
+        "enriched_fields": (row.evidence_json or {}).get("enriched"),
         **_variant_facts(db, row),
         "review_notice": _REVIEW_NOTICE,
     }
@@ -129,6 +157,7 @@ def list_candidates(
     canonical_ingredient_key: str | None = None,
     mapping_status: str | None = None,
     relation_status: str | None = None,
+    conflict_group_id: str | None = None,
     required_review: bool | None = None,
     minimum_confidence: float | None = None,
     maximum_confidence: float | None = None,
@@ -145,6 +174,7 @@ def list_candidates(
         canonical_ingredient_key=canonical_ingredient_key,
         mapping_status=mapping_status,
         relation_status=relation_status,
+        conflict_group_id=conflict_group_id,
         include_historic=include_historic,
         required_review=required_review,
         minimum_confidence=None if minimum_confidence is None else Decimal(str(minimum_confidence)),
@@ -175,6 +205,34 @@ def get_candidate(mapping_id: int, admin: AdminUser, db: DbSession) -> dict[str,
         raise HTTPException(status_code=404, detail="mapping not found")
     unlock = mr.recipes_potentially_unlocked(db, row.provider_code, row.ingredient_id)
     return _serialize(db, row, unlock)
+
+
+@router.post("/{mapping_id}/enrich", dependencies=[Depends(verify_csrf)])
+def enrich(mapping_id: int, admin: AdminUser, db: DbSession) -> dict[str, Any]:
+    """Single bounded provider-detail enrichment for one candidate (audited, no production)."""
+    try:
+        row = enrich_svc.enrich(db, mapping_id, requested_by=admin.id)
+    except mr.ReviewError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.commit()
+    return {
+        "mapping_id": row.id,
+        "enrichment_status": row.enrichment_status,
+        "mapping_status": row.mapping_status,
+        "confidence_score": str(row.confidence_score),
+        "provider_endpoint": row.provider_endpoint,
+        "enrichment_error_category": row.enrichment_error_category,
+    }
+
+
+@router.get("/summary/{provider_code}")
+def summary(provider_code: str, admin: AdminUser, db: DbSession) -> dict[str, Any]:
+    """Review summary + explosion state + enrichment budget for the admin dashboard."""
+    return {
+        **mr.candidate_metrics(db, provider_code),
+        "enrichment_budget": enrich_svc.enrichment_budget_state(db, provider_code),
+        "review_notice": _REVIEW_NOTICE,
+    }
 
 
 @router.post("/{mapping_id}/approve", dependencies=[Depends(verify_csrf)])

@@ -558,6 +558,8 @@ def _filtered(stmt: Select[Any], **f: object) -> Select[Any]:
         conds.append(M.mapping_status == f["mapping_status"])
     if f.get("relation_status"):
         conds.append(M.relation_status == f["relation_status"])
+    if f.get("conflict_group_id"):
+        conds.append(M.conflict_group_id == f["conflict_group_id"])
     if f.get("required_review") is not None:
         conds.append(M.required_review.is_(bool(f["required_review"])))
     if f.get("minimum_confidence") is not None:

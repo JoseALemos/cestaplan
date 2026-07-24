@@ -802,6 +802,15 @@ MAPPING_METHOD = (
 )
 UNIT_COMPATIBILITY = ("compatible", "convertible", "incompatible", "unknown")
 COMPATIBILITY = ("compatible", "incompatible", "unknown")
+ENRICHMENT_STATUS = (
+    "not_requested",
+    "pending",
+    "completed",
+    "failed",
+    "unavailable",
+    "budget_exceeded",
+    "rate_limited",
+)
 # How a candidate relates to other candidates for the SAME product (spec §1). Competing
 # candidates (same product, different ingredient) are NEVER auto-consolidated as duplicates.
 CANDIDATE_RELATION_STATUS = (
@@ -901,4 +910,16 @@ class ProviderIngredientMapping(BaseModel):
     conflict_reason: Mapped[str | None] = mapped_column(Text)
     resolved_by_mapping_id: Mapped[int | None] = mapped_column(BigInteger)
     conflict_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Detail enrichment (§6): a single bounded provider-detail call, audited. Never stores raw
+    # payloads/secrets (only sanitized derived fields inside evidence_json). Never touches prod.
+    enrichment_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="not_requested"
+    )
+    enrichment_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrichment_requested_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("user.id")
+    )
+    enrichment_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_endpoint: Mapped[str | None] = mapped_column(Text)
+    enrichment_error_category: Mapped[str | None] = mapped_column(Text)
     evidence_json: Mapped[dict | None] = mapped_column(JSONB)
