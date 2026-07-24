@@ -16,10 +16,12 @@ from sqlalchemy import func, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
 from cestaplan_api.ingestion.providers.onboarding import RETAILER_MATRIX
+from cestaplan_api.ingestion.providers.rights import SourceRights, get_source_rights
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
     IngredientProductMapping,
+    PriceObservation,
     Product,
     ProductBarcode,
     ProductPrice,
@@ -28,6 +30,7 @@ from cestaplan_api.models import (
     Retailer,
     Store,
 )
+from cestaplan_api.schemas.catalog import PriceProviderOut, RightsScopeOut
 from cestaplan_api.services.open_prices_sync import ensure_open_prices_data_source
 
 router = APIRouter(prefix="/api/v1", tags=["catalog"])
@@ -79,67 +82,165 @@ def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
     return "Experimental"
 
 
-@router.get("/price-providers")
-def list_price_providers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
-    """Retailer onboarding matrix for the chain selector (§6): badge, scope, role, rights.
+def _effective_rights(
+    activation: ProviderActivation | None, rights: SourceRights | None
+) -> dict[str, Any]:
+    """Merge the recorded activation rights with the canonical registry declaration.
 
-    Surfaces every declared chain — not only the priced ones — so the UI can show which are
-    available, experimental, offers-only or pending configuration. A partial source is never
-    presented as a full costed catalogue.
+    A decided DB value (operator/bootstrap set) wins; otherwise the canonical registry value is
+    used so the authorized state shows correctly even before the bootstrap has run. This function
+    touches ONLY the legal-rights axis — never production, costing, quality or coverage.
+    """
+
+    def act(name: str) -> Any:
+        return getattr(activation, name) if activation is not None else None
+
+    db_status = act("data_rights_status")
+    if db_status not in (None, "unknown", "under_review"):
+        data_rights_status = db_status
+    elif rights is not None:
+        data_rights_status = rights.data_rights_status
+    else:
+        data_rights_status = db_status or "under_review"
+
+    db_auth = act("authorization_status")
+    if db_auth not in (None, "unknown"):
+        authorization_status = db_auth
+    elif rights is not None:
+        authorization_status = rights.authorization_status
+    else:
+        authorization_status = db_auth or "unknown"
+
+    def merged(name: str) -> Any:
+        value = act(name)
+        if value is not None:
+            return value
+        return getattr(rights, name) if rights is not None else None
+
+    scope = merged("rights_scope")
+    return {
+        "data_rights_status": data_rights_status,
+        "authorization_status": authorization_status,
+        "license_basis": merged("license_basis"),
+        "license_display_name": merged("license_display_name"),
+        "rights_display_name": merged("rights_display_name"),
+        "rights_scope": scope,
+        "attribution_text_public": merged("attribution_text_public"),
+        "attribution_required": (scope or {}).get("attribution_required"),
+        # valid_from / valid_until are operator-set only (no registry default).
+        "valid_from": act("valid_from"),
+        "valid_until": act("valid_until"),
+    }
+
+
+@router.get("/price-providers", response_model=list[PriceProviderOut])
+def list_price_providers(user: CurrentUser, db: DbSession) -> list[PriceProviderOut]:
+    """Every declared price source with rights, technical status, coverage and costing (§6/§7).
+
+    Legal authorization is reported on its own axis (``authorization_status`` / ``rights_scope`` /
+    display names) and NEVER gates visibility here: an authorized-but-incomplete source shows as
+    authorized + experimental, not legally blocked. An intermediary technical provider
+    (Parse.bot / Apify) is never presented as an official API. Internal evidence/notes are never
+    exposed. Nothing here invents data the source does not provide.
     """
     activations = {
         a.provider_code: a for a in db.execute(select(ProviderActivation)).scalars()
     }
     retailers = {r.slug: r for r in db.execute(select(Retailer)).scalars()}
-    out: list[dict[str, Any]] = []
+    # Most recent real observation per chain (None when the catalogue has no prices yet).
+    _latest_rows = db.execute(
+        select(PriceObservation.retailer_id, func.max(PriceObservation.observed_at)).group_by(
+            PriceObservation.retailer_id
+        )
+    ).all()
+    latest_by_retailer: dict[int, Any] = {row[0]: row[1] for row in _latest_rows}
+    out: list[PriceProviderOut] = []
     for entry in RETAILER_MATRIX:
         activation = activations.get(entry.provider_code)
         retailer = retailers.get(entry.retailer_slug)
+        rights = get_source_rights(entry.provider_code)
+        eff = _effective_rights(activation, rights)
+        latest = latest_by_retailer.get(retailer.id) if retailer is not None else None
+        authorized = eff["authorization_status"] == "verified"
         out.append(
-            {
-                "provider": entry.provider_code,
-                "retailer": entry.retailer_slug,
-                "retailer_id": str(retailer.public_id) if retailer is not None else None,
-                "intended_role": entry.intended_role,
-                # Declared intent vs. what was actually observed — kept strictly separate.
-                "intended_catalog_scope": entry.intended_catalog_scope,
-                "observed_catalog_scope": (
+            PriceProviderOut(
+                provider=entry.provider_code,
+                provider_display_name=(
+                    rights.provider_display_name if rights else entry.provider_code
+                ),
+                retailer=entry.retailer_slug,
+                retailer_display_name=(
+                    rights.retailer_display_name if rights else entry.retailer_slug
+                ),
+                retailer_id=str(retailer.public_id) if retailer is not None else None,
+                technical_provider=rights.technical_provider if rights else None,
+                source_type=rights.source_type if rights else "unknown",
+                source_url=rights.source_url if rights else None,
+                official_api=rights.official_api if rights else False,
+                authorized_source=authorized,
+                authorization_status=eff["authorization_status"],
+                data_rights_status=eff["data_rights_status"],
+                rights_scope=(
+                    RightsScopeOut(**eff["rights_scope"]) if eff["rights_scope"] else None
+                ),
+                license_basis=eff["license_basis"],
+                license_display_name=eff["license_display_name"],
+                rights_display_name=eff["rights_display_name"],
+                public_authorization_text=(
+                    rights.public_authorization_text if rights else None
+                ),
+                attribution_required=eff["attribution_required"],
+                attribution_text_public=eff["attribution_text_public"],
+                valid_from=eff["valid_from"],
+                valid_until=eff["valid_until"],
+                intended_role=entry.intended_role,
+                intended_catalog_scope=entry.intended_catalog_scope,
+                observed_catalog_scope=(
                     activation.observed_catalog_scope if activation else "unknown"
                 ),
-                "price_coverage": _s(activation.price_coverage) if activation else None,
-                "package_quantity_coverage": (
+                transport_status=activation.transport_status if activation else "unknown",
+                mapper_status=activation.mapper_status if activation else "unknown",
+                data_quality_status=(
+                    activation.data_quality_status if activation else "unknown"
+                ),
+                activation_state=activation.activation_state if activation else "disabled",
+                price_coverage=_s(activation.price_coverage) if activation else None,
+                package_quantity_coverage=(
                     _s(activation.package_quantity_coverage) if activation else None
                 ),
-                "package_unit_coverage": (
+                package_unit_coverage=(
                     _s(activation.package_unit_coverage) if activation else None
                 ),
-                "geographic_scope_coverage": (
+                geographic_scope_coverage=(
                     _s(activation.geographic_scope_coverage) if activation else None
                 ),
-                "package_coverage": _s(activation.package_coverage) if activation else None,
-                "variable_weight_coverage": (
+                package_coverage=_s(activation.package_coverage) if activation else None,
+                variable_weight_coverage=(
                     _s(activation.variable_weight_coverage) if activation else None
                 ),
-                "unresolved_costing_coverage": (
+                unresolved_costing_coverage=(
                     _s(activation.unresolved_costing_coverage) if activation else None
                 ),
-                "costing_eligible_product_coverage": (
+                costing_eligible_product_coverage=(
                     _s(activation.costing_eligible_product_coverage) if activation else None
                 ),
-                "costing_eligibility": (
+                costing_eligibility=(
                     activation.costing_eligibility if activation else "unknown"
                 ),
-                "production_eligibility": (
+                production_eligibility=(
                     bool(activation.production_eligibility) if activation else False
                 ),
-                "activation_state": activation.activation_state if activation else "disabled",
-                "transport_status": activation.transport_status if activation else "unknown",
-                "mapper_status": activation.mapper_status if activation else "unknown",
-                "data_rights_status": (
-                    activation.data_rights_status if activation else "under_review"
+                production_enabled=(
+                    bool(activation.production_enabled) if activation else False
                 ),
-                "badge": _provider_badge(entry, activation),
-            }
+                production_approved=(
+                    bool(activation.production_approved) if activation else False
+                ),
+                badge=_provider_badge(entry, activation),
+                available_fields=sorted(entry.capabilities),
+                latest_observation_at=latest,
+                metadata_status="recorded" if authorized and eff["rights_scope"] else "pending",
+            )
         )
     return out
 

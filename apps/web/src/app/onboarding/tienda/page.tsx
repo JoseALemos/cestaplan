@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import type { PriceProvider } from "@/lib/api/types";
+import { providerAuthorizationView, providerAxes } from "@/lib/domain/provider-rights";
 import { retailerSelectState } from "@/lib/domain/retailer-select-state";
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 import {
@@ -70,24 +71,54 @@ const OBSERVED_SCOPE_LABEL: Record<PriceProvider["observed_catalog_scope"], stri
   unknown: "Sin datos capturados",
 };
 
+// One independent status axis as a small pill. Kept visually distinct so "authorized",
+// "operational", "costable" and "approved for the planner" are never collapsed into one label.
+function AxisChip({ label, on }: { label: string; on: boolean }) {
+  const cls = on
+    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+    : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400";
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${cls}`}>
+      {on ? "✓ " : "· "}
+      {label}
+    </span>
+  );
+}
+
 function ChainStatusRow({ provider }: { provider: PriceProvider }) {
   const caption = BADGE_STYLE[provider.badge]?.caption ?? "";
   const scopeLabel = OBSERVED_SCOPE_LABEL[provider.observed_catalog_scope];
+  const auth = providerAuthorizationView(provider);
+  const axes = providerAxes(provider);
+  const name = provider.retailer_display_name ?? provider.retailer;
   // Never claim a chain can cost plans unless the measured eligibility says so.
   const costable =
     provider.costing_eligibility === "sufficient"
       ? "apta para costear planes"
       : "no apta para costear planes";
   return (
-    <li className="flex items-start justify-between gap-3 py-2">
-      <div className="min-w-0">
-        <p className="font-medium text-ink capitalize">{provider.retailer}</p>
-        <p className="text-xs text-ink-muted">
-          {scopeLabel} · {costable}
-        </p>
-        <p className="text-xs text-ink-muted">{caption}</p>
+    <li className="flex flex-col gap-2 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-medium text-ink">{name}</p>
+          {/* Legal rights — a separate axis from the technical badge. */}
+          <p className="text-xs text-ink-muted">
+            {auth.rightsLabel} · {auth.licenseLabel}
+            {auth.technicalProvider ? ` · vía ${auth.technicalProvider}` : ""}
+          </p>
+          <p className="text-xs text-ink-muted">
+            {scopeLabel} · {costable}
+          </p>
+          <p className="text-xs text-ink-muted">{caption}</p>
+        </div>
+        <ProviderBadge badge={provider.badge} />
       </div>
-      <ProviderBadge badge={provider.badge} />
+      <div className="flex flex-wrap gap-1.5">
+        <AxisChip label="Autorizado" on={axes.authorized} />
+        <AxisChip label="Operativo" on={axes.operational} />
+        <AxisChip label="Costeable" on={axes.costable} />
+        <AxisChip label="Aprobado para el planificador" on={axes.productionApproved} />
+      </div>
     </li>
   );
 }
