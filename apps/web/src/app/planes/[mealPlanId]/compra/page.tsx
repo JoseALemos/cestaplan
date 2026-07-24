@@ -10,6 +10,7 @@ import { useGroceryChecklistSync } from "@/lib/offline/use-grocery-checklist";
 import { useOnlineStatus } from "@/lib/offline/use-online-status";
 import { exportGroceryListAsCsv, exportGroceryListAsJson } from "@/lib/utils/export";
 import { formatMoney } from "@/lib/utils/format";
+import { formatCategoryLabel } from "@/lib/utils/shopping-format";
 import { queryKeys } from "@/lib/query/keys";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -80,23 +81,42 @@ export default function GroceryListPage() {
         <CardContent className="flex flex-col gap-4">
           <ProgressBar
             value={checkedCount}
-            max={allItems.length || 1}
-            label={`${checkedCount} de ${allItems.length} comprados`}
+            max={list.total_items || 1}
+            label={`${checkedCount} de ${list.total_items} comprados · ${
+              list.total_items ? Math.round((checkedCount / list.total_items) * 100) : 0
+            } %`}
           />
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-md border border-border p-3">
-              <p className="text-xs text-ink-muted">Coste conocido</p>
+              <p className="text-xs text-ink-muted">Desembolso de compra</p>
               <p className="font-display text-display-sm text-ink">
-                {formatMoney(list.known_cost, list.currency)}
+                {formatMoney(list.purchase_outlay, list.currency)}
+              </p>
+            </div>
+            <div className="rounded-md border border-border p-3">
+              <p className="text-xs text-ink-muted">Coste consumido</p>
+              <p className="font-display text-display-sm text-ink">
+                {formatMoney(list.consumed_cost, list.currency)}
+              </p>
+            </div>
+            <div className="rounded-md border border-border p-3">
+              <p className="text-xs text-ink-muted">Valor de sobrantes</p>
+              <p className="font-display text-display-sm text-ink">
+                {formatMoney(list.leftover_value, list.currency)}
               </p>
             </div>
             <div className="rounded-md border border-border p-3">
               <p className="text-xs text-ink-muted">Coste estimado adicional</p>
               <p className="font-display text-display-sm text-ink">
-                {formatMoney(list.estimated_cost, list.currency)}
+                {formatMoney(list.estimated_additional_cost, list.currency)}
               </p>
             </div>
           </div>
+          <p className="text-xs text-ink-muted">
+            Fuentes: {list.source_counts.demo} precios demo · {list.source_counts.confirmed_external}{" "}
+            confirmados · {list.source_counts.estimated} estimados ·{" "}
+            {list.source_counts.unavailable} sin precio
+          </p>
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" size="sm" onClick={() => window.print()}>
               Imprimir
@@ -133,7 +153,9 @@ export default function GroceryListPage() {
       ) : (
         list.categories.map((category) => (
           <section key={category.category} className="flex flex-col gap-3">
-            <h2 className="font-display text-display-sm text-ink">{category.category}</h2>
+            <h2 className="font-display text-display-sm text-ink">
+              {formatCategoryLabel(category.category)}
+            </h2>
             <ul className="flex flex-col gap-2">
               {category.items.map((item) => (
                 <GroceryItemRow
