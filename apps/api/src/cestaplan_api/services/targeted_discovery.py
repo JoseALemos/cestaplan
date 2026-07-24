@@ -35,7 +35,11 @@ from cestaplan_api.models import (
     ProviderUsage,
     Retailer,
 )
-from cestaplan_api.services.ingredient_dictionary import classify_mapping, specs
+from cestaplan_api.services.ingredient_dictionary import (
+    classify_mapping,
+    normalize_provider_category,
+    specs,
+)
 
 _LOCAL = Path("/root/cestaplan/.local/provider-targeted-coverage")
 
@@ -154,7 +158,7 @@ def _classify_best(product: ExternalCatalogProduct, keys: list[str]) -> tuple[st
             key,
             product_name=product.product_name,
             brand=product.brand,
-            category_code=None,  # provider category not reliably normalised -> neutral
+            category_code=normalize_provider_category(product.category),
             net_content_unit=product.net_content_unit.value if product.net_content_unit else None,
         )
         if cand.mapping_status in ("incompatible", "rejected"):
@@ -165,12 +169,23 @@ def _classify_best(product: ExternalCatalogProduct, keys: list[str]) -> tuple[st
 
 
 def _capture_alcampo(
-    provider_code: str, settings: Settings, key: str, limit: int
+    provider_code: str, settings: Settings, key: str, limit: int, out_dir: Path
 ) -> list[ExternalCatalogProduct]:
     from cestaplan_api.ingestion.providers.parsebot import plans
 
     alias = specs()[key].aliases[0]
     records = plans.capture_records(provider_code, settings, limit=limit, query=alias)
+    # Persist the raw capture per ingredient for audit (git-ignored; never versioned).
+    ing_dir = out_dir / key
+    ing_dir.mkdir(parents=True, exist_ok=True)
+    (ing_dir / "capture.json").write_text(
+        json.dumps(
+            {"query": alias, "count": len(records), "records": records},
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
     provider = registry.get(provider_code)
     return list(provider._mapper.map_products(records, retrieved_at=datetime.now(UTC)))  # type: ignore[attr-defined]
 
@@ -210,7 +225,7 @@ def discover_and_map(
         products: list[ExternalCatalogProduct] = []
         if provider_code in ("parsebot-alcampo", "parsebot-dia") and report.api_calls < max_calls:
             try:
-                products = _capture_alcampo(provider_code, settings, key, per_query_limit)
+                products = _capture_alcampo(provider_code, settings, key, per_query_limit, out_dir)
                 report.api_calls += 1
                 report.queries += 1
                 _log_usage(db, provider_code, len(products), now)
