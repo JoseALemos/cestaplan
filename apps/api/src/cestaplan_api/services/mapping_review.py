@@ -67,8 +67,46 @@ def audit(db: Session, provider_code: str | None = None) -> dict[str, object]:
 
 
 def consolidate_duplicates(db: Session, *, now: datetime | None = None) -> dict[str, int]:
-    """A product mapped to several ingredients keeps only its best-confidence row; the rest are
-    marked superseded (kept for audit, deactivated). Idempotent."""
+    """Consolidate ONLY EXACT duplicates (same provider + ingredient + product + version).
+
+    Competing candidates (same product, DIFFERENT ingredient) are NEVER consolidated here — they
+    are conflicts to be resolved by review. Exact duplicates keep the best-confidence row and mark
+    the rest ``superseded_exact_duplicate`` (kept for audit). Idempotent. In practice the unique
+    index prevents exact duplicates, so this only tidies legacy rows.
+    """
+    now = now or datetime.now(UTC)
+    rows = list(
+        db.execute(
+            select(ProviderIngredientMapping).where(
+                ProviderIngredientMapping.superseded_at.is_(None)
+            )
+        ).scalars()
+    )
+    groups: dict[tuple[str, int, str, str], list[ProviderIngredientMapping]] = defaultdict(list)
+    for r in rows:
+        groups[(r.provider_code, r.ingredient_id, r.external_product_id, r.mapping_version)].append(
+            r
+        )
+    superseded = 0
+    for group in groups.values():
+        if len(group) < 2:  # only EXACT duplicates (same 4-tuple) are consolidated
+            continue
+        winner = max(group, key=lambda m: (float(m.confidence_score or 0), m.active, -m.id))
+        for m in group:
+            if m.id == winner.id:
+                continue
+            m.superseded_at = now
+            m.superseded_reason = f"exact duplicate of mapping {winner.id}"
+            m.relation_status = "superseded_exact_duplicate"
+            m.active = False
+            superseded += 1
+    db.flush()
+    return {"exact_duplicate_groups": len(groups), "superseded_exact_duplicates": superseded}
+
+
+def tag_conflicts(db: Session, *, now: datetime | None = None) -> dict[str, int]:
+    """Assign a stable conflict_group_id to every product claimed by more than one ingredient
+    and mark unresolved members ``competing``. Idempotent (re-runnable)."""
     now = now or datetime.now(UTC)
     rows = list(
         db.execute(
@@ -80,23 +118,64 @@ def consolidate_duplicates(db: Session, *, now: datetime | None = None) -> dict[
     groups: dict[tuple[str, str], list[ProviderIngredientMapping]] = defaultdict(list)
     for r in rows:
         groups[(r.provider_code, r.external_product_id)].append(r)
-    superseded = 0
-    for group in groups.values():
-        if len(group) < 2:
+    conflicts = 0
+    for (prov, ext), members in groups.items():
+        if len({m.ingredient_id for m in members}) < 2:
             continue
-        winner = max(group, key=lambda m: (float(m.confidence_score or 0), m.active, -m.id))
-        for m in group:
-            if m.id == winner.id:
-                continue
-            m.superseded_at = now
-            m.superseded_reason = (
-                f"product better mapped to ingredient {winner.ingredient_id} "
-                f"(conf {winner.confidence_score})"
-            )
-            m.active = False
-            superseded += 1
+        conflicts += 1
+        gid = f"{prov}:{ext}"
+        for m in members:
+            m.conflict_group_id = gid
+            if m.active and m.mapping_status in ("auto_approved", "manually_approved"):
+                m.relation_status = "conflict_resolved"
+            elif m.relation_status not in ("rejected_competitor",):
+                m.relation_status = "competing"
     db.flush()
-    return {"groups": len(groups), "superseded": superseded}
+    return {"conflict_groups": conflicts}
+
+
+def candidate_metrics(
+    db: Session, provider_code: str | None = None, *, explosion_threshold: Decimal = Decimal("3.0")
+) -> dict[str, object]:
+    """Candidate-explosion + conflict metrics (§4). A high explosion ratio flags an anomaly and
+    means nothing should auto-approve — everything needs review."""
+    stmt = select(ProviderIngredientMapping).where(
+        ProviderIngredientMapping.superseded_at.is_(None)
+    )
+    if provider_code:
+        stmt = stmt.where(ProviderIngredientMapping.provider_code == provider_code)
+    rows = list(db.execute(stmt).scalars())
+    approved = [
+        r for r in rows if r.active and r.mapping_status in ("auto_approved", "manually_approved")
+    ]
+    rejected = [r for r in rows if r.mapping_status in ("rejected", "rejected_competitor")]
+    prod_to_ings: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for r in rows:
+        prod_to_ings[(r.provider_code, r.external_product_id)].add(r.ingredient_id)
+    competing_groups = {k for k, s in prod_to_ings.items() if len(s) > 1}
+    unresolved = {
+        gid
+        for gid in {r.conflict_group_id for r in rows if r.conflict_group_id}
+        if not any(
+            r.conflict_group_id == gid and r.relation_status == "conflict_resolved" for r in rows
+        )
+    }
+    unique_products = len(prod_to_ings)
+    ratio = (
+        (Decimal(len(rows)) / Decimal(unique_products)).quantize(Decimal("0.01"))
+        if unique_products
+        else Decimal("0")
+    )
+    return {
+        "unique_products_discovered": unique_products,
+        "candidate_pairs": len(rows),
+        "competing_candidate_groups": len(competing_groups),
+        "approved_unique_products": len({r.external_product_id for r in approved}),
+        "rejected_unique_products": len({r.external_product_id for r in rejected}),
+        "unresolved_conflict_groups": len(unresolved),
+        "candidate_explosion_ratio": str(ratio),
+        "explosion_anomaly": ratio > explosion_threshold,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -221,19 +300,66 @@ def approve(
 ) -> ProviderIngredientMapping:
     now = now or datetime.now(UTC)
     row = _get(db, mapping_id)
+    # Enforce one approved+active per product/provider (the partial unique index also guards this).
+    other = (
+        db.execute(
+            select(ProviderIngredientMapping).where(
+                ProviderIngredientMapping.provider_code == row.provider_code,
+                ProviderIngredientMapping.external_product_id == row.external_product_id,
+                ProviderIngredientMapping.id != row.id,
+                ProviderIngredientMapping.active.is_(True),
+                ProviderIngredientMapping.mapping_status.in_(
+                    ("auto_approved", "manually_approved")
+                ),
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if other is not None:
+        raise ReviewError(
+            f"product already approved for ingredient {other.ingredient_id} (mapping {other.id})"
+        )
     row.mapping_status = "manually_approved"
     row.required_review = False
     row.active = True
     row.reviewed_at = now
     row.reviewed_by = reviewer_id
     row.review_reason = reason
+    row.relation_status = "conflict_resolved" if row.conflict_group_id else "independent"
+    row.conflict_resolved_at = now if row.conflict_group_id else None
     row.evidence_json = {
         **(row.evidence_json or {}),
         "decision": "manually_approved",
         "reason": reason,
     }
+    _resolve_competitors(db, row, now=now)
     db.flush()
     return row
+
+
+def _resolve_competitors(db: Session, winner: ProviderIngredientMapping, *, now: datetime) -> None:
+    """Losing competitors (same product, other ingredient) become rejected_competitor — kept for
+    audit, never deleted, and never touching manually-rejected/incompatible siblings."""
+    if winner.conflict_group_id is None:
+        return
+    siblings = db.execute(
+        select(ProviderIngredientMapping).where(
+            ProviderIngredientMapping.provider_code == winner.provider_code,
+            ProviderIngredientMapping.external_product_id == winner.external_product_id,
+            ProviderIngredientMapping.id != winner.id,
+            ProviderIngredientMapping.superseded_at.is_(None),
+        )
+    ).scalars()
+    for sib in siblings:
+        if sib.mapping_status in ("rejected", "incompatible"):
+            continue  # manual/deterministic decisions are preserved
+        sib.relation_status = "rejected_competitor"
+        sib.active = False
+        sib.required_review = False
+        sib.resolved_by_mapping_id = winner.id
+        sib.conflict_resolved_at = now
+        sib.conflict_reason = f"lost conflict to mapping {winner.id}"
 
 
 def reject(
@@ -265,12 +391,30 @@ def revoke(
     row.active = False
     row.required_review = True
     row.mapping_status = "candidate"
+    row.relation_status = "competing" if row.conflict_group_id else "independent"
+    row.conflict_resolved_at = None
     row.reviewed_at = now
     row.reviewed_by = reviewer_id
     row.review_reason = reason
     history = list((row.evidence_json or {}).get("revocations", []))
     history.append({"at": now.isoformat(), "by": reviewer_id, "reason": reason})
     row.evidence_json = {**(row.evidence_json or {}), "decision": "revoked", "revocations": history}
+    # Reopen eligible competitors that had been rejected only BECAUSE this one won.
+    if row.conflict_group_id is not None:
+        for sib in db.execute(
+            select(ProviderIngredientMapping).where(
+                ProviderIngredientMapping.provider_code == row.provider_code,
+                ProviderIngredientMapping.external_product_id == row.external_product_id,
+                ProviderIngredientMapping.id != row.id,
+                ProviderIngredientMapping.relation_status == "rejected_competitor",
+                ProviderIngredientMapping.resolved_by_mapping_id == row.id,
+            )
+        ).scalars():
+            sib.relation_status = "competing"
+            sib.required_review = True
+            sib.mapping_status = "candidate"
+            sib.resolved_by_mapping_id = None
+            sib.conflict_reason = None
     db.flush()
     return row
 
@@ -357,9 +501,11 @@ __all__ = [
     "audit",
     "bulk_approve",
     "bulk_reject",
+    "candidate_metrics",
     "consolidate_duplicates",
     "count_candidates",
     "recipes_potentially_unlocked",
     "reject",
     "revoke",
+    "tag_conflicts",
 ]

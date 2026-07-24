@@ -802,6 +802,15 @@ MAPPING_METHOD = (
 )
 UNIT_COMPATIBILITY = ("compatible", "convertible", "incompatible", "unknown")
 COMPATIBILITY = ("compatible", "incompatible", "unknown")
+# How a candidate relates to other candidates for the SAME product (spec §1). Competing
+# candidates (same product, different ingredient) are NEVER auto-consolidated as duplicates.
+CANDIDATE_RELATION_STATUS = (
+    "independent",  # only candidate for its product
+    "competing",  # several ingredients claim the same product — kept until resolved
+    "conflict_resolved",  # this candidate won its conflict group
+    "rejected_competitor",  # lost its conflict group (a sibling was approved)
+    "superseded_exact_duplicate",  # a true exact duplicate (same prov+ing+ext+version)
+)
 
 
 class ProviderIngredientMapping(BaseModel):
@@ -815,12 +824,25 @@ class ProviderIngredientMapping(BaseModel):
 
     __tablename__ = "provider_ingredient_mapping"
     __table_args__ = (
+        # Candidate uniqueness is per (provider, ingredient, product, VERSION) — several pending
+        # candidates for the same product across ingredients are allowed (they are competitors).
         Index(
             "ux_provider_ing_map",
             "provider_code",
             "ingredient_id",
             "external_product_id",
+            "mapping_version",
             unique=True,
+        ),
+        # At most ONE approved+active mapping per product per provider (partial unique index).
+        Index(
+            "ux_provider_approved_product",
+            "provider_code",
+            "external_product_id",
+            unique=True,
+            postgresql_where=text(
+                "active AND mapping_status IN ('auto_approved','manually_approved')"
+            ),
         ),
         Index("ix_provider_ing_map_status", "provider_code", "mapping_status"),
     )
@@ -870,4 +892,13 @@ class ProviderIngredientMapping(BaseModel):
     mapping_version: Mapped[str] = mapped_column(Text, nullable=False, server_default="1.0.0")
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     superseded_reason: Mapped[str | None] = mapped_column(Text)
+    # Competing-candidate semantics (§1): a shared external_product_id across ingredients is a
+    # conflict to resolve, NOT a duplicate to delete.
+    relation_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="independent"
+    )
+    conflict_group_id: Mapped[str | None] = mapped_column(Text)
+    conflict_reason: Mapped[str | None] = mapped_column(Text)
+    resolved_by_mapping_id: Mapped[int | None] = mapped_column(BigInteger)
+    conflict_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     evidence_json: Mapped[dict | None] = mapped_column(JSONB)

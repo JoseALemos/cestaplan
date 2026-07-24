@@ -54,21 +54,52 @@ def _map(
     return row
 
 
-def test_dedup_is_idempotent(db_session: Session) -> None:
-    # Same external product associated to two different ingredients -> a duplicate association.
-    a = _map(db_session, ext="DUP-1", key="aceite_oliva", conf="0.9")
-    _map(db_session, ext="DUP-1", key="sal", conf="0.7")  # lower confidence -> superseded
-    b = db_session.execute(
-        select(ProviderIngredientMapping).where(
-            ProviderIngredientMapping.external_product_id == "DUP-1",
-            ProviderIngredientMapping.canonical_ingredient_key == "sal",
-        )
-    ).scalar_one()
-    first = mr.consolidate_duplicates(db_session, now=_NOW)
-    second = mr.consolidate_duplicates(db_session, now=_NOW)
-    assert first["superseded"] >= 1
-    assert second["superseded"] == 0  # idempotent — nothing new superseded
-    assert a.superseded_at is None and b.superseded_at is not None  # best-confidence kept
+def _competing_pair(db: Session) -> tuple[ProviderIngredientMapping, ProviderIngredientMapping]:
+    a = _map(db, ext="CMP-1", key="tomate", conf="0.8")  # same product...
+    b = _map(db, ext="CMP-1", key="cebolla", conf="0.7")  # ...different ingredient (competitor)
+    mr.tag_conflicts(db, now=_NOW)
+    return a, b
+
+
+def test_competing_candidates_are_not_deduplicated(db_session: Session) -> None:
+    a, b = _competing_pair(db_session)
+    res = mr.consolidate_duplicates(db_session, now=_NOW)  # only EXACT duplicates consolidate
+    assert res["superseded_exact_duplicates"] == 0
+    assert a.superseded_at is None and b.superseded_at is None  # both kept
+    assert a.relation_status == "competing" and b.relation_status == "competing"
+    assert a.conflict_group_id == b.conflict_group_id  # same conflict group
+
+
+def test_approval_resolves_conflict_and_rejects_competitors(db_session: Session) -> None:
+    rid = _reviewer(db_session)
+    a, b = _competing_pair(db_session)
+    mr.approve(db_session, a.id, reviewer_id=rid, reason="correct ingredient", now=_NOW)
+    assert a.relation_status == "conflict_resolved" and a.active is True
+    assert b.relation_status == "rejected_competitor" and b.active is False
+    assert b.resolved_by_mapping_id == a.id  # traceable
+
+
+def test_only_one_approved_active_per_product(db_session: Session) -> None:
+    rid = _reviewer(db_session)
+    a, b = _competing_pair(db_session)
+    mr.approve(db_session, a.id, reviewer_id=rid, reason=None, now=_NOW)
+    # b lost the conflict; forcing it back to a candidate and approving must be refused.
+    b.mapping_status = "candidate"
+    b.active = False
+    b.relation_status = "competing"
+    db_session.flush()
+    with pytest.raises(mr.ReviewError):
+        mr.approve(db_session, b.id, reviewer_id=rid, reason=None, now=_NOW)
+
+
+def test_revoke_reopens_competitors(db_session: Session) -> None:
+    rid = _reviewer(db_session)
+    a, b = _competing_pair(db_session)
+    mr.approve(db_session, a.id, reviewer_id=rid, reason=None, now=_NOW)
+    assert b.relation_status == "rejected_competitor"
+    mr.revoke(db_session, a.id, reviewer_id=rid, reason="was wrong", now=_NOW)
+    assert a.active is False
+    assert b.relation_status == "competing" and b.required_review is True  # reopened
 
 
 def test_approve_records_traceability(db_session: Session) -> None:
