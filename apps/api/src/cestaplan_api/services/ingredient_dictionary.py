@@ -96,7 +96,7 @@ _SPECS: dict[str, IngredientSpec] = {
         "cereales_pasta_arroz",
         aliases=("copos de avena", "avena en copos", "copos avena"),
         required_terms=("avena", "copos"),
-        excluding_terms=("bebida", "drink", "galleta", "barrita", "harina"),
+        excluding_terms=("bebida", "drink", "galleta", "barrita", "harina", "cereales", "cereal"),
         forbidden_forms=(),
         allowed_units=("g", "kg"),
     ),
@@ -127,7 +127,134 @@ _SPECS: dict[str, IngredientSpec] = {
         forbidden_forms=("frita", "chips", "prefrita", "pure", "snack", "gajos", "congelada"),
         allowed_units=("g", "kg", "unit"),
     ),
+    # Recipe-targeted ingredients (spec §6). Milk variants are multi-term (deterministic by name);
+    # fruit is single-word (needs a confirmed category). Vegetal drinks / flavoured / prepared
+    # products are excluded so "leche" != oat drink, "platano" != banana milkshake, etc.
+    "leche_entera": IngredientSpec(
+        "leche_entera",
+        "lacteos",
+        aliases=("leche entera", "leche entera de vaca"),
+        required_terms=("leche", "entera"),
+        excluding_terms=(
+            "avena",
+            "soja",
+            "almendra",
+            "coco",
+            "arroz",
+            "condensada",
+            "evaporada",
+            "polvo",
+            "bebida",
+            "desnatada",
+            "semidesnatada",
+        ),
+        forbidden_forms=("en polvo",),
+        allowed_units=("l", "ml"),
+        allergens=("milk",),
+    ),
+    "leche_desnatada": IngredientSpec(
+        "leche_desnatada",
+        "lacteos",
+        aliases=("leche desnatada", "leche desnatada de vaca"),
+        required_terms=("leche", "desnatada"),
+        excluding_terms=(
+            "avena",
+            "soja",
+            "almendra",
+            "coco",
+            "arroz",
+            "condensada",
+            "evaporada",
+            "polvo",
+            "bebida",
+            "entera",
+            "semidesnatada",
+        ),
+        forbidden_forms=("en polvo",),
+        allowed_units=("l", "ml"),
+        allergens=("milk",),
+    ),
+    "platano": IngredientSpec(
+        "platano",
+        "frutas",
+        aliases=("platano", "platano de canarias", "banana"),
+        required_terms=("platano",),
+        excluding_terms=(
+            "sabor",
+            "batido",
+            "yogur",
+            "chips",
+            "frito",
+            "macho",
+            "deshidratado",
+            "pure",
+            "infantil",
+        ),
+        forbidden_forms=("preparado", "crujiente"),
+        allowed_units=("g", "kg", "unit"),
+    ),
+    "arandano": IngredientSpec(
+        "arandano",
+        "frutas",
+        aliases=("arandano", "arandanos"),
+        required_terms=("arandano",),
+        excluding_terms=("mermelada", "zumo", "yogur", "sabor", "recubierto", "azucarado"),
+        forbidden_forms=("preparado",),
+        allowed_units=("g", "kg"),
+    ),
+    "yogur_natural": IngredientSpec(
+        "yogur_natural",
+        "lacteos",
+        aliases=("yogur natural", "yogures naturales"),
+        required_terms=("yogur", "natural"),
+        excluding_terms=(
+            "sabor",
+            "fresa",
+            "limon",
+            "coco",
+            "griego azucarado",
+            "natillas",
+            "kefir",
+            "bebible",
+            "liquido",
+            "azucarado",
+            "fruta",
+        ),
+        forbidden_forms=(),
+        allowed_units=("g", "kg", "ml", "l"),
+        allergens=("milk",),
+    ),
 }
+
+# Deterministic map of a provider's own category text -> our internal category code. Used so a
+# single-word ingredient can be auto-approved only when the provider category is compatible.
+_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "frutas": ("fruta", "platano", "banana", "arandano", "manzana", "naranja", "pera"),
+    "verduras": (
+        "verdura",
+        "hortaliza",
+        "tomate",
+        "cebolla",
+        "ajo",
+        "espinaca",
+        "patata",
+        "lechuga",
+    ),
+    "lacteos": ("lacteo", "leche", "yogur", "queso", "nata", "mantequilla"),
+    "aceites_condimentos": ("aceite", "sal ", "vinagre", "especia", "condimento", "aliño"),
+    "cereales_pasta_arroz": ("cereal", "avena", "arroz", "pasta", "harina", "copos"),
+}
+
+
+def normalize_provider_category(text: str | None) -> str | None:
+    """Map a provider category string (e.g. 'Frutas y Verduras/Fruta') to our code, or None."""
+    if not text:
+        return None
+    n = normalize(text)
+    for code, words in _CATEGORY_KEYWORDS.items():
+        if any(w.strip() in n for w in words):
+            return code
+    return None
 
 
 def specs() -> dict[str, IngredientSpec]:
@@ -236,9 +363,7 @@ def classify_mapping(
         normalize(a) in name_norm for a in spec.aliases if len(a) > 3 or a == spec.key
     )
     # Plural-tolerant term match: "ajo" matches "ajos", "tomate" matches "tomates".
-    required_hits = sum(
-        1 for t in spec.required_terms if toks & {t, f"{t}s", f"{t}es"}
-    )
+    required_hits = sum(1 for t in spec.required_terms if toks & {t, f"{t}s", f"{t}es"})
     required_ratio = Decimal(required_hits) / Decimal(len(spec.required_terms))
     if exact_alias:
         rules.append("exact_alias")
@@ -284,9 +409,7 @@ def classify_mapping(
     # ("aceite" + "oliva", "avena" + "copos") is inherently specific and deterministic.
     specific_name = len(spec.required_terms) >= 2
     category_confirmed = category_score >= Decimal("1.0")
-    deterministic = (
-        exact_alias and all_required and unit_compat in ("compatible", "convertible")
-    )
+    deterministic = exact_alias and all_required and unit_compat in ("compatible", "convertible")
     if deterministic and (specific_name or category_confirmed):
         status, review = "auto_approved", False
         confidence = max(confidence, Decimal("0.9600"))
@@ -317,4 +440,11 @@ def classify_mapping(
     )
 
 
-__all__ = ["IngredientSpec", "MappingCandidate", "classify_mapping", "normalize", "specs"]
+__all__ = [
+    "IngredientSpec",
+    "MappingCandidate",
+    "classify_mapping",
+    "normalize",
+    "normalize_provider_category",
+    "specs",
+]
