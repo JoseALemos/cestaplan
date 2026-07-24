@@ -119,6 +119,9 @@ jobs:
       - name: Typecheck (tsc)
         run: pnpm --filter @cestaplan/web typecheck
 
+      - name: Test (node --test)
+        run: pnpm --filter @cestaplan/web test
+
       - name: Build (next, standalone)
         env:
           # Build-time public base URL; overridden per environment at deploy time.

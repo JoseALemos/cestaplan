@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { ApiError } from "@/lib/api/client";
 import { MEAL_TYPE_LABELS, MEAL_TYPE_ORDER } from "@/lib/domain/labels";
+import { retailerSelectState } from "@/lib/domain/retailer-select-state";
 import { useHouseholdQuery, useMembersQuery } from "@/lib/query/hooks/use-households";
 import { useRetailersQuery, useStoresQuery } from "@/lib/query/hooks/use-catalog";
 import { useGeneratePlanMutation } from "@/lib/query/hooks/use-plans";
@@ -51,6 +52,11 @@ export default function GenerarPlanPage() {
       value: retailer.id,
       label: retailer.costing_supported ? base : `${base} — solo visor de precios`,
     };
+  });
+  const chainState = retailerSelectState({
+    isSuccess: retailersQuery.isSuccess,
+    isError: retailersQuery.isError,
+    optionCount: retailerOptions.length,
   });
   // Read-only context only: how many of the chain's stores contribute prices.
   const storesQuery = useStoresQuery(retailerId || undefined);
@@ -161,14 +167,14 @@ export default function GenerarPlanPage() {
               <p className="text-sm text-ink-muted">
                 Elige la cadena; usaremos sus precios (de todas sus tiendas).
               </p>
-              {retailersQuery.isLoading ? (
+              {chainState === "loading" ? (
                 <Skeleton className="h-11 w-full" />
-              ) : retailersQuery.isError ? (
+              ) : chainState === "error" ? (
                 <Alert tone="warning">
                   El catálogo de cadenas no está disponible ahora mismo. Se usará la cadena
                   por defecto de tu hogar.
                 </Alert>
-              ) : retailerOptions.length === 0 ? (
+              ) : chainState === "empty" ? (
                 <Alert tone="info">Todavía no hay cadenas dadas de alta.</Alert>
               ) : (
                 <Select

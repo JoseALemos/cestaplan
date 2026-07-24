@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import type { PriceProvider } from "@/lib/api/types";
+import { retailerSelectState } from "@/lib/domain/retailer-select-state";
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 import {
   usePriceProvidersQuery,
@@ -116,6 +117,11 @@ export default function TiendaPage() {
       label: retailer.costing_supported ? base : `${base} — solo visor de precios`,
     };
   });
+  const chainState = retailerSelectState({
+    isSuccess: retailersQuery.isSuccess,
+    isError: retailersQuery.isError,
+    optionCount: retailerOptions.length,
+  });
 
   const onContinue = () => {
     setStore({
@@ -135,14 +141,14 @@ export default function TiendaPage() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {retailersQuery.isLoading ? (
+        {chainState === "loading" ? (
           <Skeleton className="h-11 w-full" />
-        ) : retailersQuery.isError ? (
+        ) : chainState === "error" ? (
           <Alert tone="warning" title="Catálogo de cadenas no disponible todavía">
             Esta parte de la API aún no está publicada. Puedes continuar el alta sin elegir
             cadena; te lo pediremos más adelante.
           </Alert>
-        ) : retailerOptions.length === 0 ? (
+        ) : chainState === "empty" ? (
           <Alert tone="info">Todavía no hay cadenas dadas de alta.</Alert>
         ) : (
           <Select

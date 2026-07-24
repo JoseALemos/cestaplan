@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/lib/auth/auth-context";
+import { retailerSelectState } from "@/lib/domain/retailer-select-state";
 import {
   useRetailersQuery,
   useStorePricesQuery,
@@ -103,6 +104,11 @@ export default function PreciosPage() {
     value: retailer.id,
     label: retailer.is_synthetic ? `${retailer.name} (datos sintéticos, sin precios reales)` : retailer.name,
   }));
+  const chainState = retailerSelectState({
+    isSuccess: retailersQuery.isSuccess,
+    isError: retailersQuery.isError,
+    optionCount: retailerOptions.length,
+  });
   const storeOptions = (storesQuery.data ?? []).map((store) => ({
     value: store.id,
     label: `${store.name} — ${store.locality} (${store.postal_code}) · ${store.priced_product_count} producto${store.priced_product_count === 1 ? "" : "s"}`,
@@ -137,11 +143,11 @@ export default function PreciosPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {retailersQuery.isLoading ? (
+          {chainState === "loading" ? (
             <Skeleton className="h-11 w-full" />
-          ) : retailersQuery.isError ? (
+          ) : chainState === "error" ? (
             <Alert tone="warning">No se pudo cargar la lista de cadenas. Comprueba tu conexión.</Alert>
-          ) : retailerOptions.length === 0 ? (
+          ) : chainState === "empty" ? (
             <Alert tone="info">Todavía no hay cadenas con precios reales sincronizados.</Alert>
           ) : (
             <Select
