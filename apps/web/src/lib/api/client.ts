@@ -15,7 +15,15 @@
  *   the cookie write has been observed by `document.cookie` in some browsers).
  */
 
+// `NEXT_PUBLIC_API_BASE_URL` is `/api-proxy` in every deployed environment: the browser calls the
+// same-origin Next.js proxy, which forwards to the real API server-side (see next.config.ts). The
+// absolute `http://localhost:8000` default only applies to a bare local run without the proxy.
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+/** Join the configured API base with a request path, preserving the path + query verbatim. */
+export function buildRequestUrl(base: string, path: string): string {
+  return `${base}${path}`;
+}
 
 /** Name of the CSRF header expected by the API on mutating requests. */
 export const CSRF_HEADER_NAME = "X-CSRF-Token";
@@ -132,7 +140,7 @@ export async function apiFetch<TResponse>(
     }
   }
 
-  const url = `${API_BASE_URL}${path}`;
+  const url = buildRequestUrl(API_BASE_URL, path);
 
   try {
     const response = await fetch(url, {
