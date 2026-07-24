@@ -160,3 +160,17 @@ def test_audit_counts_multi_ingredient_products(db_session: Session) -> None:
     before = mr.audit(db_session, "parsebot-alcampo")
     assert "products_mapped_to_multiple_ingredients" in before
     assert before["total"] >= 0
+
+
+def test_candidate_metrics_are_per_provider_and_flag_explosion(db_session: Session) -> None:
+    a = mr.candidate_metrics(db_session, "parsebot-alcampo")
+    c = mr.candidate_metrics(db_session, "parsebot-carrefour")
+    # Documented ratios present and per-provider (never mixed).
+    for m in (a, c):
+        assert set(m) >= {
+            "candidate_pair_ratio", "multi_ingredient_product_ratio",
+            "average_candidates_per_conflict_group", "explosion_state",
+        }
+    # Alcampo is clean; Carrefour's candidate explosion is critical and blocks auto-approval.
+    assert a["explosion_state"] == "ok" and a["auto_approval_allowed"] is True
+    assert c["explosion_state"] == "critical" and c["auto_approval_allowed"] is False

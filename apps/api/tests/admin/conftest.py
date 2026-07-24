@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from cestaplan_api.db import engine, get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
 from cestaplan_api.models import User
-from cestaplan_api.routers import admin, auth
+from cestaplan_api.routers import admin, admin_mappings, auth
 from cestaplan_api.security import login_rate_limiter
 
 
@@ -51,6 +51,7 @@ def client(db_session: Session) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(admin.router)
+    app.include_router(admin_mappings.router)
 
     def _override_get_db() -> Iterator[Session]:
         try:

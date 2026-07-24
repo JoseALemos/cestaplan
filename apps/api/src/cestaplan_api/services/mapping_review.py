@@ -33,9 +33,41 @@ from cestaplan_api.models import (
 
 MAPPING_VERSION = "1.0.0"
 
+_HISTORIC_RELATIONS = {"superseded_exact_duplicate"}
+_APPROVED = ("auto_approved", "manually_approved")
+
 
 class ReviewError(Exception):
     """A review action was refused (bad state, ambiguous bulk, unknown id)."""
+
+
+# --------------------------------------------------------------------------- #
+# Explicit lifecycle semantics (§1) — NEVER collapse these into one `active` flag.
+# --------------------------------------------------------------------------- #
+def is_reviewable(row: ProviderIngredientMapping) -> bool:
+    """Can an admin still see + act on this candidate? A competing/candidate/rejected row is
+    reviewable; only an exact historic duplicate is hidden (still visible via a historic filter)."""
+    return row.relation_status not in _HISTORIC_RELATIONS
+
+
+def is_selectable_for_costing(row: ProviderIngredientMapping) -> bool:
+    """Can this mapping be used to COST a recipe? Only an approved + active mapping — a competing
+    candidate (active=false) is visible/approvable but NEVER used for costing until approved."""
+    return bool(row.active and row.mapping_status in _APPROVED)
+
+
+def lifecycle_status(row: ProviderIngredientMapping) -> str:
+    """Coarse lifecycle independent of ``active``: approved | revoked | rejected |
+    rejected_competitor | historic_duplicate | pending."""
+    if row.mapping_status in _APPROVED:
+        return "approved" if row.active else "revoked"
+    if row.mapping_status == "rejected":
+        return "rejected"
+    if row.relation_status == "rejected_competitor":
+        return "rejected_competitor"
+    if row.relation_status == "superseded_exact_duplicate":
+        return "historic_duplicate"
+    return "pending"
 
 
 # --------------------------------------------------------------------------- #
@@ -134,25 +166,63 @@ def tag_conflicts(db: Session, *, now: datetime | None = None) -> dict[str, int]
     return {"conflict_groups": conflicts}
 
 
-def candidate_metrics(
-    db: Session, provider_code: str | None = None, *, explosion_threshold: Decimal = Decimal("3.0")
-) -> dict[str, object]:
-    """Candidate-explosion + conflict metrics (§4). A high explosion ratio flags an anomaly and
-    means nothing should auto-approve — everything needs review."""
+# Explosion thresholds on multi_ingredient_product_ratio (fraction of products claimed by >1
+# ingredient). Above CRITICAL a provider auto-approves NOTHING and requires review (§2).
+EXPLOSION_WARNING = Decimal("0.30")
+EXPLOSION_CRITICAL = Decimal("0.60")
+
+
+def _ratio(n: int, d: int) -> Decimal:
+    return Decimal("0") if d <= 0 else (Decimal(n) / Decimal(d)).quantize(Decimal("0.0001"))
+
+
+def _explosion_block(metrics: dict[str, object]) -> dict[str, object]:
+    """From the base metrics, derive the three documented ratios + threshold state."""
+    unique = int(metrics["unique_products_discovered"])  # type: ignore[arg-type]
+    pairs = int(metrics["candidate_pairs"])  # type: ignore[arg-type]
+    multi = int(metrics["products_with_multiple_ingredient_candidates"])  # type: ignore[arg-type]
+    groups = int(metrics["competing_candidate_groups"])  # type: ignore[arg-type]
+    pairs_in_conflict = int(metrics["candidate_pairs_in_conflict_groups"])  # type: ignore[arg-type]
+    multi_ratio = _ratio(multi, unique)
+    state = (
+        "critical" if multi_ratio > EXPLOSION_CRITICAL
+        else "warning" if multi_ratio > EXPLOSION_WARNING
+        else "ok"
+    )
+    return {
+        # candidate_pair_ratio = candidate_pairs / unique_products_discovered
+        "candidate_pair_ratio": str(_ratio(pairs, unique)),
+        # multi_ingredient_product_ratio = multi-ingredient products / unique_products
+        "multi_ingredient_product_ratio": str(multi_ratio),
+        # average_candidates_per_conflict_group = pairs in conflict groups / conflict groups
+        "average_candidates_per_conflict_group": str(_ratio(pairs_in_conflict, groups)),
+        "explosion_state": state,
+        "explosion_anomaly": state != "ok",
+        "auto_approval_allowed": state != "critical",  # critical -> nothing auto-approves
+    }
+
+
+def candidate_metrics(db: Session, provider_code: str | None = None) -> dict[str, object]:
+    """Candidate-explosion + conflict metrics (§2/§4). NEVER mixes providers when scoped to one.
+
+    Returns global figures + the three documented ratios + a warning/critical state, plus
+    per-ingredient breakdowns and the conflict-group-size distribution.
+    """
     stmt = select(ProviderIngredientMapping).where(
         ProviderIngredientMapping.superseded_at.is_(None)
     )
     if provider_code:
         stmt = stmt.where(ProviderIngredientMapping.provider_code == provider_code)
     rows = list(db.execute(stmt).scalars())
-    approved = [
-        r for r in rows if r.active and r.mapping_status in ("auto_approved", "manually_approved")
-    ]
+    approved = [r for r in rows if r.active and r.mapping_status in _APPROVED]
     rejected = [r for r in rows if r.mapping_status in ("rejected", "rejected_competitor")]
     prod_to_ings: dict[tuple[str, str], set[int]] = defaultdict(set)
+    prod_rows: dict[tuple[str, str], int] = Counter()
     for r in rows:
         prod_to_ings[(r.provider_code, r.external_product_id)].add(r.ingredient_id)
-    competing_groups = {k for k, s in prod_to_ings.items() if len(s) > 1}
+        prod_rows[(r.provider_code, r.external_product_id)] += 1
+    multi_products = {k for k, s in prod_to_ings.items() if len(s) > 1}
+    pairs_in_conflict = sum(prod_rows[k] for k in multi_products)
     unresolved = {
         gid
         for gid in {r.conflict_group_id for r in rows if r.conflict_group_id}
@@ -160,22 +230,24 @@ def candidate_metrics(
             r.conflict_group_id == gid and r.relation_status == "conflict_resolved" for r in rows
         )
     }
-    unique_products = len(prod_to_ings)
-    ratio = (
-        (Decimal(len(rows)) / Decimal(unique_products)).quantize(Decimal("0.01"))
-        if unique_products
-        else Decimal("0")
-    )
-    return {
-        "unique_products_discovered": unique_products,
+    # conflict-group-size distribution (how many candidates per conflict group).
+    size_dist = Counter(prod_rows[k] for k in multi_products)
+    per_ingredient: dict[str, int] = Counter(r.canonical_ingredient_key for r in rows)
+    base: dict[str, object] = {
+        "provider_code": provider_code or "all",
+        "unique_products_discovered": len(prod_to_ings),
         "candidate_pairs": len(rows),
-        "competing_candidate_groups": len(competing_groups),
+        "products_with_multiple_ingredient_candidates": len(multi_products),
+        "competing_candidate_groups": len(multi_products),
+        "candidate_pairs_in_conflict_groups": pairs_in_conflict,
         "approved_unique_products": len({r.external_product_id for r in approved}),
         "rejected_unique_products": len({r.external_product_id for r in rejected}),
         "unresolved_conflict_groups": len(unresolved),
-        "candidate_explosion_ratio": str(ratio),
-        "explosion_anomaly": ratio > explosion_threshold,
+        "candidates_per_ingredient": dict(per_ingredient),
+        "conflict_group_size_distribution": {str(k): v for k, v in sorted(size_dist.items())},
     }
+    base.update(_explosion_block(base))
+    return base
 
 
 # --------------------------------------------------------------------------- #
@@ -484,13 +556,17 @@ def _filtered(stmt: Select[Any], **f: object) -> Select[Any]:
         conds.append(M.canonical_ingredient_key == f["canonical_ingredient_key"])
     if f.get("mapping_status"):
         conds.append(M.mapping_status == f["mapping_status"])
+    if f.get("relation_status"):
+        conds.append(M.relation_status == f["relation_status"])
     if f.get("required_review") is not None:
         conds.append(M.required_review.is_(bool(f["required_review"])))
     if f.get("minimum_confidence") is not None:
         conds.append(M.confidence_score >= f["minimum_confidence"])
     if f.get("maximum_confidence") is not None:
         conds.append(M.confidence_score <= f["maximum_confidence"])
-    conds.append(M.superseded_at.is_(None))  # never list superseded rows
+    # Historic exact duplicates are hidden by default; a historic filter surfaces them.
+    if not f.get("include_historic"):
+        conds.append(M.relation_status != "superseded_exact_duplicate")
     return stmt.where(*conds)
 
 
@@ -504,6 +580,9 @@ __all__ = [
     "candidate_metrics",
     "consolidate_duplicates",
     "count_candidates",
+    "is_reviewable",
+    "is_selectable_for_costing",
+    "lifecycle_status",
     "recipes_potentially_unlocked",
     "reject",
     "revoke",
