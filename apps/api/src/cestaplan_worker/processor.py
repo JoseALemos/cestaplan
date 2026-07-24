@@ -16,7 +16,12 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.models import GenerationJob, MealPlan, OptimizationRun
-from cestaplan_api.services.plan_service import persist_infeasible, persist_plan_result
+from cestaplan_api.services.plan_service import (
+    persist_infeasible,
+    persist_plan_result,
+    persist_preflight_infeasible,
+)
+from cestaplan_api.services.planner_preflight import run_preflight
 from cestaplan_api.services.planning_context import build_plan_input
 from cestaplan_engine import PlanResult, generate_plan
 
@@ -56,6 +61,18 @@ def _execute(
     db: Session, job: GenerationJob, run: OptimizationRun, meal_plan: MealPlan
 ) -> None:
     _transition(run, job, "collecting_data", started=True)
+
+    # Deterministic preflight: never run the optimizer on an impossible precondition (empty
+    # catalogue, no prices, no costable recipes…). Returns a TYPED cause so the UI never blames
+    # the budget for a missing catalogue.
+    preflight = run_preflight(db, meal_plan)
+    if not preflight.ok:
+        message = persist_preflight_infeasible(db, meal_plan, run, preflight.to_report())
+        job.status = "failed"
+        job.last_error = message
+        job.heartbeat_at = _now()
+        return
+
     provider_warnings: list[str] = []
     plan_input = build_plan_input(
         db,

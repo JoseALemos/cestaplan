@@ -387,18 +387,73 @@ def persist_plan_result(
     meal_plan.status = "ready"
 
 
+# Map the engine's free-form action strings to the typed action vocabulary the UI translates.
+_ENGINE_ACTION_MAP = {
+    "add_recipes": "add_recipes",
+    "relax_soft_preferences": "relax_soft_preferences",
+    "change_store": "change_store",
+    "reduce_meals": "reduce_meals",
+    "accept_estimated_prices": "change_store",
+}
+
+
+def _enrich_infeasibility(report: dict[str, Any]) -> dict[str, Any]:
+    """Add a typed ``code`` + normalized typed ``suggested_actions`` + ``minimum_budget`` to an
+    engine infeasibility report, so the frontend keys on the same vocabulary as the preflight and
+    never renders a raw slug. Budget wording is reserved for genuine over-budget outcomes."""
+    conflict = report.get("minimal_conflict") or []
+    min_budget = report.get("min_budget_found")
+    if min_budget is not None:
+        code = "genuine_budget_infeasibility"
+    elif any(isinstance(c, str) and c.startswith("hard_constraint:") for c in conflict):
+        code = "hard_constraints_infeasible"
+    elif any(isinstance(c, str) and c.startswith("no_candidate_for:") for c in conflict):
+        code = "no_compatible_recipes"
+    else:
+        code = "optimizer_error"
+
+    actions: list[str] = []
+    for raw in report.get("suggested_actions") or []:
+        if not isinstance(raw, str):
+            continue
+        if raw.startswith("raise_budget_to:"):
+            actions.append("increase_budget")
+        elif raw in _ENGINE_ACTION_MAP:
+            actions.append(_ENGINE_ACTION_MAP[raw])
+    # de-duplicate, preserve order
+    seen: set[str] = set()
+    report["suggested_actions"] = [a for a in actions if not (a in seen or seen.add(a))]
+    report["code"] = code
+    report["minimum_budget"] = min_budget  # only non-null on the genuine budget path
+    report.setdefault("candidate_counts", {})
+    return report
+
+
 def persist_infeasible(
     db: Session, meal_plan: MealPlan, run: OptimizationRun, result: InfeasibleResult
 ) -> str:
     """Persist a diagnosis (never a fake plan) and mark the run/plan failed."""
     _clear_previous(db, meal_plan)
     run.result_summary = None
-    run.infeasibility_report = result.model_dump(mode="json")
+    run.infeasibility_report = _enrich_infeasibility(result.model_dump(mode="json"))
     run.status = "failed"
     run.finished_at = _now()
     meal_plan.status = "failed"
     reason = "; ".join(result.minimal_conflict) or "infeasible"
     return f"infeasible: {reason}"
+
+
+def persist_preflight_infeasible(
+    db: Session, meal_plan: MealPlan, run: OptimizationRun, report: dict[str, Any]
+) -> str:
+    """Persist a deterministic PREFLIGHT diagnosis (the solver never ran); mark run/plan failed."""
+    _clear_previous(db, meal_plan)
+    run.result_summary = None
+    run.infeasibility_report = report
+    run.status = "failed"
+    run.finished_at = _now()
+    meal_plan.status = "failed"
+    return f"infeasible(preflight): {report.get('code')}"
 
 
 def _requirement_by_type(db: Session, meal_plan: MealPlan) -> dict[str, int]:
