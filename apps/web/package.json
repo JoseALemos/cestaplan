@@ -2,13 +2,14 @@
   "name": "@cestaplan/web",
   "version": "0.0.0",
   "private": true,
-  "description": "CestaPlan — PWA mobile-first de planificación de comidas consciente del presupuesto y de la tienda.",
+  "description": "CestaPlan \u2014 PWA mobile-first de planificaci\u00f3n de comidas consciente del presupuesto y de la tienda.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@hookform/resolvers": "5.4.0",
