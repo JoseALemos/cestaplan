@@ -133,13 +133,15 @@ def evaluate_production_readiness(
         ).scalar_one()
     )
     mapping_review_ok = pending_review == 0
-    # Scope unresolved / partial-catalogue / schema-drift risk from the observed activation.
-    scope_ok = activation.observed_catalog_scope in ("partial", "full")
-    partial_catalog = activation.observed_catalog_scope in ("sample_only", "partial")
+    # Differentiated scope blockers (spec §2). ``partial_catalog_only`` is reserved for chains
+    # whose INTENDED role is partial (Lidl/Aldi/Deza). A dense_candidate on a small sample is
+    # blocked by sample_only_coverage / insufficient_observed_catalog_coverage instead.
+    intended_partial = (entry.intended_catalog_scope == "partial") if entry else False
+    observed = activation.observed_catalog_scope
+    geo_ok = (activation.geographic_scope_coverage or Decimal("0")) >= Decimal("0.5")
     schema_drift_ok = activation.mapper_status == "verified"
 
-    # Explicit canonical blocker keys (spec §11).
-    checks = {
+    checks: dict[str, bool] = {
         "rights_not_approved": report.rights_approved,
         "mapper_not_verified": report.mapper_verified,
         "fingerprint_unknown": report.fingerprint_known,
@@ -152,10 +154,16 @@ def evaluate_production_readiness(
         "unacceptable_age": report.acceptable_age,
         "rollback_not_proven": report.rollback_tested,
         "insufficient_shadow_runs": report.shadow_runs_ok,
-        "scope_unresolved": scope_ok,
+        "unresolved_geographic_scope": geo_ok,
         "schema_drift_risk": schema_drift_ok,
-        "partial_catalog_only": not partial_catalog,
     }
+    if intended_partial:
+        # Partial chains are catalogue-limited by design.
+        checks["partial_catalog_only"] = observed in ("partial", "full")
+    else:
+        # Dense candidates: a sample never proves catalogue breadth.
+        checks["sample_only_coverage"] = observed != "sample_only"
+        checks["insufficient_observed_catalog_coverage"] = observed in ("partial", "full")
     report.blocking_reasons = [reason for reason, ok in checks.items() if not ok]
     report.candidate_for_production_partial = not report.blocking_reasons
     return report

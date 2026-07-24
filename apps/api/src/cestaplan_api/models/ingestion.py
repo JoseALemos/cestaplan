@@ -860,7 +860,14 @@ class ProviderIngredientMapping(BaseModel):
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reviewed_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("user.id"))
+    review_reason: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # Version of the rule set + observed source shape that produced this decision. A rejection
+    # is never re-proposed until one of these changes (spec §5). Dedup marks redundant rows
+    # ``superseded`` (kept for audit, never physically deleted).
+    mapping_version: Mapped[str] = mapped_column(Text, nullable=False, server_default="1.0.0")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_reason: Mapped[str | None] = mapped_column(Text)
     evidence_json: Mapped[dict | None] = mapped_column(JSONB)
