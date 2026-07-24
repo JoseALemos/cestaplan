@@ -1,0 +1,14 @@
+{
+  "// note": "Type-checks the native node:test files, which import sibling modules with an explicit .ts extension (required by Node 22's built-in TS runner). Inherits the app's full strictness; allowImportingTsExtensions is scoped here only, never in the app tsconfig. Emits nothing.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*.test.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
