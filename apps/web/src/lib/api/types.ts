@@ -516,12 +516,66 @@ export type OptimizationRunStatus =
   | "failed"
   | "cancelled";
 
+/** Suggested remediation codes the preflight/optimizer may attach to a failed run. */
+export type ActionCode =
+  | "add_recipes"
+  | "relax_soft_preferences"
+  | "change_store"
+  | "reduce_meals"
+  | "increase_budget"
+  | "configure_provider"
+  | "review_mappings";
+
+/** Deterministic preflight reason codes for why a plan couldn't be generated. */
+export type PreflightCode =
+  | "no_active_recipes"
+  | "no_compatible_recipes"
+  | "no_retailer_selected"
+  | "retailer_without_catalog"
+  | "no_mapped_products"
+  | "no_product_prices"
+  | "no_costable_recipes"
+  | "insufficient_recipe_variety"
+  | "genuine_budget_infeasibility"
+  | "hard_constraints_infeasible"
+  | "optimizer_error";
+
+/** Overall readiness of the planner pipeline, from the admin readiness endpoint. */
+export type ReadinessStatus =
+  | "no_recipes"
+  | "no_catalog"
+  | "no_prices"
+  | "pending_mappings"
+  | "staging_only"
+  | "ready_for_review"
+  | "available";
+
 export interface InfeasibilityDiagnosis {
   reason?: string;
+  code?: PreflightCode | string;
+  candidate_counts?: Record<string, number>;
   minimum_budget?: MoneyString;
   offending_products?: { name: string; reason?: string }[];
   suggested_actions?: string[];
   [key: string]: unknown;
+}
+
+/** Admin planner-readiness snapshot — all counts are plain numbers. */
+export interface PlannerReadiness {
+  status: ReadinessStatus | string;
+  recipes_active: number;
+  recipes_costable: number;
+  ingredients: number;
+  approved_mappings: number;
+  productive_products: number;
+  productive_prices: number;
+  staging_products: number;
+  staging_observations: number;
+  chains_available: number;
+  total_chains: number;
+  production_ready_providers: number;
+  last_sync_at: string | null;
+  blockers: string[];
 }
 
 export interface OptimizationRunStatusResponse {
