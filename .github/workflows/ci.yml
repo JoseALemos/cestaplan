@@ -119,7 +119,8 @@ jobs:
       - name: Typecheck (tsc)
         run: pnpm --filter @cestaplan/web typecheck
 
-      - name: Test (node --test)
+      - name: Test (node --test, native TS)
+        # Pure display/format helpers; run on Node's built-in test runner (no extra framework).
         run: pnpm --filter @cestaplan/web test
 
       - name: Build (next, standalone)

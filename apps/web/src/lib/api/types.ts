@@ -577,7 +577,8 @@ export interface MealPlanDetail {
   budget: MealPlanBudget;
   run?: { id?: Uuid; status?: OptimizationRunStatus } | null;
   planned_meals: PlannedMeal[];
-  totals: MealPlanTotals;
+  /** Null until the optimizer has computed cost totals for the plan. */
+  totals: MealPlanTotals | null;
   budget_diff: MoneyString | number;
   coverage: MealPlanCoverage;
   /** Per-day macros vs the household nutrition target. Null when no member set a goal. */
@@ -619,6 +620,9 @@ export interface RecipeFeedbackListItem extends RecipeListItemBase {
 
 export type GroceryPriceStatus = "known" | "estimated" | "unknown" | string;
 
+/** Where a line's price actually comes from — never conflate demo with a real observation. */
+export type PriceSourceKind = "demo" | "confirmed_external" | "estimated" | "unavailable";
+
 export interface GrocerySource {
   source_type: string;
   source_name: string;
@@ -629,20 +633,36 @@ export interface GroceryItem {
   id: Uuid;
   generic_name: string;
   product_name: string | null;
-  needed_quantity: string;
+  // Quantities — each carries its unit (the client renders them readably).
+  required_quantity: string;
+  required_unit: string | null;
   pending_quantity: string;
-  /** Observed as a plain boolean ("do we have some in the pantry?"); typed loosely in case a quantity string is ever returned instead. */
+  /** "Do we have some in the pantry?"; typed loosely in case a quantity string is returned. */
   pantry_available: boolean | string | null;
-  packages_count: number | null;
+  packages_required: number | null;
   package_quantity: string | null;
   package_unit: string | null;
-  unit_price: MoneyString | null;
-  subtotal: MoneyString | null;
-  subtotal_known: boolean;
+  purchased_quantity: string | null;
+  consumed_quantity: string | null;
+  leftover_quantity: string | null;
+  // Prices — package_price is the whole-package price ("€/envase"), never a per-gram value.
+  package_price: MoneyString | null;
+  normalized_unit_price: MoneyString | null;
+  normalized_unit: string | null;
+  // Line money.
+  purchased_cost: MoneyString | null;
+  consumed_cost: MoneyString | null;
+  leftover_value: MoneyString | null;
   price_status: GroceryPriceStatus;
+  price_source_kind: PriceSourceKind;
   availability: string | null;
   source: GrocerySource | null;
   is_checked: boolean;
+  // Deprecated aliases (kept for older callers).
+  packages_count: number | null;
+  needed_quantity: string;
+  subtotal: MoneyString | null;
+  subtotal_known: boolean;
 }
 
 export interface GroceryCategory {
@@ -650,13 +670,31 @@ export interface GroceryCategory {
   items: GroceryItem[];
 }
 
+export interface GrocerySourceCounts {
+  demo: number;
+  confirmed_external: number;
+  estimated: number;
+  unavailable: number;
+}
+
 export interface GroceryList {
   meal_plan_id: Uuid;
   currency: string;
   coverage_status: string;
+  /** Full-package outlay to buy the list (demo + confirmed lines). */
+  purchase_outlay: MoneyString;
+  /** Proportional value of the quantities actually consumed. */
+  consumed_cost: MoneyString;
+  /** purchase_outlay − consumed_cost. */
+  leftover_value: MoneyString;
+  estimated_additional_cost: MoneyString;
+  total_items: number;
+  unknown_cost_item_count: number;
+  source_counts: GrocerySourceCounts;
+  categories: GroceryCategory[];
+  // Deprecated aliases.
   known_cost: MoneyString;
   estimated_cost: MoneyString;
-  categories: GroceryCategory[];
 }
 
 export interface GroceryItemIn {

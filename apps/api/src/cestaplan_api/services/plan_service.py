@@ -38,6 +38,13 @@ from cestaplan_api.models import (
     Retailer,
     Store,
 )
+from cestaplan_api.services.shopping_semantics import (
+    PriceSourceKind,
+    line_cost_breakdown,
+    normalized_unit_price,
+    package_price,
+    resolve_source_kind,
+)
 from cestaplan_engine import InfeasibleResult, PlanResult
 
 
@@ -70,9 +77,7 @@ def resolve_plan(
     return meal_plan
 
 
-def resolve_run(
-    db: Session, user_id: int, run_id: uuid.UUID
-) -> OptimizationRun:
+def resolve_run(db: Session, user_id: int, run_id: uuid.UUID) -> OptimizationRun:
     """Load an optimization run by public id and verify household membership."""
     run = db.execute(
         select(OptimizationRun).where(OptimizationRun.public_id == run_id)
@@ -134,14 +139,14 @@ def resolve_plan_store(
         store = db.get(Store, household.default_store_id)
         if store is not None and store.is_active:
             return store
-    return db.execute(
-        select(Store).where(Store.is_active.is_(True)).order_by(Store.id)
-    ).scalars().first()
+    return (
+        db.execute(select(Store).where(Store.is_active.is_(True)).order_by(Store.id))
+        .scalars()
+        .first()
+    )
 
 
-def _representative_store(
-    db: Session, retailer: Retailer, household: Household
-) -> Store | None:
+def _representative_store(db: Session, retailer: Retailer, household: Household) -> Store | None:
     """Pick one active store of ``retailer`` for display / catalog-date only.
 
     Prices are aggregated across the whole chain, so this store never scopes pricing; it
@@ -152,11 +157,15 @@ def _representative_store(
         store = db.get(Store, household.default_store_id)
         if store is not None and store.is_active and store.retailer_id == retailer.id:
             return store
-    return db.execute(
-        select(Store)
-        .where(Store.retailer_id == retailer.id, Store.is_active.is_(True))
-        .order_by(Store.id)
-    ).scalars().first()
+    return (
+        db.execute(
+            select(Store)
+            .where(Store.retailer_id == retailer.id, Store.is_active.is_(True))
+            .order_by(Store.id)
+        )
+        .scalars()
+        .first()
+    )
 
 
 def resolve_plan_retailer(
@@ -270,9 +279,7 @@ def enqueue_regeneration(
 ) -> tuple[OptimizationRun, GenerationJob]:
     """Queue a fresh run (new seed) that re-runs generation for an existing plan."""
     meal_plan.status = "generating"
-    run, job = _enqueue_run(
-        db, meal_plan, job_type=job_type, seed=_new_seed(), payload=payload
-    )
+    run, job = _enqueue_run(db, meal_plan, job_type=job_type, seed=_new_seed(), payload=payload)
     return run, job
 
 
@@ -317,12 +324,16 @@ def build_regenerate_meal_payload(
     optimizer keeps them) and the target slot's current recipe is rejected (so the
     optimizer must choose an alternative for it).
     """
-    others = db.execute(
-        select(PlannedMeal.recipe_id).where(
-            PlannedMeal.meal_plan_id == meal_plan.id,
-            PlannedMeal.id != planned_meal.id,
+    others = (
+        db.execute(
+            select(PlannedMeal.recipe_id).where(
+                PlannedMeal.meal_plan_id == meal_plan.id,
+                PlannedMeal.id != planned_meal.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {
         "favorite_recipe_ids": [str(r) for r in others],
         "rejected_recipe_ids": [str(planned_meal.recipe_id)],
@@ -334,9 +345,11 @@ def build_regenerate_meal_payload(
 # --------------------------------------------------------------------------- #
 def _clear_previous(db: Session, meal_plan: MealPlan) -> None:
     """Remove any prior planned meals + grocery list so re-runs are idempotent."""
-    lists = db.execute(
-        select(GroceryList.id).where(GroceryList.meal_plan_id == meal_plan.id)
-    ).scalars().all()
+    lists = (
+        db.execute(select(GroceryList.id).where(GroceryList.meal_plan_id == meal_plan.id))
+        .scalars()
+        .all()
+    )
     if lists:
         db.execute(delete(GroceryListItem).where(GroceryListItem.grocery_list_id.in_(lists)))
         db.execute(delete(GroceryList).where(GroceryList.id.in_(lists)))
@@ -400,9 +413,7 @@ def _requirement_by_type(db: Session, meal_plan: MealPlan) -> dict[str, int]:
     return mapping
 
 
-def _persist_grocery_list(
-    db: Session, meal_plan: MealPlan, result: PlanResult
-) -> None:
+def _persist_grocery_list(db: Session, meal_plan: MealPlan, result: PlanResult) -> None:
     coverage = result.coverage
     grocery = GroceryList(
         meal_plan_id=meal_plan.id,
@@ -500,20 +511,22 @@ class _LineResolver:
         return product_id, None, None
 
 
-def _latest_price_by_product(
-    db: Session, retailer_id: int | None
-) -> dict[int, ProductPrice]:
+def _latest_price_by_product(db: Session, retailer_id: int | None) -> dict[int, ProductPrice]:
     """Most recent price per product across a whole chain (chains never mixed)."""
     stmt = select(ProductPrice)
     if retailer_id is not None:
         stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
-    rows = db.execute(
-        stmt.order_by(
-            ProductPrice.product_id,
-            ProductPrice.observed_at.desc(),
-            ProductPrice.id.desc(),
+    rows = (
+        db.execute(
+            stmt.order_by(
+                ProductPrice.product_id,
+                ProductPrice.observed_at.desc(),
+                ProductPrice.id.desc(),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     latest: dict[int, ProductPrice] = {}
     for price in rows:
         latest.setdefault(price.product_id, price)
@@ -528,11 +541,15 @@ def _norm(value: Decimal) -> str:
 # Serialization (money as strings)
 # --------------------------------------------------------------------------- #
 def serialize_run(db: Session, run: OptimizationRun) -> dict[str, Any]:
-    job = db.execute(
-        select(GenerationJob)
-        .where(GenerationJob.optimization_run_id == run.id)
-        .order_by(GenerationJob.id.desc())
-    ).scalars().first()
+    job = (
+        db.execute(
+            select(GenerationJob)
+            .where(GenerationJob.optimization_run_id == run.id)
+            .order_by(GenerationJob.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     data: dict[str, Any] = {
         "optimization_run_id": str(run.public_id),
         "meal_plan_id": _meal_plan_public_id(db, run.meal_plan_id),
@@ -563,11 +580,15 @@ def _meal_plan_public_id(db: Session, meal_plan_id: int) -> str | None:
 
 
 def _latest_run(db: Session, meal_plan: MealPlan) -> OptimizationRun | None:
-    return db.execute(
-        select(OptimizationRun)
-        .where(OptimizationRun.meal_plan_id == meal_plan.id)
-        .order_by(OptimizationRun.id.desc())
-    ).scalars().first()
+    return (
+        db.execute(
+            select(OptimizationRun)
+            .where(OptimizationRun.meal_plan_id == meal_plan.id)
+            .order_by(OptimizationRun.id.desc())
+        )
+        .scalars()
+        .first()
+    )
 
 
 def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
@@ -606,11 +627,15 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     if not summary:
         return base
 
-    meals_db = db.execute(
-        select(PlannedMeal)
-        .where(PlannedMeal.meal_plan_id == meal_plan.id)
-        .order_by(PlannedMeal.id)
-    ).scalars().all()
+    meals_db = (
+        db.execute(
+            select(PlannedMeal)
+            .where(PlannedMeal.meal_plan_id == meal_plan.id)
+            .order_by(PlannedMeal.id)
+        )
+        .scalars()
+        .all()
+    )
     recipe_public = _recipe_public_ids(db, [m.recipe_id for m in meals_db])
 
     planned: list[dict[str, Any]] = []
@@ -659,9 +684,7 @@ def _store_summary(db: Session, meal_plan: MealPlan) -> dict[str, Any] | None:
         return None
     store = db.get(Store, meal_plan.store_id) if meal_plan.store_id is not None else None
     catalog_updated_at = db.execute(
-        select(func.max(Store.catalog_updated_at)).where(
-            Store.retailer_id == retailer.id
-        )
+        select(func.max(Store.catalog_updated_at)).where(Store.retailer_id == retailer.id)
     ).scalar_one_or_none()
     return {
         "retailer_id": str(retailer.public_id),
@@ -693,9 +716,11 @@ def _grocery_summary(db: Session, meal_plan: MealPlan) -> dict[str, Any] | None:
     ).scalar_one_or_none()
     if grocery is None:
         return None
-    count = db.execute(
-        select(GroceryListItem.id).where(GroceryListItem.grocery_list_id == grocery.id)
-    ).scalars().all()
+    count = (
+        db.execute(select(GroceryListItem.id).where(GroceryListItem.grocery_list_id == grocery.id))
+        .scalars()
+        .all()
+    )
     return {
         "items": len(count),
         "known_cost": _s(grocery.known_cost_amount),
@@ -712,11 +737,15 @@ def serialize_grocery_list(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     if grocery is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Lista de compra no encontrada")
 
-    items = db.execute(
-        select(GroceryListItem)
-        .where(GroceryListItem.grocery_list_id == grocery.id)
-        .order_by(GroceryListItem.id)
-    ).scalars().all()
+    items = (
+        db.execute(
+            select(GroceryListItem)
+            .where(GroceryListItem.grocery_list_id == grocery.id)
+            .order_by(GroceryListItem.id)
+        )
+        .scalars()
+        .all()
+    )
 
     ingredient_ids = [i.ingredient_id for i in items if i.ingredient_id is not None]
     product_ids = [i.product_id for i in items if i.product_id is not None]
@@ -724,40 +753,80 @@ def serialize_grocery_list(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     products = _product_map(db, product_ids)
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    source_counts: dict[str, int] = {k.value: 0 for k in PriceSourceKind}
+    outlay = consumed_total = Decimal("0")
+    unknown_items = 0
     for item in items:
         ing = ingredients.get(item.ingredient_id) if item.ingredient_id is not None else None
         prod = products.get(item.product_id) if item.product_id is not None else None
         category = (ing.category_code if ing else None) or "uncategorized"
+        source = _source(db, item)
+        kind = resolve_source_kind(source["source_type"] if source else None, item.price_status)
+        source_counts[kind.value] += 1
+        pkg_price = package_price(item.total_cost, item.packages_selected)
+        norm = normalized_unit_price(pkg_price, item.package_quantity, item.package_unit)
+        costs = line_cost_breakdown(item.total_cost, item.purchased_quantity, item.used_quantity)
+        priced = kind in (PriceSourceKind.DEMO, PriceSourceKind.CONFIRMED_EXTERNAL)
+        if priced and costs["purchased_cost"] is not None:
+            outlay += costs["purchased_cost"]
+            consumed_total += costs["consumed_cost"] or Decimal("0")
+        if kind is PriceSourceKind.UNAVAILABLE:
+            unknown_items += 1
         groups[category].append(
             {
                 "id": str(item.public_id),
                 "generic_name": ing.display_name if ing else None,
                 "product_name": prod.name if prod else None,
-                "needed_quantity": _s(item.needed_quantity),
+                # quantities (each with its unit; the client formats readably)
+                "required_quantity": _s(item.needed_quantity),
+                "required_unit": item.package_unit,
                 "pending_quantity": _s(item.pending_quantity),
                 "pantry_available": (item.pantry_quantity or Decimal("0")) > 0,
-                "packages_count": item.packages_selected,
+                "packages_required": item.packages_selected,
                 "package_quantity": _s(item.package_quantity),
                 "package_unit": item.package_unit,
-                "unit_price": _s(item.unit_price),
-                "subtotal": _s(item.total_cost),
-                "subtotal_known": item.price_status == "known",
+                "purchased_quantity": _s(item.purchased_quantity),
+                "consumed_quantity": _s(item.used_quantity),
+                "leftover_quantity": _s(item.leftover_quantity),
+                # prices — a whole-package price is NEVER a per-gram value
+                "package_price": _s(pkg_price),
+                "normalized_unit_price": _s(norm[0]) if norm else None,
+                "normalized_unit": norm[1] if norm else None,
+                # line money: purchased outlay vs proportional consumed vs leftover value
+                "purchased_cost": _s(costs["purchased_cost"]),
+                "consumed_cost": _s(costs["consumed_cost"]),
+                "leftover_value": _s(costs["leftover_value"]),
                 "price_status": item.price_status,
+                "price_source_kind": kind.value,
                 "availability": _availability(db, item),
-                "source": _source(db, item),
+                "source": source,
                 "is_checked": item.is_checked,
+                # back-compat aliases (deprecated: unit_price was a mislabelled per-gram value)
+                "packages_count": item.packages_selected,
+                "needed_quantity": _s(item.needed_quantity),
+                "subtotal": _s(costs["purchased_cost"]),
+                "subtotal_known": priced,
             }
         )
 
+    total_items = len(items)
     return {
         "meal_plan_id": str(meal_plan.public_id),
         "currency": grocery.currency,
         "coverage_status": grocery.coverage_status,
+        # A basket made entirely of demo prices is NOT a "known cost"; expose the outlay + a
+        # per-kind source breakdown so the UI can say so honestly.
+        "purchase_outlay": _s(outlay),
+        "consumed_cost": _s(consumed_total),
+        "leftover_value": _s(outlay - consumed_total),
+        "estimated_additional_cost": _s(grocery.estimated_cost_amount),
+        "total_items": total_items,
+        "unknown_cost_item_count": unknown_items,
+        "source_counts": source_counts,
+        # deprecated alias kept for older clients
         "known_cost": _s(grocery.known_cost_amount),
         "estimated_cost": _s(grocery.estimated_cost_amount),
-        "categories": [
-            {"category": cat, "items": groups[cat]} for cat in sorted(groups)
-        ],
+        "categories": [{"category": cat, "items": groups[cat]} for cat in sorted(groups)],
     }
 
 
