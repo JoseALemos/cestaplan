@@ -32,9 +32,9 @@ def test_fixed_package_ceils_to_whole_packages() -> None:
 
 def test_fixed_package_buys_two_when_one_is_not_enough() -> None:
     # 1200 ml required, 1000 ml packs -> ceil(1.2) = 2 packages.
-    packages, purchased, cost = fixed_package_cost(
-        Decimal("1200"), "volume", Decimal("1000"), "ml", Decimal("0.95")
-    )
+    got = fixed_package_cost(Decimal("1200"), "volume", Decimal("1000"), "ml", Decimal("0.95"))
+    assert got is not None
+    packages, purchased, cost = got
     assert packages == Decimal("2")
     assert purchased == Decimal("2000")
     assert cost == Decimal("1.90")
@@ -56,9 +56,9 @@ def test_fixed_package_rejects_missing_net_content() -> None:
 
 def test_kilogram_pack_costs_a_gram_recipe() -> None:
     # 160 g plátano from a 1 kg pack @1.32 -> one pack.
-    packages, purchased, cost = fixed_package_cost(
-        Decimal("160"), "mass", Decimal("1"), "kg", Decimal("1.32")
-    )
+    got = fixed_package_cost(Decimal("160"), "mass", Decimal("1"), "kg", Decimal("1.32"))
+    assert got is not None
+    packages, purchased, cost = got
     assert (packages, purchased, cost) == (Decimal("1"), Decimal("1000"), Decimal("1.32"))
 
 

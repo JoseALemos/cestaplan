@@ -134,6 +134,10 @@ def test_isolated_leftover_is_not_amortized(db_session: Session) -> None:
 def test_leftover_accounting_invariant_holds(db_session: Session) -> None:
     recipe = _setup(db_session)
     r = cost_recipe(db_session, recipe, _PROV)
+    # A fully costable recipe populates every leftover field (narrow for the type checker).
+    assert r.reusable_leftover_value is not None
+    assert r.non_reusable_leftover_value is not None
+    assert r.unallocated_leftover_value is not None
     # leftover_value = reusable + non_reusable + unallocated (computed, not hard-coded).
     assert r.total_leftover_value == (
         r.reusable_leftover_value + r.non_reusable_leftover_value + r.unallocated_leftover_value

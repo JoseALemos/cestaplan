@@ -159,7 +159,8 @@ def test_bulk_approve_requires_single_ingredient(db_session: Session) -> None:
 def test_audit_counts_multi_ingredient_products(db_session: Session) -> None:
     before = mr.audit(db_session, "parsebot-alcampo")
     assert "products_mapped_to_multiple_ingredients" in before
-    assert before["total"] >= 0
+    total = before["total"]
+    assert isinstance(total, int) and total >= 0
 
 
 def test_candidate_metrics_are_per_provider_and_flag_explosion(db_session: Session) -> None:

@@ -53,6 +53,14 @@ def test_recipe_811_is_fully_costable_with_evidence(db_session: Session) -> None
     assert platano.package_unit == "g"
     assert platano.package_price == Decimal("2.49")
 
+    # Fully costable guarantees the money fields are populated (narrow for the type checker).
+    assert costing.total_purchase_cost is not None
+    assert costing.total_consumed_cost is not None
+    assert costing.total_leftover_value is not None
+    assert costing.reusable_leftover_value is not None
+    assert costing.non_reusable_leftover_value is not None
+    assert costing.unallocated_leftover_value is not None
+
     # Money concepts (computed, then asserted).
     assert costing.total_purchase_cost == Decimal("4.19")
     assert costing.total_consumed_cost == Decimal("1.07")
