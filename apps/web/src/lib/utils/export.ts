@@ -1,4 +1,5 @@
 import type { GroceryList } from "@/lib/api/types";
+import { formatCategoryLabel } from "@/lib/utils/shopping-format";
 
 function downloadBlob(content: string, filename: string, mimeType: string): void {
   const blob = new Blob([content], { type: mimeType });
@@ -34,23 +35,33 @@ export function exportGroceryListAsCsv(list: GroceryList): void {
     "producto_generico",
     "producto",
     "cantidad_necesaria",
+    "unidad",
     "envases",
     "precio_envase",
-    "subtotal",
-    "coste_conocido",
+    "precio_normalizado",
+    "unidad_normalizada",
+    "desembolso",
+    "coste_consumido",
+    "valor_sobrante",
+    "fuente",
     "comprado",
   ];
   const rows = list.categories.flatMap((category) =>
     category.items.map((item) =>
       [
-        category.category,
+        formatCategoryLabel(category.category),
         item.generic_name,
         item.product_name ?? "",
-        item.needed_quantity,
-        item.packages_count ?? "",
-        item.unit_price ?? "",
-        item.subtotal ?? "",
-        item.subtotal_known ? "si" : "no",
+        item.required_quantity,
+        item.required_unit ?? "",
+        item.packages_required ?? "",
+        item.package_price ?? "",
+        item.normalized_unit_price ?? "",
+        item.normalized_unit ?? "",
+        item.purchased_cost ?? "",
+        item.consumed_cost ?? "",
+        item.leftover_value ?? "",
+        item.price_source_kind,
         item.is_checked ? "si" : "no",
       ]
         .map(csvEscape)

@@ -2,8 +2,15 @@
 
 import { useState } from "react";
 
-import { formatMoney, formatQuantity } from "@/lib/utils/format";
-import type { GroceryItem } from "@/lib/api/types";
+import { formatQuantity } from "@/lib/utils/format";
+import {
+  formatNormalizedUnitPrice,
+  formatPackagePrice,
+  formatPurchaseLine,
+  formatRequiredQuantity,
+  formatSourceLabel,
+} from "@/lib/utils/shopping-format";
+import type { GroceryItem, PriceSourceKind } from "@/lib/api/types";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -28,6 +35,19 @@ function pantryBadgeLabel(pantryAvailable: GroceryItem["pantry_available"]): str
   }
   return null;
 }
+
+const SOURCE_KIND_TONE: Record<PriceSourceKind, "info" | "success" | "warning" | "error"> = {
+  demo: "info",
+  confirmed_external: "success",
+  estimated: "warning",
+  unavailable: "error",
+};
+const SOURCE_KIND_SHORT: Record<PriceSourceKind, string> = {
+  demo: "demo",
+  confirmed_external: "confirmado",
+  estimated: "estimado",
+  unavailable: "sin precio",
+};
 
 export function GroceryItemRow({
   item,
@@ -59,33 +79,50 @@ export function GroceryItemRow({
               ) : null}
             </p>
             <p className="text-sm font-semibold text-ink">
-              {formatMoney(item.subtotal, currency)}{" "}
-              <Badge tone={item.subtotal_known ? "success" : "warning"} className="align-middle">
-                {item.subtotal_known ? "conocido" : "estimado"}
+              {formatPurchaseLine(item.purchased_cost, item.packages_required, currency)}{" "}
+              <Badge tone={SOURCE_KIND_TONE[item.price_source_kind]} className="align-middle">
+                {SOURCE_KIND_SHORT[item.price_source_kind]}
               </Badge>
             </p>
           </div>
 
+          {/* Price detail: whole-package price + a readable reference price (never a per-gram value). */}
+          {item.package_price ? (
+            <p className="mt-0.5 text-xs text-ink-muted">
+              {formatPackagePrice(item.package_price, currency)}
+              {item.normalized_unit_price && item.normalized_unit
+                ? ` · ${formatNormalizedUnitPrice(item.normalized_unit_price, item.normalized_unit, currency)}`
+                : ""}
+            </p>
+          ) : null}
+
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted">
-            <span>Necesario: {formatQuantity(item.needed_quantity, undefined)}</span>
-            {item.packages_count != null ? (
+            <span>Necesario: {formatRequiredQuantity(item.required_quantity, item.required_unit)}</span>
+            {item.packages_required != null ? (
               <span>
-                {item.packages_count} envase(s) de {formatQuantity(item.package_quantity, item.package_unit ?? undefined)}
+                {item.packages_required} envase(s) de{" "}
+                {formatRequiredQuantity(item.package_quantity, item.package_unit)}
               </span>
             ) : null}
-            {item.unit_price ? <span>{formatMoney(item.unit_price, currency)}/envase</span> : null}
+            {item.purchased_quantity ? (
+              <span>Comprado: {formatRequiredQuantity(item.purchased_quantity, item.package_unit)}</span>
+            ) : null}
+            {item.leftover_quantity && Number.parseFloat(item.leftover_quantity) > 0 ? (
+              <span>Sobrante: {formatRequiredQuantity(item.leftover_quantity, item.package_unit)}</span>
+            ) : null}
             {pantryBadgeLabel(item.pantry_available) ? (
               <Badge tone="info">{pantryBadgeLabel(item.pantry_available)}</Badge>
             ) : null}
             {item.availability ? <span>{item.availability}</span> : null}
           </div>
 
-          {item.source ? (
-            <p className="mt-1 text-xs text-ink-faint">
-              {item.source.source_name}
-              {item.source.observed_at ? ` · ${new Date(item.source.observed_at).toLocaleDateString("es-ES")}` : ""}
-            </p>
-          ) : null}
+          <p className="mt-1 text-xs text-ink-faint">
+            {formatSourceLabel(
+              item.price_source_kind,
+              item.source?.source_name,
+              item.source?.observed_at,
+            )}
+          </p>
 
           <div className="mt-2">
             {substituteOpen ? (
