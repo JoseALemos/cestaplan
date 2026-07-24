@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
@@ -13,6 +14,8 @@ import {
   putEquipment,
   updateMember as updateMemberApi,
 } from "@/lib/api/endpoints";
+import { finalizeErrorMessage, finalizeErrorNeedsLogin } from "@/lib/onboarding/finalize-error";
+import { queryKeys } from "@/lib/query/keys";
 import { EQUIPMENT_CODES } from "@/lib/api/types";
 import { ALLERGEN_OPTIONS, DIET_TYPE_OPTIONS, EQUIPMENT_LABELS, MEAL_TYPE_LABELS, PREFERENCE_TAG_LABELS } from "@/lib/domain/labels";
 import { useCurrentHouseholdId } from "@/lib/household/current-household";
@@ -33,10 +36,12 @@ export default function ResumenPage() {
   const router = useRouter();
   const { state, reset } = useOnboarding();
   const [, setCurrentHouseholdId] = useCurrentHouseholdId();
+  const queryClient = useQueryClient();
 
   const [status, setStatus] = useState<"idle" | "running" | "error">("idle");
   const [stage, setStage] = useState<string>("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [needsLogin, setNeedsLogin] = useState(false);
 
   const createdHouseholdIdRef = useRef<string | null>(null);
   const addedMemberIdsRef = useRef<Set<string>>(new Set());
@@ -65,6 +70,9 @@ export default function ResumenPage() {
         householdId = household.id;
         createdHouseholdIdRef.current = householdId;
         setCurrentHouseholdId(householdId);
+        // Refresh the households list so /despensa and the header recognise the new
+        // household immediately, without a logout or hard reload.
+        await queryClient.invalidateQueries({ queryKey: queryKeys.households() });
       }
 
       setStage("Añadiendo miembros…");
@@ -116,21 +124,13 @@ export default function ResumenPage() {
         `/planes/estado/${accepted.optimization_run_id}?mealPlanId=${accepted.meal_plan_id}&householdId=${householdId}`,
       );
     } catch (error) {
-      const message =
-        error instanceof ApiError
-          ? error.status === 401
-            ? "Necesitas iniciar sesión para crear un hogar y generar un plan."
-            : error.status === 422
-              ? "Alguno de los datos no cumple lo que exige la API. Revisa los pasos anteriores."
-              : `La API respondió con un error (${error.status}). Puedes reintentar: lo que ya se guardó no se repetirá.`
-          : "No se pudo conectar con la API. Comprueba tu conexión y reintenta.";
-      setErrorMessage(message);
+      // apiFetch wraps network/abort errors as ApiError with status 0 → treat as "no connection".
+      const httpStatus = error instanceof ApiError && error.status !== 0 ? error.status : null;
+      setErrorMessage(finalizeErrorMessage(httpStatus));
+      setNeedsLogin(finalizeErrorNeedsLogin(httpStatus));
       setStatus("error");
     }
   };
-
-  const needsLogin =
-    status === "error" && errorMessage?.includes("iniciar sesión");
 
   return (
     <Card>
