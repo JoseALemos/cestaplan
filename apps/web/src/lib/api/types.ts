@@ -280,6 +280,22 @@ export interface Retailer {
  * is never presented as a full, usable catalogue. Coverage ratios are strings in [0,1] (or
  * null when not measured) — display only, never parsed for storage.
  */
+/**
+ * Explicit, orthogonal scope of what the recorded rights permit. `attribution_required === null`
+ * means "governed by a private agreement" (NOT "attribution unnecessary"). Every field is
+ * optional so a version-lagged API that omits the block never breaks the UI.
+ */
+export interface RightsScope {
+  api_access?: boolean | null;
+  storage?: boolean | null;
+  processing?: boolean | null;
+  display?: boolean | null;
+  commercial_use?: boolean | null;
+  derived_results?: boolean | null;
+  raw_redistribution?: boolean | null;
+  attribution_required?: boolean | null;
+}
+
 export interface PriceProvider {
   provider: string;
   retailer: string;
@@ -304,6 +320,34 @@ export interface PriceProvider {
   mapper_status: string;
   data_rights_status: string;
   badge: string;
+
+  // --- Rights / authorization (separate axis from technical/costing/production). Optional so a
+  // lagged API never degrades the list; the UI falls back to honest neutral copy when absent. ---
+  provider_display_name?: string;
+  retailer_display_name?: string;
+  /** Intermediary technical provider (Parse.bot / Apify); null/absent when the source is direct. */
+  technical_provider?: string | null;
+  source_type?: string;
+  source_url?: string | null;
+  /** True ONLY for a genuine official API of the data owner — never for an intermediary. */
+  official_api?: boolean;
+  authorized_source?: boolean;
+  authorization_status?: string;
+  rights_scope?: RightsScope | null;
+  license_basis?: string | null;
+  license_display_name?: string | null;
+  rights_display_name?: string | null;
+  public_authorization_text?: string | null;
+  attribution_required?: boolean | null;
+  attribution_text_public?: string | null;
+  valid_from?: string | null;
+  valid_until?: string | null;
+  data_quality_status?: string;
+  production_enabled?: boolean;
+  production_approved?: boolean;
+  available_fields?: string[];
+  latest_observation_at?: string | null;
+  metadata_status?: string;
 }
 
 export type PriceCoverageLabel =

@@ -80,13 +80,11 @@ export function SourceCard({ source }: { source: AdminSource }) {
             Licencia y atribución
           </p>
           <p className="mt-1 text-sm font-medium text-ink">
-            {source.license_code ?? "Licencia no especificada"}
+            {source.license_code ?? "Licencia por confirmar"}
           </p>
           {source.attribution_text ? (
             <p className="mt-1 text-xs leading-relaxed text-ink-muted">{source.attribution_text}</p>
-          ) : (
-            <p className="mt-1 text-xs italic text-ink-faint">Sin texto de atribución declarado.</p>
-          )}
+          ) : null}
         </div>
 
         {source.last_import ? (
