@@ -125,8 +125,9 @@ jobs:
 
       - name: Build (next, standalone)
         env:
-          # Build-time public base URL; overridden per environment at deploy time.
-          NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+          # The browser talks only to the same-origin proxy; the API upstream is server-only.
+          NEXT_PUBLIC_API_BASE_URL: /api-proxy
+          API_UPSTREAM_URL: http://localhost:8000
         run: pnpm --filter @cestaplan/web build
 
   # -------------------------------------------------------------------------

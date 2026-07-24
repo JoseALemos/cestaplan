@@ -36,30 +36,49 @@ Lo verificado (sin exponer secretos):
 Clasificación: **`csrf_missing`** (cookie CSRF ausente) causada por el bloqueo de cookies de
 terceros en un despliegue cross-site.
 
-## Corrección correcta (preserva la seguridad)
+## Corrección correcta (preserva la seguridad) — dos opciones válidas
 
-Servir web y API bajo el **mismo dominio registrable**, con dominios personalizados en Railway:
+Ambas hacen que las cookies de sesión/CSRF sean **first-party** al host de la web, sin tocar CSRF,
+CORS ni permisos. Un dominio personalizado **no** es la única solución.
 
-- p. ej. `app.tudominio.com` (web) + `api.tudominio.com` (API), o un único dominio con la API bajo
-  `/api`. Así las cookies son **first-party** y se envían con normalidad → se arregla a la vez la
-  **sesión** y el **CSRF**.
-- Ajustar `CORS_ORIGINS` al nuevo origen de la web y `NEXT_PUBLIC_API_BASE_URL` al de la API.
+1. **Dominio registrable común.** Servir web y API bajo el mismo dominio registrable (p. ej.
+   `app.tudominio.com` + `api.tudominio.com`). Las cookies pasan a ser first-party y se envían con
+   normalidad. Requiere dominios personalizados + DNS.
+2. **Proxy same-origin desde el servicio web (la que usa CestaPlan).** El navegador habla **solo**
+   con el origen de la web; Next.js reescribe `/api-proxy/...` hacia el API upstream **en el
+   servidor**. La API fija sus cookies (`Set-Cookie` host-only) y, al llegar a través del proxy, el
+   navegador las asocia al **host de la web** → first-party. No hace falta ningún dominio propio, por
+   lo que se conservan los dominios generados por Railway.
 
-**No** se debe: ampliar CORS a `*`, desactivar CSRF, relajar SameSite/permisos ni pasar la sesión
-a `localStorage` (introduce riesgo XSS). Ninguna de esas opciones es una corrección válida.
+CestaPlan usa la **opción 2** porque debe conservar los dominios `*.up.railway.app`.
 
-## Qué incluye esta PR (no resuelve el 403 por sí sola)
+**Topología final:** `Browser → web Railway (/api-proxy) → proxy → API Railway`.
 
-El 403 se resuelve con el cambio de dominio anterior. Esta rama mejora la robustez y el diagnóstico:
+**No** se debe: ampliar CORS a `*`, desactivar CSRF, relajar SameSite/permisos ni pasar la sesión a
+`localStorage` (riesgo XSS). Ninguna de esas opciones es una corrección válida.
 
-- **Mensaje útil**: al fallar la finalización con 403/401 se muestra una causa comprensible
-  (posible bloqueo de cookies entre dominios) y la acción de reintentar/iniciar sesión, sin exponer
-  tokens ni internos (`lib/onboarding/finalize-error.ts`).
-- **`/despensa` sin recargar**: tras crear el hogar se invalida la query `households`, de modo que
-  la despensa y la cabecera reconocen el hogar de inmediato (arregla el hueco de caché de §9 para
-  cuando el 403 esté resuelto).
-- **Tests de regresión** que fijan el contrato CSRF de la finalización (ausente/ inválido/ éxito →
-  propietario + miembro) y el mapeo de mensajes.
+## Detalle del proxy same-origin
+
+- `apps/web/next.config.ts` añade una reescritura externa `\/api-proxy/:path* → ${API_UPSTREAM_URL}/:path*`.
+- `API_UPSTREAM_URL` (p. ej. `https://api-production-4c5d.up.railway.app`) es **server-only**: nunca
+  llega al bundle del navegador. Se valida/normaliza en `src/lib/proxy/upstream.ts` (obligatoria en
+  producción, sin barra final, rechaza no-http(s) y evita bucles hacia el propio proxy).
+- El navegador usa `NEXT_PUBLIC_API_BASE_URL=/api-proxy` → `apiFetch("/api/v1/…")` pega a
+  `/api-proxy/api/v1/…` (mismo origen), con `credentials:"include"` y `X-CSRF-Token`. La cookie
+  `cestaplan_csrf` queda ahora legible en el dominio web.
+- El proxy de Next conserva método, query, cuerpo (JSON y multipart), `Cookie`/`Set-Cookie`,
+  `Content-Type`, códigos HTTP (incl. 204) y streaming, sin registrar cuerpos, cookies ni tokens.
+- Las cookies siguen **host-only** (sin `Cookie Domain`), `Secure=true`, `HttpOnly` en sesión,
+  `SameSite` sin cambios. La API mantiene su CORS al origen web (aunque el navegador ya no haga CORS
+  directo).
+
+## Robustez adicional en esta rama
+
+- **Mensaje útil**: al fallar la finalización con 403/401 se muestra una causa comprensible y la
+  acción de reintentar/iniciar sesión, sin exponer tokens ni internos (`lib/onboarding/finalize-error.ts`).
+- **`/despensa` sin recargar**: tras crear el hogar se invalida la query `households`.
+- **Tests de regresión**: contrato CSRF de la finalización (ausente/inválido/éxito → propietario +
+  miembro), normalización del upstream + anti-bucle, y composición de la URL same-origin.
 
 ## Estado de datos (sin cambios)
 
