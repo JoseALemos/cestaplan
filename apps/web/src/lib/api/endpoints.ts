@@ -47,6 +47,7 @@ import type {
   PriceProvider,
   PantryItemUpdate,
   PasswordRecoveryRequest,
+  PlannerReadiness,
   Recipe,
   RecipeFeedbackListItem,
   RegisterRequest,
@@ -395,6 +396,10 @@ export function substituteGroceryItem(
 
 export function listAdminSources(): Promise<AdminSource[]> {
   return apiFetch<AdminSource[]>("/api/v1/admin/sources");
+}
+
+export function listPlannerReadiness(): Promise<PlannerReadiness> {
+  return apiFetch<PlannerReadiness>("/api/v1/admin/planner-readiness");
 }
 
 export function listAdminImports(): Promise<AdminImportRecord[]> {

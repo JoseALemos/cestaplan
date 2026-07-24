@@ -1,4 +1,11 @@
-import type { EquipmentCode, MealType, PriceCoverageLabel } from "@/lib/api/types";
+import type {
+  ActionCode,
+  EquipmentCode,
+  MealType,
+  PreflightCode,
+  PriceCoverageLabel,
+  ReadinessStatus,
+} from "@/lib/api/types";
 
 export const MEAL_TYPE_LABELS: Record<MealType, string> = {
   breakfast: "Desayuno",
@@ -246,4 +253,69 @@ export const SOURCE_STATUS_LABELS: Record<string, string> = {
 export function sourceStatusLabel(status: string | null | undefined): string {
   if (!status) return "Desconocido";
   return SOURCE_STATUS_LABELS[status] ?? status;
+}
+
+// ---------------------------------------------------------------------------
+// Planner infeasibility & readiness (FASE 9). These are compile-time
+// exhaustive `Record<Enum, string>` maps so a new backend enum value fails the
+// build until it has a Spanish label. The `*Label`/`*Message` helpers accept a
+// raw string (whatever the wire sends) and NEVER surface a raw slug — an
+// unknown code always resolves to a neutral, human-readable fallback.
+// ---------------------------------------------------------------------------
+
+export const ACTION_CODE_LABELS: Record<ActionCode, string> = {
+  add_recipes: "Añadir más recetas al catálogo.",
+  relax_soft_preferences: "Reducir las preferencias opcionales.",
+  change_store: "Seleccionar otra cadena con catálogo disponible.",
+  reduce_meals: "Reducir el número de comidas solicitadas.",
+  increase_budget: "Aumentar el presupuesto.",
+  configure_provider: "Configurar y sincronizar una fuente de precios.",
+  review_mappings: "Revisar los productos pendientes de asociar a ingredientes.",
+};
+
+export function actionLabel(code: string): string {
+  return ACTION_CODE_LABELS[code as ActionCode] ?? "Ajuste sugerido";
+}
+
+export const INFEASIBILITY_MESSAGES: Record<PreflightCode, string> = {
+  no_active_recipes: "No hay recetas activas disponibles para construir el plan.",
+  no_compatible_recipes: "Ninguna receta es compatible con las restricciones del hogar.",
+  no_retailer_selected: "Selecciona una cadena con catálogo para poder calcular precios.",
+  retailer_without_catalog: "La cadena seleccionada todavía no tiene un catálogo cargado.",
+  no_mapped_products: "Todavía no hay productos asociados a los ingredientes.",
+  no_product_prices:
+    "Todavía no hay precios disponibles para calcular un plan con presupuesto.",
+  no_costable_recipes:
+    "Hay recetas disponibles, pero ninguna tiene todos sus ingredientes y precios necesarios para calcular el coste.",
+  insufficient_recipe_variety:
+    "No hay suficiente variedad de recetas costeables para las comidas solicitadas.",
+  genuine_budget_infeasibility:
+    "El presupuesto actual es inferior al mínimo estimado para las comidas solicitadas.",
+  hard_constraints_infeasible:
+    "Las restricciones obligatorias no dejan ninguna combinación válida.",
+  optimizer_error: "Se produjo un error al generar el plan. Puedes reintentar.",
+};
+
+export function infeasibilityMessage(
+  code: string | undefined,
+  fallback?: string | null,
+): string {
+  if (code && code in INFEASIBILITY_MESSAGES) {
+    return INFEASIBILITY_MESSAGES[code as PreflightCode];
+  }
+  return fallback ?? "No se pudo generar un plan viable con los datos actuales.";
+}
+
+export const READINESS_STATUS_LABELS: Record<ReadinessStatus, string> = {
+  no_recipes: "Sin recetas",
+  no_catalog: "Sin catálogo",
+  no_prices: "Sin precios",
+  pending_mappings: "Pendiente de mapeos",
+  staging_only: "Solo staging",
+  ready_for_review: "Preparado para revisión",
+  available: "Disponible",
+};
+
+export function readinessStatusLabel(status: string): string {
+  return READINESS_STATUS_LABELS[status as ReadinessStatus] ?? "Estado desconocido";
 }

@@ -4,6 +4,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 
 import { RUN_STATUS_LABELS, RUN_STATUS_ORDER } from "@/lib/domain/labels";
+import { infeasibilityView } from "@/lib/domain/plan-infeasibility";
 import { useRegeneratePlanMutation, useRunStatusQuery } from "@/lib/query/hooks/use-plans";
 
 import { Alert } from "@/components/ui/Alert";
@@ -38,6 +39,7 @@ export default function EstadoGeneracionPage() {
     stepIndex >= 0 ? Math.round(((stepIndex + 1) / RUN_STATUS_ORDER.length) * 100) : 0;
 
   const infeasibility = runStatusQuery.data?.infeasibility;
+  const view = infeasibilityView(infeasibility);
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6">
@@ -59,14 +61,13 @@ export default function EstadoGeneracionPage() {
           ) : status === "failed" ? (
             <>
               <Alert tone="error" title="No se pudo generar un plan viable">
-                {infeasibility?.reason ??
-                  "Con las restricciones y el presupuesto actuales no existe una combinación de comidas válida."}
+                {view.message}
               </Alert>
 
-              {infeasibility?.minimum_budget ? (
+              {view.minimumBudget ? (
                 <div className="flex items-center justify-between rounded-md border border-border px-4 py-3 text-sm">
                   <span className="text-ink-muted">Presupuesto mínimo estimado</span>
-                  <Badge tone="warning">{infeasibility.minimum_budget}</Badge>
+                  <Badge tone="warning">{view.minimumBudget}</Badge>
                 </div>
               ) : null}
 
@@ -84,40 +85,43 @@ export default function EstadoGeneracionPage() {
                 </div>
               ) : null}
 
-              <div className="flex flex-col gap-2">
-                <p className="text-sm font-semibold text-ink">Qué puedes hacer</p>
-                <ul className="flex flex-col gap-1 text-sm text-ink-muted">
-                  {(infeasibility?.suggested_actions ?? [
-                    "Sube el presupuesto objetivo.",
-                    "Reduce el número de comidas solicitadas.",
-                    "Cambia de tienda o acepta precios estimados.",
-                  ]).map((action) => (
-                    <li key={action}>· {action}</li>
-                  ))}
-                </ul>
-              </div>
+              {view.actions.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-semibold text-ink">Qué puedes hacer</p>
+                  <ul className="flex flex-col gap-1 text-sm text-ink-muted">
+                    {view.actions.map((action) => (
+                      <li key={action.code}>· {action.label}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
 
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  loading={regenerateMutation.isPending}
-                  onClick={() => mealPlanId && regenerateMutation.mutate()}
-                  disabled={!mealPlanId}
-                >
-                  Reintentar generación
-                </Button>
-                {householdId ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
-                    variant="outline"
-                    onClick={() => router.push(`/households/${householdId}/generar`)}
+                    loading={regenerateMutation.isPending}
+                    onClick={() => mealPlanId && regenerateMutation.mutate()}
+                    disabled={!mealPlanId || !view.canRetry}
                   >
-                    Ajustar presupuesto y volver a generar
+                    Reintentar generación
                   </Button>
+                  {view.showBudgetAdjust && householdId ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => router.push(`/households/${householdId}/generar`)}
+                    >
+                      Ajustar presupuesto y volver a generar
+                    </Button>
+                  ) : null}
+                  <Button type="button" variant="ghost" onClick={() => router.push("/households")}>
+                    Volver a mis hogares
+                  </Button>
+                </div>
+                {!view.canRetry && view.retryHint ? (
+                  <p className="text-sm text-ink-muted">{view.retryHint}</p>
                 ) : null}
-                <Button type="button" variant="ghost" onClick={() => router.push("/households")}>
-                  Volver a mis hogares
-                </Button>
               </div>
             </>
           ) : status === "cancelled" ? (

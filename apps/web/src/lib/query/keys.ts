@@ -25,4 +25,5 @@ export const queryKeys = {
   adminSources: () => ["admin", "sources"] as const,
   adminImports: () => ["admin", "imports"] as const,
   adminImport: (importId: string) => ["admin", "imports", importId] as const,
+  plannerReadiness: () => ["admin", "planner-readiness"] as const,
 };
