@@ -20,6 +20,7 @@ from cestaplan_api.db import get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
 from cestaplan_api.models import Retailer, User
 from cestaplan_api.routers import auth, licensed_admin
+from tests.fixtures.provider_scenarios import seed_test_canonical_ingredients
 
 _CSV = (
     "sku,name,price,currency,qty,unit\n"
@@ -63,9 +64,12 @@ def client(db_session: Session) -> Iterator[TestClient]:
 
 
 def _register_login_admin(client: TestClient, db_session: Session, email: str) -> str:
-    assert client.post(
-        "/api/v1/auth/register", json={"email": email, "password": "correct-horse-battery"}
-    ).status_code == 201
+    assert (
+        client.post(
+            "/api/v1/auth/register", json={"email": email, "password": "correct-horse-battery"}
+        ).status_code
+        == 201
+    )
     user = db_session.execute(select(User).where(User.email == email.lower())).scalar_one()
     user.is_admin = True
     db_session.flush()
@@ -88,9 +92,12 @@ def test_review_queue_requires_auth(client: TestClient) -> None:
 
 
 def test_non_admin_forbidden(client: TestClient, db_session: Session) -> None:
-    assert client.post(
-        "/api/v1/auth/register", json={"email": "u@x.com", "password": "correct-horse-battery"}
-    ).status_code == 201
+    assert (
+        client.post(
+            "/api/v1/auth/register", json={"email": "u@x.com", "password": "correct-horse-battery"}
+        ).status_code
+        == 201
+    )
     client.post(
         "/api/v1/auth/login", json={"email": "u@x.com", "password": "correct-horse-battery"}
     )
@@ -118,6 +125,7 @@ def test_field_mapping_crud(client: TestClient, db_session: Session) -> None:
 
 
 def test_sample_import_review_and_coverage_flow(client: TestClient, db_session: Session) -> None:
+    seed_test_canonical_ingredients(db_session)  # hermetic: the 75 canonical ingredients
     token = _register_login_admin(client, db_session, "admin@x.com")
     headers = {CSRF_HEADER_NAME: token}
     retailer_id = _make_retailer(db_session, "lic-http")
@@ -149,9 +157,7 @@ def test_sample_import_review_and_coverage_flow(client: TestClient, db_session: 
     assert approve.json()["verification_status"] == "human_verified"
     assert approve.json()["is_active"] is True
 
-    reject = client.post(
-        f"/api/v1/admin/licensed/review/{queue[1]['id']}/reject", headers=headers
-    )
+    reject = client.post(f"/api/v1/admin/licensed/review/{queue[1]['id']}/reject", headers=headers)
     assert reject.status_code == 200
     assert reject.json()["verification_status"] == "disputed"
     assert reject.json()["is_active"] is False
@@ -170,6 +176,4 @@ def test_sample_import_review_and_coverage_flow(client: TestClient, db_session: 
     assert mine["ingredients_total"] == 75
 
     # mutating endpoints demand CSRF
-    assert client.post(
-        f"/api/v1/admin/licensed/review/{queue[0]['id']}/approve"
-    ).status_code == 403
+    assert client.post(f"/api/v1/admin/licensed/review/{queue[0]['id']}/approve").status_code == 403

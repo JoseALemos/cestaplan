@@ -9,17 +9,17 @@ from __future__ import annotations
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import Ingredient, ProviderIngredientMapping
+from cestaplan_api.models import ProviderIngredientMapping
 from tests.admin.conftest import csrf, login, promote_to_admin, register
+from tests.fixtures.provider_scenarios import ensure_test_ingredient
 
 _BASE = "/api/v1/admin/ingredient-product-mappings"
 
 
 def _competing(db: Session, key: str, ext: str) -> ProviderIngredientMapping:
-    ing = db.execute(select(Ingredient).where(Ingredient.canonical_name == key)).scalar_one()
+    ing = ensure_test_ingredient(db, key)  # hermetic: create the ingredient if absent
     row = ProviderIngredientMapping(
         provider_code="parsebot-alcampo",
         ingredient_id=ing.id,
@@ -125,16 +125,12 @@ def test_e2e_conflict_enrich_approve_revoke(
 ) -> None:
     from sqlalchemy import select as _select
 
-    from cestaplan_api.models import Ingredient, ProviderIngredientMapping
+    from cestaplan_api.models import ProviderIngredientMapping
     from cestaplan_api.services import mapping_review as mr
 
     # 1. two competing candidates for the SAME product (different ingredients).
-    tom = db_session.execute(
-        _select(Ingredient).where(Ingredient.canonical_name == "tomate")
-    ).scalar_one()
-    ceb = db_session.execute(
-        _select(Ingredient).where(Ingredient.canonical_name == "cebolla")
-    ).scalar_one()
+    tom = ensure_test_ingredient(db_session, "tomate")
+    ceb = ensure_test_ingredient(db_session, "cebolla")
 
     def _mk(ing_id: int) -> ProviderIngredientMapping:
         r = ProviderIngredientMapping(

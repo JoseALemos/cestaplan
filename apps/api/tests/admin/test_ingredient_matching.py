@@ -30,6 +30,7 @@ from cestaplan_api.models import (
 from cestaplan_api.services import ingredient_matching
 from cestaplan_api.services.planning_context import _build_catalog
 
+from ..fixtures.provider_scenarios import ensure_test_ingredient
 from .conftest import csrf, login, promote_to_admin, register
 
 
@@ -42,9 +43,7 @@ def _index(db: Session) -> dict[str, Ingredient]:
 
 def _product(name: str, *, category_code: str | None = None) -> Product:
     """A transient (un-persisted) real product for pure-matching assertions."""
-    return Product(
-        name=name, category_code=category_code, is_synthetic=False, retailer_id=None
-    )
+    return Product(name=name, category_code=category_code, is_synthetic=False, retailer_id=None)
 
 
 def _retailer(db: Session, slug: str) -> Retailer:
@@ -101,6 +100,15 @@ def _price(
 # match_product — clear cases
 # --------------------------------------------------------------------------- #
 def test_matches_clear_name_cases(db_session: Session) -> None:
+    # Hermetic: create exactly the canonical ingredients these curated name rules map onto.
+    for name, unit in [
+        ("aceite_oliva", "ml"),
+        ("pavo_pechuga", "g"),
+        ("tofu", "g"),
+        ("leche_entera", "ml"),
+        ("pimenton", "g"),
+    ]:
+        ensure_test_ingredient(db_session, name, default_unit=unit)
     idx = _index(db_session)
     cases = {
         "Aceite de Oliva Virgen Extra 1L": "aceite_oliva",
@@ -110,15 +118,14 @@ def test_matches_clear_name_cases(db_session: Session) -> None:
         "Pimentón dulce La Chinata": "pimenton",
     }
     for name, canonical in cases.items():
-        result = ingredient_matching.match_product(
-            db_session, _product(name), ingredient_index=idx
-        )
+        result = ingredient_matching.match_product(db_session, _product(name), ingredient_index=idx)
         assert result is not None, name
         assert result[0].canonical_name == canonical, name
         assert Decimal("0.70") <= result[1] <= Decimal("1")
 
 
 def test_matches_off_category(db_session: Session) -> None:
+    ensure_test_ingredient(db_session, "arroz_basmati", default_unit="g")
     idx = _index(db_session)
     result = ingredient_matching.match_product(
         db_session, _product("Producto 123", category_code="basmati-rices"), ingredient_index=idx
@@ -147,6 +154,9 @@ def test_rejects_snack_and_processed(db_session: Session) -> None:
 
 
 def test_tuna_in_oil_maps_to_tuna_not_oil(db_session: Session) -> None:
+    # Both exist so the matcher demonstrably prefers tuna over oil (not by oil's absence).
+    ensure_test_ingredient(db_session, "atun_lata", default_unit="g")
+    ensure_test_ingredient(db_session, "aceite_oliva", default_unit="ml")
     idx = _index(db_session)
     result = ingredient_matching.match_product(
         db_session, _product("Atún claro en aceite de oliva"), ingredient_index=idx
@@ -172,15 +182,14 @@ def test_unit_incompatible_rejected(db_session: Session) -> None:
     product = _real_product(db_session, retailer, "Aceite de oliva virgen extra")
     _price(db_session, store, product, "5.00", package_unit="kg")  # mass basis → conflict
     idx = _index(db_session)
-    assert (
-        ingredient_matching.match_product(db_session, product, ingredient_index=idx) is None
-    )
+    assert ingredient_matching.match_product(db_session, product, ingredient_index=idx) is None
 
 
 # --------------------------------------------------------------------------- #
 # map_real_products — idempotency + coverage + catalog
 # --------------------------------------------------------------------------- #
 def test_map_real_products_idempotent_and_priced_catalog(db_session: Session) -> None:
+    ensure_test_ingredient(db_session, "aceite_oliva", default_unit="ml")
     retailer = _retailer(db_session, "chaintest")
     store = _store(db_session, retailer)
     oil = _real_product(db_session, retailer, "Aceite de oliva suave 1L")
@@ -193,9 +202,7 @@ def test_map_real_products_idempotent_and_priced_catalog(db_session: Session) ->
     assert first.unmatched == 1
 
     mapping = db_session.execute(
-        select(IngredientProductMapping).where(
-            IngredientProductMapping.product_id == oil.id
-        )
+        select(IngredientProductMapping).where(IngredientProductMapping.product_id == oil.id)
     ).scalar_one()
     ingredient = db_session.get(Ingredient, mapping.ingredient_id)
     assert ingredient is not None and ingredient.canonical_name == "aceite_oliva"
@@ -228,22 +235,16 @@ def test_map_real_products_idempotent_and_priced_catalog(db_session: Session) ->
 def test_map_ingredients_endpoint_requires_admin(client: TestClient) -> None:
     register(client, "user@example.com")
     token = login(client, "user@example.com")
-    resp = client.post(
-        "/api/v1/admin/sources/map-ingredients", json={}, headers=csrf(token)
-    )
+    resp = client.post("/api/v1/admin/sources/map-ingredients", json={}, headers=csrf(token))
     assert resp.status_code == 403
 
 
-def test_map_ingredients_endpoint_happy_path(
-    client: TestClient, db_session: Session
-) -> None:
+def test_map_ingredients_endpoint_happy_path(client: TestClient, db_session: Session) -> None:
     register(client, "admin@example.com")
     promote_to_admin(db_session, "admin@example.com")
     token = login(client, "admin@example.com")
 
-    resp = client.post(
-        "/api/v1/admin/sources/map-ingredients", json={}, headers=csrf(token)
-    )
+    resp = client.post("/api/v1/admin/sources/map-ingredients", json={}, headers=csrf(token))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert "mapped" in body
