@@ -667,6 +667,30 @@ class ProviderActivation(BaseModel):
     activation_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="disabled"
     )
+    # Orthogonal capability gates — avoid contradictory reports between shadow/transport/disabled.
+    # Each is an independent boolean; production requires BOTH production_enabled AND
+    # production_approved, which onboarding/shadow never set. rights stay under_review.
+    transport_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    capture_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    normalization_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    staging_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    shadow_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    production_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    production_approved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     expected_capabilities: Mapped[list | None] = mapped_column(JSONB)
     # OBSERVED coverage — measured from the real capture, never declared. A 10-record sample is
     # ``sample_only``, not ``full``. The ratios are fractions in [0,1] over the captured set;
@@ -737,7 +761,106 @@ class ShadowEvaluationRun(BaseModel):
     conflicts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     baseline_provider: Mapped[str | None] = mapped_column(Text)
     baseline_cost: Mapped[Decimal | None] = mapped_column(money())
+    # Money/diffs are NULLABLE: absence of a known cost is NOT a zero cost. They are only set
+    # when the comparison is genuinely comparable (same ingredient set, compatible scope, all
+    # prices known, no unresolved packages). ``comparison_status`` says why otherwise.
     absolute_difference: Mapped[Decimal | None] = mapped_column(money())
     percentage_difference: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    comparison_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="failed"
+    )
+    comparison_blockers: Mapped[list | None] = mapped_column(JSONB)
+    known_cost_ingredient_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    unknown_cost_ingredient_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    known_cost_ratio: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     warnings: Mapped[list | None] = mapped_column(JSONB)
     report_json: Mapped[dict | None] = mapped_column(JSONB)
+
+
+# Auditable ingredient<->product mapping vocabularies (documented Text sets).
+MAPPING_STATUS = (
+    "candidate",
+    "auto_approved",
+    "manually_approved",
+    "rejected",
+    "ambiguous",
+    "incompatible",
+    "stale",
+)
+MAPPING_METHOD = (
+    "exact_alias",
+    "normalized_name",
+    "synonym",
+    "category_constrained",
+    "barcode",
+    "manual",
+    "semantic_candidate",
+)
+UNIT_COMPATIBILITY = ("compatible", "convertible", "incompatible", "unknown")
+COMPATIBILITY = ("compatible", "incompatible", "unknown")
+
+
+class ProviderIngredientMapping(BaseModel):
+    """Explicit, auditable ingredient<->provider-product mapping (spec §3).
+
+    Distinct from the planner's :class:`~cestaplan_api.models.catalog.IngredientProductMapping`
+    (canonical product mappings): this is the provider-onboarding review layer. A mapping is
+    NEVER auto-approved just because a generic word matches ("aceite" is not "aceite de oliva");
+    approval needs deterministic rules or manual review. Scores + evidence are kept for audit.
+    """
+
+    __tablename__ = "provider_ingredient_mapping"
+    __table_args__ = (
+        Index(
+            "ux_provider_ing_map",
+            "provider_code",
+            "ingredient_id",
+            "external_product_id",
+            unique=True,
+        ),
+        Index("ix_provider_ing_map_status", "provider_code", "mapping_status"),
+    )
+
+    ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+    canonical_ingredient_key: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_code: Mapped[str] = mapped_column(Text, nullable=False)
+    retailer_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    external_product_id: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_product_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("product.id")
+    )
+    mapping_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="candidate"
+    )
+    mapping_method: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    semantic_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    lexical_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    category_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    unit_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    preparation_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    dietary_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    allergen_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    required_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("user.id"))
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    evidence_json: Mapped[dict | None] = mapped_column(JSONB)

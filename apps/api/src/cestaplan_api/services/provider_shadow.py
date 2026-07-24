@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,11 +27,25 @@ from cestaplan_api.models import (
     IngredientProductMapping,
     ProductPrice,
     ProductVariant,
+    ProviderIngredientMapping,
     Recipe,
     Retailer,
     ShadowEvaluationRun,
 )
 from cestaplan_api.services.recipe_catalog_coverage import evaluate_recipe_catalog_coverage
+
+
+class ShadowComparisonStatus(StrEnum):
+    """Why a shadow basket can (or cannot) be compared against the baseline. Absence of a known
+    cost is NEVER a zero cost — money diffs are only produced when ``comparable``."""
+
+    COMPARABLE = "comparable"
+    INSUFFICIENT_COVERAGE = "insufficient_coverage"
+    NO_COSTABLE_RECIPES = "no_costable_recipes"
+    MISSING_BASELINE = "missing_baseline"
+    PARTIAL_COST_ONLY = "partial_cost_only"
+    INCOMPATIBLE_SCOPE = "incompatible_scope"
+    FAILED = "failed"
 
 
 @dataclass(slots=True)
@@ -50,6 +65,7 @@ def _provider_basket(
     *,
     store_id: int | None,
     now: datetime,
+    provider_code: str | None = None,
 ) -> _BasketSum:
     """Sum one usable STAGING price per mandatory ingredient (proxy basket; never production)."""
     known = Decimal("0")
@@ -69,6 +85,19 @@ def _provider_basket(
             if ing_id is None or prod_id is None:
                 continue
             ing_products.setdefault(ing_id, []).append(prod_id)
+        if provider_code is not None:
+            for ing_id, prod_id in db.execute(
+                select(
+                    ProviderIngredientMapping.ingredient_id,
+                    ProviderIngredientMapping.normalized_product_id,
+                ).where(
+                    ProviderIngredientMapping.provider_code == provider_code,
+                    ProviderIngredientMapping.active.is_(True),
+                    ProviderIngredientMapping.normalized_product_id.is_not(None),
+                )
+            ).all():
+                if ing_id is not None and prod_id is not None:
+                    ing_products.setdefault(ing_id, []).append(prod_id)
         for v in db.execute(
             select(ProductVariant).where(
                 ProductVariant.retailer_id == retailer_id, ProductVariant.active.is_(True)
@@ -170,17 +199,28 @@ def run_provider_shadow(
             .limit(recipe_limit)
         ).scalars()
     )
-    basket = _provider_basket(db, retailer_id, recipes, store_id=None, now=now)
-    baseline_cost = _baseline_basket(db, baseline_slug, recipes)
-    abs_diff = basket.known_cost - baseline_cost
-    pct_diff = (
-        (abs_diff / baseline_cost * Decimal("100")).quantize(Decimal("0.0001"))
-        if baseline_cost > 0
-        else None
+    basket = _provider_basket(
+        db, retailer_id, recipes, store_id=None, now=now, provider_code=provider_code
     )
+    baseline_cost = _baseline_basket(db, baseline_slug, recipes)
+    known_ct = basket.priced_ingredients
+    unknown_ct = basket.total_ingredients - basket.priced_ingredients
+    known_ratio = (
+        (Decimal(known_ct) / Decimal(basket.total_ingredients)).quantize(Decimal("0.0001"))
+        if basket.total_ingredients
+        else Decimal("0")
+    )
+
+    # Decide comparability. Money diffs are ONLY produced when the candidate basket is genuinely
+    # complete AND comparable to the baseline (same recipes, all prices known, no unresolved
+    # packages). Absence of a known cost is never represented as 0.
+    status, blockers, known_cost, abs_diff, pct_diff = _decide_comparison(
+        coverage, basket, baseline_cost
+    )
+
     warnings: list[str] = []
     if coverage.fully_costable_recipes == 0:
-        warnings.append("0 recetas totalmente calculables con datos staging (no apto para planes)")
+        warnings.append("Sin cobertura suficiente para comparar esta cesta")
     if basket.missing:
         warnings.append(f"{basket.missing} ingredientes sin producto/precio en staging")
 
@@ -196,22 +236,60 @@ def run_provider_shadow(
         status="completed",
         recipes_evaluated=coverage.total_recipes,
         recipes_costable=coverage.fully_costable_recipes,
-        basket_known_cost=basket.known_cost,
-        basket_estimated_cost=Decimal("0"),
+        basket_known_cost=known_cost,  # nullable: only set when comparable
+        basket_estimated_cost=None,
         missing_products=basket.missing,
         unresolved_packages=basket.unresolved_packages,
         stale_prices=basket.stale,
         conflicts=0,
         baseline_provider=baseline_provider,
-        baseline_cost=baseline_cost,
+        baseline_cost=baseline_cost if baseline_cost > 0 else None,
         absolute_difference=abs_diff,
         percentage_difference=pct_diff,
+        comparison_status=status.value,
+        comparison_blockers=blockers,
+        known_cost_ingredient_count=known_ct,
+        unknown_cost_ingredient_count=unknown_ct,
+        known_cost_ratio=known_ratio,
         warnings=warnings,
-        report_json={"coverage": coverage.as_dict()},
+        report_json={
+            "coverage": coverage.as_dict(),
+            "partial_known_cost": str(basket.known_cost),
+            "coverage_ratio": str(known_ratio),
+        },
     )
     db.add(run)
     db.flush()
     return run
+
+
+def _decide_comparison(
+    coverage: object, basket: _BasketSum, baseline_cost: Decimal
+) -> tuple[ShadowComparisonStatus, list[str], Decimal | None, Decimal | None, Decimal | None]:
+    """Return (status, blockers, known_cost, absolute_diff, percentage_diff) — money only when
+    genuinely comparable. Absence of a known cost is NEVER a zero cost or a -100% saving."""
+    fully = getattr(coverage, "fully_costable_recipes", 0)
+    total = getattr(coverage, "total_recipes", 0)
+    blockers: list[str] = []
+    if fully == 0:
+        blockers.append("no_costable_recipes")
+        return ShadowComparisonStatus.NO_COSTABLE_RECIPES, blockers, None, None, None
+    if baseline_cost <= 0:
+        blockers.append("missing_baseline")
+        return ShadowComparisonStatus.MISSING_BASELINE, blockers, None, None, None
+    if basket.unresolved_packages > 0:
+        blockers.append("unresolved_packages")
+    if basket.missing > 0:
+        blockers.append("missing_products")
+    if fully < total:
+        blockers.append("partial_recipe_coverage")
+    if blockers:
+        # Partial: expose partial_known_cost + ratio, but NO monetary diff vs a full basket.
+        return ShadowComparisonStatus.PARTIAL_COST_ONLY, blockers, None, None, None
+    # Fully comparable: same recipe set, all prices known, no unresolved packages, baseline present.
+    abs_diff = basket.known_cost - baseline_cost
+    pct = (abs_diff / baseline_cost * Decimal("100")).quantize(Decimal("0.0001"))
+    return ShadowComparisonStatus.COMPARABLE, [], basket.known_cost, abs_diff, pct
 
 
 def _set_shadow_state(db: Session, provider_code: str) -> None:
@@ -227,10 +305,18 @@ def _set_shadow_state(db: Session, provider_code: str) -> None:
     if row.activation_state in ("disabled", "transport_only", "staging", "shadow"):
         row.activation_state = "shadow"
         row.development_only = True
+        # Orthogonal capability gates (§2) — enabled up to shadow, production stays OFF.
+        row.transport_enabled = True
+        row.capture_enabled = True
+        row.normalization_enabled = True
+        row.staging_enabled = True
+        row.shadow_enabled = True
+    row.production_enabled = False
+    row.production_approved = False
     row.production_approved_at = None
     row.production_approved_by = None
-    row.production_eligibility = False
+    row.production_eligibility = False  # never auto-changed
     db.flush()
 
 
-__all__ = ["run_provider_shadow"]
+__all__ = ["ShadowComparisonStatus", "run_provider_shadow"]

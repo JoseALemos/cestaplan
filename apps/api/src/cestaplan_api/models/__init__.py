@@ -42,6 +42,7 @@ from cestaplan_api.models.ingestion import (
     ProductVariant,
     PromotionRule,
     ProviderActivation,
+    ProviderIngredientMapping,
     ProviderUsage,
     RawCapture,
     ShadowEvaluationRun,
@@ -105,6 +106,7 @@ __all__ = [
     "ProductVariant",
     "PromotionRule",
     "ProviderActivation",
+    "ProviderIngredientMapping",
     "ProviderUsage",
     "RawCapture",
     # recipe
