@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
+from enum import StrEnum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,6 +45,15 @@ from cestaplan_api.models import (
 
 _CENT = Decimal("0.01")
 _QTY = Decimal("0.0001")
+
+
+class PantryPolicy(StrEnum):
+    """How stock/leftovers are treated when costing (spec §4)."""
+
+    EMPTY_PANTRY = "empty_pantry"  # buy every package needed; purchased_cost = full packages
+    USE_EXISTING_STOCK = "use_existing_stock"  # subtract real pantry stock (requires inventory)
+    PLAN_SHARED_INVENTORY = "plan_shared_inventory"  # leftovers may carry to later plan recipes
+
 
 # Canonical base unit per physical dimension (so a recipe's grams and a pack's kilograms compare).
 _DIMENSION: dict[str, str] = {
@@ -118,13 +128,20 @@ class RecipeCosting:
     price_scope: str
     evaluated_at: str
     fully_costable: bool = False
+    pantry_policy: str = PantryPolicy.EMPTY_PANTRY.value
     lines: list[IngredientCostLine] = field(default_factory=list)
-    total_purchase_cost: Decimal | None = None
-    total_consumed_cost: Decimal | None = None
-    total_surplus_value: Decimal | None = None
+    # Three separate money concepts (§3): outlay, value actually used, and leftover value.
+    total_purchase_cost: Decimal | None = None  # purchased_cost: full-package outlay
+    total_consumed_cost: Decimal | None = None  # consumed_cost: proportional value used
+    total_leftover_value: Decimal | None = None  # leftover_value: surplus value
+    reusable_leftover_value: Decimal | None = None  # only amortizable under a real plan
+    non_reusable_leftover_value: Decimal | None = None  # inherently discarded leftover
+    total_surplus_value: Decimal | None = None  # alias of total_leftover_value (back-compat)
     cost_per_serving_purchase: Decimal | None = None
     cost_per_serving_consumed: Decimal | None = None
     currency: str = "EUR"
+    optional_ingredients_included: list[str] = field(default_factory=list)
+    optional_ingredients_excluded: list[str] = field(default_factory=list)
     uncostable_reasons: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -298,9 +315,15 @@ def cost_recipe(
     provider_code: str,
     *,
     store_id: int | None = None,
+    pantry_policy: PantryPolicy = PantryPolicy.EMPTY_PANTRY,
     now: datetime | None = None,
 ) -> RecipeCosting:
-    """Cost every mandatory ingredient of ``recipe`` with ``provider_code`` STAGING data (§9)."""
+    """Cost every mandatory ingredient of ``recipe`` with ``provider_code`` STAGING data (§9).
+
+    ``pantry_policy`` (§4) declares how leftovers/stock are treated. For a single isolated recipe
+    only ``empty_pantry`` is meaningful (buy full packages); leftover is NOT amortized here — a
+    reusable/non-reusable split only becomes non-zero under a real ``plan_shared_inventory``.
+    """
     now = now or datetime.now(UTC)
     entry = get_entry(provider_code)
     retailer_slug = entry.retailer_slug if entry else provider_code
@@ -317,6 +340,7 @@ def cost_recipe(
         retailer_slug=retailer_slug,
         price_scope=required_scope,
         evaluated_at=now.isoformat(),
+        pantry_policy=pantry_policy.value,
     )
     if retailer_id is None:
         result.uncostable_reasons.append("retailer no encontrado")
@@ -335,13 +359,18 @@ def cost_recipe(
     for ri in recipe.ingredients:
         line = _cost_line(db, ri, eligible, variants_by_product, prices, store_id=store_id, now=now)
         result.lines.append(line)
+        if ri.optional:
+            # Default optional policy (§1/§4): optionals are EXCLUDED from the costed basket so a
+            # provider that cannot map an optional is never penalised vs one that can. The line is
+            # still costed for transparency (line.costable), but its money is not summed.
+            result.optional_ingredients_excluded.append(ri.canonical_name)
+            continue
         if line.costable and line.line_cost is not None:
             any_priced = True
-            if not ri.optional:
-                total_purchase += line.line_cost
-                total_consumed += line.consumed_cost or Decimal("0")
-                total_surplus += line.surplus_value or Decimal("0")
-        elif not ri.optional:
+            total_purchase += line.line_cost
+            total_consumed += line.consumed_cost or Decimal("0")
+            total_surplus += line.surplus_value or Decimal("0")
+        else:
             mandatory_costable = False
             result.uncostable_reasons.append(line.reason or f"{ri.canonical_name}: no calculable")
 
@@ -349,7 +378,13 @@ def cost_recipe(
     if result.fully_costable:
         result.total_purchase_cost = total_purchase.quantize(_CENT)
         result.total_consumed_cost = total_consumed.quantize(_CENT)
-        result.total_surplus_value = total_surplus.quantize(_CENT)
+        leftover = total_surplus.quantize(_CENT)
+        result.total_leftover_value = leftover
+        result.total_surplus_value = leftover  # back-compat alias
+        # For an isolated recipe leftover is NOT amortized: neither assumed reused nor wasted.
+        # A non-zero reusable/non-reusable split only arises inside a real shared plan.
+        result.reusable_leftover_value = Decimal("0.00")
+        result.non_reusable_leftover_value = Decimal("0.00")
         servings = Decimal(result.servings or 1)
         result.cost_per_serving_purchase = (total_purchase / servings).quantize(_CENT)
         result.cost_per_serving_consumed = (total_consumed / servings).quantize(_CENT)
@@ -425,6 +460,7 @@ def _cost_line(
 
 __all__ = [
     "IngredientCostLine",
+    "PantryPolicy",
     "RecipeCosting",
     "cost_recipe",
     "fixed_package_cost",
