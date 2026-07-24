@@ -1,0 +1,1041 @@
+[
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "quantityRestrictionGroup": {
+      "quantityRestrictionGroupId": "SINT-quantityRestrictionGroupId",
+      "contribution": 1.23
+    },
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [
+      {
+        "label": "SINT-label",
+        "file": "SINT-file"
+      }
+    ],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "quantityRestrictionGroup": {
+      "quantityRestrictionGroupId": "SINT-quantityRestrictionGroupId",
+      "contribution": 1.23
+    },
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [
+      {
+        "label": "SINT-label",
+        "file": "SINT-file"
+      }
+    ],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "promotions": [
+      {
+        "promoId": "SINT-promoId",
+        "retailerPromotionId": "SINT-retailerPromotionId",
+        "description": "SINT-description",
+        "type": "OFFER",
+        "presentationMode": "SINT-presentationMode",
+        "limitReached": false
+      }
+    ],
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      },
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      },
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds",
+      "SINT-imageIds",
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths",
+      "SINT-imagePaths",
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "promotions": [
+      {
+        "promoId": "SINT-promoId",
+        "retailerPromotionId": "SINT-retailerPromotionId",
+        "description": "SINT-description",
+        "type": "OFFER",
+        "presentationMode": "SINT-presentationMode",
+        "limitReached": false
+      }
+    ],
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      },
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      },
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds",
+      "SINT-imageIds",
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths",
+      "SINT-imagePaths",
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "maxAvailableQuantity": 3,
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "quantityRestrictionGroup": {
+      "quantityRestrictionGroupId": "SINT-quantityRestrictionGroupId",
+      "contribution": 1.23
+    },
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [
+      {
+        "label": "SINT-label",
+        "file": "SINT-file"
+      }
+    ],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "quantityRestrictionGroup": {
+      "quantityRestrictionGroupId": "SINT-quantityRestrictionGroupId",
+      "contribution": 1.23
+    },
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [
+      {
+        "label": "SINT-label",
+        "file": "SINT-file"
+      }
+    ],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      },
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds",
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths",
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [
+      {
+        "label": "SINT-label",
+        "file": "SINT-file"
+      }
+    ],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  },
+  {
+    "productId": "SINT-productId",
+    "retailerProductId": "1.23",
+    "type": "REGULAR",
+    "name": "SINT-name",
+    "brand": "SINT-brand",
+    "packSizeDescription": "500ml",
+    "price": {
+      "amount": "1.23",
+      "currency": "EUR"
+    },
+    "unitPrice": {
+      "price": {
+        "amount": "1.23",
+        "currency": "EUR"
+      },
+      "unit": "fop.price.per.litre",
+      "unitName": "PER_LITRE"
+    },
+    "available": true,
+    "isVerifiedPurchase": false,
+    "quantityInBasket": 3,
+    "maxQuantityReached": false,
+    "taxCodesDisplayNames": [],
+    "imageConfig": {
+      "availableFormats": [
+        "SINT-availableFormats",
+        "SINT-availableFormats"
+      ],
+      "availableResolutions": [
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions",
+        "SINT-availableResolutions"
+      ]
+    },
+    "image": {
+      "src": "SINT-src",
+      "description": "SINT-description",
+      "fopSrcset": "SINT-fopSrcset",
+      "bopSrcset": "SINT-bopSrcset",
+      "imageId": "SINT-imageId"
+    },
+    "images": [
+      {
+        "src": "SINT-src",
+        "description": "SINT-description",
+        "fopSrcset": "SINT-fopSrcset",
+        "bopSrcset": "SINT-bopSrcset",
+        "imageId": "SINT-imageId"
+      }
+    ],
+    "imageIds": [
+      "SINT-imageIds"
+    ],
+    "imagePaths": [
+      "SINT-imagePaths"
+    ],
+    "iconAttributes": [],
+    "icons": [],
+    "basketLines": [],
+    "timeRestricted": false,
+    "alternatives": [],
+    "isInShoppingList": false,
+    "isInCurrentCatalog": true,
+    "ratingSummary": {
+      "overallRating": "1.23",
+      "count": 3
+    },
+    "retailerFinancingPlanIds": [
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23",
+      "1.23"
+    ],
+    "alcohol": false,
+    "categoryPath": [
+      "SINT-categoryPath",
+      "SINT-categoryPath",
+      "SINT-categoryPath"
+    ],
+    "isNew": false
+  }
+]

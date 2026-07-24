@@ -34,21 +34,90 @@ histórico `PriceObservation`).
 Registro: `providers/registry.py` (`registry.get(code)`, `registry.codes()`). El proveedor
 `demo` está siempre disponible (fixtures sintéticas, sin red).
 
-## Matriz de cadenas (estado inicial)
+## Semántica de cobertura (intención declarada ≠ cobertura observada)
 
-| Cadena | Proveedor | Estado | Oficial |
-|---|---|---|---|
-| DIA | parsebot | `active_when_configured` | no |
-| Alcampo | parsebot | `active_when_configured` | no |
-| Mercadona | apify | `experimental` | no |
-| Open Prices | open_prices | `complementary` (solo observaciones/tickets/validación) | no |
-| Carrefour ES | — | `unsupported` | — |
-| Lidl ES | — | `partial_source_required` | — |
-| Aldi ES | — | `partial_source_required` | — |
-| Deza | — | `authorized_feed_required` | — |
+Un error fácil y grave sería marcar una cadena como "cobertura completa" a partir de una
+captura de diez registros. Por eso separamos **lo declarado** de **lo observado**, y solo lo
+observado (medido de una captura real) decide si una cadena puede costear planes. Los campos
+viven en `ProviderActivation` y se exponen en `GET /api/v1/price-providers`:
+
+| Campo | Origen | Significado |
+|---|---|---|
+| `intended_catalog_scope` | declarado (matriz) | `full` / `partial` / `complementary`: para qué se incorpora la fuente. **No** es evidencia de cobertura. |
+| `observed_catalog_scope` | medido | `unknown` / `sample_only` / `partial` / `full`. Una captura que toca el límite, o de una fuente sin catálogo completo, es `sample_only`. |
+| `price_coverage` | medido | fracción de la muestra con precio. |
+| `package_quantity_coverage` | medido | fracción con cantidad de contenido neto (necesaria para costear por g/ml). |
+| `package_unit_coverage` | medido | fracción con unidad de contenido neto. |
+| `geographic_scope_coverage` | medido | localización por tienda/zona (0 si la fuente no tiene ámbito de tienda). **No** condiciona el costeo, solo la localización. |
+| `costing_eligibility` | derivado | `unknown` / `insufficient` / `sufficient`. `sufficient` exige scope observado real (no muestra) **y** alta cobertura de precio + envase. |
+| `production_eligibility` | derivado | solo `true` tras el gate de producción completo + aprobación humana. El onboarding **nunca** lo pone a `true`. |
+
+`measure_coverage()` (en `providers/onboarding.py`) computa estos valores desde los
+`ExternalCatalogProduct` capturados; jamás desde la intención.
+
+### Estado de Parse.bot DIA
+
+Salvo que los datos demuestren lo contrario:
+
+- `intended_catalog_scope = full`
+- `observed_catalog_scope = sample_only` (captura acotada de ~10 registros)
+- `costing_eligibility = insufficient` (sin contenido por envase ni ámbito de tienda)
+- `production_eligibility = false`
+
+En la interfaz DIA se muestra como **Experimental** — "datos disponibles para validación,
+pero cobertura insuficiente para calcular planes" — y **nunca** como *Disponible* mientras
+`costing_eligibility` no sea `sufficient`.
+
+## Descubrimiento automático de APIs (Parse.bot)
+
+Las base URL no se introducen a mano: se descubren con la API de gestión de Parse.bot
+(`GET /dispatch/tasks` + `/dispatch/tasks/{id}`, cabecera `X-API-Key`). Por cada tarea
+`completed` con `generated_api` y dominio **español**, se asocia la cadena por dominio de
+`source_url` (dia.es, compraonline.alcampo.es, carrefour.es, lidl.es, aldi.es, dezacalidad.es)
+y se configura `PARSE_BOT_<CADENA>_BASE_URL` desde `execution_base_url` (edición atómica del
+`.env`, sin tocar la clave). El inventario sanitizado se guarda en `.local/parsebot-discovery/`
+(fuera de Git). No se aceptan dominios no españoles. Cada plan de captura vive en
+`providers/parsebot/plans.py` (endpoint + params + extracción de la lista, confirmados contra
+capturas reales); el mapper de cada cadena está en `providers/parsebot/chains.py`, fijado a los
+`schema_fingerprint` observados.
+
+## Matriz de cadenas (estado tras onboarding real)
+
+| Cadena | Proveedor | Intención | Endpoint muestra | Observado | Costeable | Estado |
+|---|---|---|---|---|---|---|
+| DIA | parsebot-dia | dense_candidate | search_products | sample_only | no | Experimental |
+| Alcampo | parsebot-alcampo | dense_candidate | search_products | sample_only | **sí** | Disponible para validación |
+| Carrefour | parsebot-carrefour | dense_candidate | get_products_by_category | sample_only | no¹ | Experimental |
+| Mercadona | apify-mercadona | dense_candidate | — (sin API Parse.bot) | — | — | Configuración pendiente / `blocked_by_missing_api` |
+| Lidl ES | parsebot-lidl | partial_offers | get_visible_products | sample_only | no | Ofertas solamente |
+| Aldi ES | parsebot-aldi | partial_offers | get_current_offers | sample_only | no | Ofertas solamente |
+| Deza | parsebot-deza | partial_offers | get_current_offers (sin precio) | — | — | Fuente insuficiente (`blocked_by_insufficient_source`) |
+| Open Prices | open-prices | complementary | — | — | — | complementaria |
+| MercaEjemplo | demo | complementary | — (fixtures) | full | sí | Disponible (dev) |
+
+¹ La cobertura de costeo se decide **por producto** (`ProductCostingMode`): `fixed_package`
+(contenido neto conocido), `variable_weight`/`variable_volume` (venta real a peso/volumen con
+`unit_price` confirmado), `discrete_unit` (nº de unidades) o `unresolved`. Un `unit_price` de
+referencia por kg/l sobre un envase fijo **no** basta para costear — queda `unresolved`. La
+elegibilidad agregada se calcula tras clasificar cada producto. La muestra de Carrefour
+(Frescos) trae 70 % de venta real a peso y 30 % de envases con €/kg informativo → `insufficient`.
+
+Ninguna cadena está activada en producción: `data_rights_status=under_review`,
+`production_eligibility=false`, `production_approved_at=null`. Sin API de Mercadona en la cuenta,
+`apify-mercadona` permanece desactivada. Deza publica etiquetas de promoción sin precio, así que
+no se implementa mapper (no se solicita a la fuente un campo que la web no muestra).
 
 No se convierten APIs de Carrefour Francia/Bélgica, Lidl EE. UU. o Aldi Reino Unido en
-fuentes para España.
+fuentes para España. Una fuente `partial` (solo folleto de ofertas) nunca se presenta como el
+precio completo de la tienda.
+
+## Alta de las siete cadenas
+
+`python -m cestaplan_api.tools.onboard_all_retailers --limit-per-provider 10 --continue-on-error`
+recorre cada proveedor de forma independiente: comprueba configuración (sin exponer secretos),
+hace una captura acotada solo donde está configurado, mide la cobertura observada, persiste la
+activación (derechos `under_review`, producción nunca activada) e imprime la matriz final. El
+fallo de una cadena no bloquea a las demás.
 
 ## Plan por fases
 

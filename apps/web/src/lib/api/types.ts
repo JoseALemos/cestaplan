@@ -271,6 +271,41 @@ export interface Retailer {
   costable_ingredient_count: number;
 }
 
+/**
+ * Onboarding-matrix status of a price provider/chain (spec §6 selector badges).
+ *
+ * DECLARED intent (`intended_catalog_scope`) is kept strictly separate from OBSERVED
+ * coverage measured from a real capture (`observed_catalog_scope` + the *_coverage ratios).
+ * A chain is only costable when `costing_eligibility === "sufficient"`; a sample-only capture
+ * is never presented as a full, usable catalogue. Coverage ratios are strings in [0,1] (or
+ * null when not measured) — display only, never parsed for storage.
+ */
+export interface PriceProvider {
+  provider: string;
+  retailer: string;
+  retailer_id: Uuid | null;
+  intended_role: string;
+  intended_catalog_scope: "full" | "partial" | "complementary";
+  observed_catalog_scope: "unknown" | "sample_only" | "partial" | "full";
+  price_coverage: string | null;
+  package_quantity_coverage: string | null;
+  package_unit_coverage: string | null;
+  geographic_scope_coverage: string | null;
+  /** Aggregated per-product costing modes (audit): fixed packages, genuine variable weight/volume,
+   * and products that could NOT be resolved for costing. A bare unit_price is never costable. */
+  package_coverage: string | null;
+  variable_weight_coverage: string | null;
+  unresolved_costing_coverage: string | null;
+  costing_eligible_product_coverage: string | null;
+  costing_eligibility: "unknown" | "insufficient" | "sufficient";
+  production_eligibility: boolean;
+  activation_state: string;
+  transport_status: string;
+  mapper_status: string;
+  data_rights_status: string;
+  badge: string;
+}
+
 export type PriceCoverageLabel =
   | "completo"
   | "cobertura_alta"
@@ -714,4 +749,108 @@ export interface AdminImportRecord {
   /** Only present on the rollback response. */
   deleted_prices?: number;
   [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Admin: ingredient↔product mapping review queue (internal, admin-only).
+// External data stays in review; never used in production.
+// ---------------------------------------------------------------------------
+
+export interface MappingCandidate {
+  mapping_id: number;
+  canonical_ingredient_key: string;
+  ingredient_id: number;
+  provider_code: string;
+  retailer_slug: string;
+  external_product_id: string;
+  original_product_name: string | null;
+  matched_rules: string[];
+  failed_rules: string[];
+  warnings: string[];
+  exclusion_warning: boolean;
+  lexical_score: string | null;
+  semantic_score: string | null;
+  category_score: string | null;
+  confidence_score: string;
+  mapping_status: string;
+  relation_status: string;
+  lifecycle_status: string;
+  reviewable: boolean;
+  selectable_for_costing: boolean;
+  conflict_group_id: string | null;
+  mapping_method: string;
+  unit_compatibility: string;
+  required_review: boolean;
+  active: boolean;
+  recipes_potentially_unlocked: number;
+  enrichment_status: string;
+  enrichment_error_category: string | null;
+  provider_endpoint: string | null;
+  resolved_by_mapping_id: number | null;
+  review_reason: string | null;
+  decision_history: unknown[];
+  enriched_fields: Record<string, unknown> | null;
+  net_content?: string | null;
+  sell_unit?: string | null;
+  unit_price?: string | null;
+  unit_price_unit?: string | null;
+  price?: string | null;
+  product_costing_mode?: string;
+  costing_eligible?: boolean;
+  review_notice: string;
+}
+
+export interface MappingCandidateList {
+  total: number;
+  review_notice: string;
+  items: MappingCandidate[];
+}
+
+export interface MappingCandidateFilters {
+  provider_code?: string;
+  retailer_slug?: string;
+  ingredient_id?: number;
+  canonical_ingredient_key?: string;
+  mapping_status?: string;
+  relation_status?: string;
+  conflict_group_id?: string;
+  required_review?: boolean;
+  minimum_confidence?: number;
+  maximum_confidence?: number;
+  include_historic?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface MappingSummary {
+  provider_code: string;
+  unique_products_discovered: number;
+  candidate_pairs: number;
+  products_with_multiple_ingredient_candidates: number;
+  competing_candidate_groups: number;
+  approved_unique_products: number;
+  rejected_unique_products: number;
+  unresolved_conflict_groups: number;
+  candidate_pair_ratio: string;
+  multi_ingredient_product_ratio: string;
+  average_candidates_per_conflict_group: string;
+  explosion_state: "ok" | "warning" | "critical";
+  auto_approval_allowed: boolean;
+  enrichment_budget: { used: number; budget: number; remaining: number };
+  review_notice: string;
+}
+
+export interface MappingDecisionResult {
+  mapping_id: number;
+  mapping_status: string;
+  active: boolean;
+}
+
+export interface MappingEnrichResult {
+  mapping_id: number;
+  enrichment_status: string;
+  mapping_status: string;
+  confidence_score: string;
+  provider_endpoint: string | null;
+  enrichment_error_category: string | null;
 }

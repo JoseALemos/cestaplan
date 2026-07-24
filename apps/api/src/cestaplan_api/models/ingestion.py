@@ -614,6 +614,12 @@ DATA_RIGHTS_STATUS = (
 TRANSPORT_STATUS = ("unknown", "operational", "degraded", "down")
 MAPPER_STATUS = ("unknown", "pending", "blocked", "verified")
 DATA_QUALITY_STATUS = ("unknown", "accepted", "degraded", "insufficient", "quarantined")
+# Coverage semantics (spec: separate *intended* scope from *observed* coverage). A tiny
+# sample capture is NEVER "full": ``observed_catalog_scope`` and ``costing_eligibility`` are
+# measured from the real capture, not declared. Documented Text sets, validated on write.
+INTENDED_CATALOG_SCOPE = ("full", "partial", "complementary")
+OBSERVED_CATALOG_SCOPE = ("unknown", "sample_only", "partial", "full")
+COSTING_ELIGIBILITY = ("unknown", "insufficient", "sufficient")
 
 
 class ProviderActivation(BaseModel):
@@ -650,4 +656,270 @@ class ProviderActivation(BaseModel):
     production_approved_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("user.id")
     )
+    # Onboarding matrix (retailer roll-out): the intended role, the roll-out stage and the
+    # declared capabilities. Kept as free Text/JSONB (documented vocabularies) so the matrix
+    # evolves without a migration per value.
+    intended_role: Mapped[str | None] = mapped_column(Text)
+    # DECLARED intent — what the source is meant to be (full | partial | complementary). This
+    # is NOT evidence of coverage; a full-intent chain still starts with a sample-only capture.
+    intended_catalog_scope: Mapped[str | None] = mapped_column(Text)
+    # disabled | transport_only | shadow | staging | production_partial | production_primary
+    activation_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="disabled"
+    )
+    # Orthogonal capability gates — avoid contradictory reports between shadow/transport/disabled.
+    # Each is an independent boolean; production requires BOTH production_enabled AND
+    # production_approved, which onboarding/shadow never set. rights stay under_review.
+    transport_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    capture_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    normalization_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    staging_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    shadow_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    production_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    production_approved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    expected_capabilities: Mapped[list | None] = mapped_column(JSONB)
+    # OBSERVED coverage — measured from the real capture, never declared. A 10-record sample is
+    # ``sample_only``, not ``full``. The ratios are fractions in [0,1] over the captured set;
+    # ``geographic_scope_coverage`` reflects per-store/zone localisation (0 when the source
+    # carries no store scope). ``costing_eligibility`` gates whether the chain can cost whole
+    # plans; ``production_eligibility`` is only ever true after the full production gate — never
+    # set by onboarding.
+    observed_catalog_scope: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    price_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_quantity_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_unit_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    geographic_scope_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    identifier_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    barcode_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    observed_at_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    package_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    variable_weight_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    unresolved_costing_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    costing_eligible_product_coverage: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    costing_eligibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    production_eligibility: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ShadowEvaluationRun(BaseModel):
+    """A shadow-mode evaluation of a provider (spec §AA) — never touches production.
+
+    Shadow runs use ONLY staging data + synthetic/dev recipes: they compute coverage, cost
+    candidate baskets and compare against a baseline provider (usually the demo catalogue), and
+    record every difference/anomaly. They never modify real plans/lists or production prices and
+    are shown only to authorised internal users. Money is ``Decimal``; never float.
+    """
+
+    __tablename__ = "shadow_evaluation_run"
+    __table_args__ = (
+        Index("ix_shadow_run_provider_started", "provider_code", "started_at"),
+    )
+
+    provider_code: Mapped[str] = mapped_column(Text, nullable=False)
+    retailer_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("store.id"))
+    meal_plan_id: Mapped[int | None] = mapped_column(BigInteger)
+    recipe_set_id: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
+    recipes_evaluated: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    recipes_costable: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    basket_known_cost: Mapped[Decimal | None] = mapped_column(money())
+    basket_estimated_cost: Mapped[Decimal | None] = mapped_column(money())
+    missing_products: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    unresolved_packages: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    stale_prices: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    conflicts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    baseline_provider: Mapped[str | None] = mapped_column(Text)
+    baseline_cost: Mapped[Decimal | None] = mapped_column(money())
+    # Money/diffs are NULLABLE: absence of a known cost is NOT a zero cost. They are only set
+    # when the comparison is genuinely comparable (same ingredient set, compatible scope, all
+    # prices known, no unresolved packages). ``comparison_status`` says why otherwise.
+    absolute_difference: Mapped[Decimal | None] = mapped_column(money())
+    percentage_difference: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    comparison_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="failed"
+    )
+    comparison_blockers: Mapped[list | None] = mapped_column(JSONB)
+    known_cost_ingredient_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    unknown_cost_ingredient_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    known_cost_ratio: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    warnings: Mapped[list | None] = mapped_column(JSONB)
+    report_json: Mapped[dict | None] = mapped_column(JSONB)
+
+
+# Auditable ingredient<->product mapping vocabularies (documented Text sets).
+MAPPING_STATUS = (
+    "candidate",
+    "auto_approved",
+    "manually_approved",
+    "rejected",
+    "ambiguous",
+    "incompatible",
+    "stale",
+)
+MAPPING_METHOD = (
+    "exact_alias",
+    "normalized_name",
+    "synonym",
+    "category_constrained",
+    "barcode",
+    "manual",
+    "semantic_candidate",
+)
+UNIT_COMPATIBILITY = ("compatible", "convertible", "incompatible", "unknown")
+COMPATIBILITY = ("compatible", "incompatible", "unknown")
+ENRICHMENT_STATUS = (
+    "not_requested",
+    "pending",
+    "completed",
+    "failed",
+    "unavailable",
+    "budget_exceeded",
+    "rate_limited",
+)
+# How a candidate relates to other candidates for the SAME product (spec §1). Competing
+# candidates (same product, different ingredient) are NEVER auto-consolidated as duplicates.
+CANDIDATE_RELATION_STATUS = (
+    "independent",  # only candidate for its product
+    "competing",  # several ingredients claim the same product — kept until resolved
+    "conflict_resolved",  # this candidate won its conflict group
+    "rejected_competitor",  # lost its conflict group (a sibling was approved)
+    "superseded_exact_duplicate",  # a true exact duplicate (same prov+ing+ext+version)
+)
+
+
+class ProviderIngredientMapping(BaseModel):
+    """Explicit, auditable ingredient<->provider-product mapping (spec §3).
+
+    Distinct from the planner's :class:`~cestaplan_api.models.catalog.IngredientProductMapping`
+    (canonical product mappings): this is the provider-onboarding review layer. A mapping is
+    NEVER auto-approved just because a generic word matches ("aceite" is not "aceite de oliva");
+    approval needs deterministic rules or manual review. Scores + evidence are kept for audit.
+    """
+
+    __tablename__ = "provider_ingredient_mapping"
+    __table_args__ = (
+        # Candidate uniqueness is per (provider, ingredient, product, VERSION) — several pending
+        # candidates for the same product across ingredients are allowed (they are competitors).
+        Index(
+            "ux_provider_ing_map",
+            "provider_code",
+            "ingredient_id",
+            "external_product_id",
+            "mapping_version",
+            unique=True,
+        ),
+        # At most ONE approved+active mapping per product per provider (partial unique index).
+        Index(
+            "ux_provider_approved_product",
+            "provider_code",
+            "external_product_id",
+            unique=True,
+            postgresql_where=text(
+                "active AND mapping_status IN ('auto_approved','manually_approved')"
+            ),
+        ),
+        Index("ix_provider_ing_map_status", "provider_code", "mapping_status"),
+    )
+
+    ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+    canonical_ingredient_key: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_code: Mapped[str] = mapped_column(Text, nullable=False)
+    retailer_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    external_product_id: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_product_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("product.id")
+    )
+    mapping_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="candidate"
+    )
+    mapping_method: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    semantic_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    lexical_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    category_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    unit_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    preparation_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    dietary_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    allergen_compatibility: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="unknown"
+    )
+    required_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("user.id"))
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Version of the rule set + observed source shape that produced this decision. A rejection
+    # is never re-proposed until one of these changes (spec §5). Dedup marks redundant rows
+    # ``superseded`` (kept for audit, never physically deleted).
+    mapping_version: Mapped[str] = mapped_column(Text, nullable=False, server_default="1.0.0")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_reason: Mapped[str | None] = mapped_column(Text)
+    # Competing-candidate semantics (§1): a shared external_product_id across ingredients is a
+    # conflict to resolve, NOT a duplicate to delete.
+    relation_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="independent"
+    )
+    conflict_group_id: Mapped[str | None] = mapped_column(Text)
+    conflict_reason: Mapped[str | None] = mapped_column(Text)
+    resolved_by_mapping_id: Mapped[int | None] = mapped_column(BigInteger)
+    conflict_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Detail enrichment (§6): a single bounded provider-detail call, audited. Never stores raw
+    # payloads/secrets (only sanitized derived fields inside evidence_json). Never touches prod.
+    enrichment_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="not_requested"
+    )
+    enrichment_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrichment_requested_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("user.id")
+    )
+    enrichment_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_endpoint: Mapped[str | None] = mapped_column(Text)
+    enrichment_error_category: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[dict | None] = mapped_column(JSONB)

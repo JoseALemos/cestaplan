@@ -58,6 +58,12 @@ from cestaplan_api.ingestion.providers.demo.provider import DemoCatalogProvider 
 from cestaplan_api.ingestion.providers.open_prices.provider import (  # noqa: E402
     OpenPricesProvider,
 )
+from cestaplan_api.ingestion.providers.parsebot.chains import (  # noqa: E402
+    ParseBotAlcampoProvider,
+    ParseBotAldiProvider,
+    ParseBotCarrefourProvider,
+    ParseBotLidlProvider,
+)
 from cestaplan_api.ingestion.providers.parsebot.dia import ParseBotDiaProvider  # noqa: E402
 
 register_default(DemoCatalogProvider.provider_code, DemoCatalogProvider)
@@ -67,5 +73,10 @@ register_default(OpenPricesProvider.provider_code, OpenPricesProvider)
 # Parse.bot DIA (third-party scraper API). Only usable when configured; the provider returns
 # a not-configured health status / raises on iterate when the key/base URL are absent.
 register_default(ParseBotDiaProvider.provider_code, ParseBotDiaProvider)
+# Parse.bot chains onboarded from the operator's own scrapers (only usable when configured).
+register_default(ParseBotAlcampoProvider.provider_code, ParseBotAlcampoProvider)
+register_default(ParseBotCarrefourProvider.provider_code, ParseBotCarrefourProvider)
+register_default(ParseBotAldiProvider.provider_code, ParseBotAldiProvider)
+register_default(ParseBotLidlProvider.provider_code, ParseBotLidlProvider)
 
 __all__ = ["ProviderRegistry", "register_default", "registry"]

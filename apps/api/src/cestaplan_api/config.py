@@ -179,6 +179,18 @@ class Settings(BaseSettings):
     parse_bot_alcampo_enabled: bool = False
     parse_bot_dia_base_url: str = ""
     parse_bot_alcampo_base_url: str = ""
+    # Additional Parse.bot chains — base URLs empty until a verified scraper exists per chain.
+    parse_bot_carrefour_base_url: str = ""
+    parse_bot_lidl_base_url: str = ""
+    parse_bot_aldi_base_url: str = ""
+    parse_bot_deza_base_url: str = ""
+    # Dev-only postal code used to resolve location for chains that price by zone (Carrefour).
+    # Never a production default; only for bounded onboarding captures.
+    price_provider_test_postal_code: str = "14007"
+    # Admin candidate-enrichment limits (single detail call per request, daily budget per provider).
+    enrichment_daily_budget: int = 50
+    enrichment_timeout_seconds: float = 15.0
+    enrichment_min_seconds_between: int = 5
     # Apify (Mercadona actor) — Bearer token, actor id configurable, cost/quota caps.
     apify_enabled: bool = False
     apify_api_token: str = ""

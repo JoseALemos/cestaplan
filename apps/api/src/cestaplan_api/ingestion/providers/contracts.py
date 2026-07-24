@@ -33,6 +33,25 @@ class SellUnit(StrEnum):
     VOLUME = "volume"
 
 
+class ProductCostingMode(StrEnum):
+    """How (and whether) a product can cost a recipe quantity, decided per product.
+
+    - ``FIXED_PACKAGE``: a fixed package with a known net content (qty + mass/volume unit) —
+      a fractional recipe amount is costable pro-rata from the package price.
+    - ``VARIABLE_WEIGHT``/``VARIABLE_VOLUME``: genuinely sold loose by weight/volume, with a
+      confirmed ``unit_price``/``unit_price_unit`` — any continuous amount is costable.
+    - ``DISCRETE_UNIT``: sold as a counted number of pieces with a price — costable per unit.
+    - ``UNRESOLVED``: cannot cost a recipe (e.g. a fixed package that only shows an informational
+      reference price per kg/l). A bare ``unit_price`` is NEVER enough on its own.
+    """
+
+    FIXED_PACKAGE = "fixed_package"
+    VARIABLE_WEIGHT = "variable_weight"
+    VARIABLE_VOLUME = "variable_volume"
+    DISCRETE_UNIT = "discrete_unit"
+    UNRESOLVED = "unresolved"
+
+
 class ContentUnit(StrEnum):
     G = "g"
     KG = "kg"

@@ -31,6 +31,12 @@ import type {
   IngredientSuggestion,
   LoginRequest,
   LoginResponse,
+  MappingCandidate,
+  MappingCandidateFilters,
+  MappingCandidateList,
+  MappingDecisionResult,
+  MappingEnrichResult,
+  MappingSummary,
   MealPlanDetail,
   MemberCreate,
   MemberResponse,
@@ -38,6 +44,7 @@ import type {
   OptimizationRunStatusResponse,
   PantryItemCreate,
   PantryItemResponse,
+  PriceProvider,
   PantryItemUpdate,
   PasswordRecoveryRequest,
   Recipe,
@@ -229,6 +236,10 @@ export function listRetailers(): Promise<Retailer[]> {
   return apiFetch<Retailer[]>("/api/v1/retailers");
 }
 
+export function listPriceProviders(): Promise<PriceProvider[]> {
+  return apiFetch<PriceProvider[]>("/api/v1/price-providers");
+}
+
 export function listStores(retailerId: Uuid): Promise<Store[]> {
   return apiFetch<Store[]>(`/api/v1/retailers/${retailerId}/stores`);
 }
@@ -414,5 +425,69 @@ export function commitAdminImport(importId: Uuid): Promise<AdminImportRecord> {
 export function rollbackAdminImport(importId: Uuid): Promise<AdminImportRecord> {
   return apiFetch<AdminImportRecord>(`/api/v1/admin/imports/${importId}/rollback`, {
     method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Admin: ingredient↔product mapping review queue (internal, admin-only).
+// ---------------------------------------------------------------------------
+
+const _MAP_BASE = "/api/v1/admin/ingredient-product-mappings";
+
+export function listMappingCandidates(
+  query: MappingCandidateFilters,
+): Promise<MappingCandidateList> {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  });
+  const qs = params.toString();
+  return apiFetch<MappingCandidateList>(`${_MAP_BASE}/candidates${qs ? `?${qs}` : ""}`);
+}
+
+export function getMappingCandidate(mappingId: number): Promise<MappingCandidate> {
+  return apiFetch<MappingCandidate>(`${_MAP_BASE}/${mappingId}`);
+}
+
+export function getMappingSummary(providerCode: string): Promise<MappingSummary> {
+  return apiFetch<MappingSummary>(`${_MAP_BASE}/summary/${providerCode}`);
+}
+
+export function approveMapping(mappingId: number, reason?: string): Promise<MappingDecisionResult> {
+  return apiFetch<MappingDecisionResult>(`${_MAP_BASE}/${mappingId}/approve`, {
+    method: "POST",
+    body: { reason: reason ?? null },
+  });
+}
+
+export function rejectMapping(mappingId: number, reason: string): Promise<MappingDecisionResult> {
+  return apiFetch<MappingDecisionResult>(`${_MAP_BASE}/${mappingId}/reject`, {
+    method: "POST",
+    body: { reason },
+  });
+}
+
+export function revokeMapping(mappingId: number, reason: string): Promise<MappingDecisionResult> {
+  return apiFetch<MappingDecisionResult>(`${_MAP_BASE}/${mappingId}/revoke`, {
+    method: "POST",
+    body: { reason },
+  });
+}
+
+export function enrichMapping(mappingId: number): Promise<MappingEnrichResult> {
+  return apiFetch<MappingEnrichResult>(`${_MAP_BASE}/${mappingId}/enrich`, { method: "POST" });
+}
+
+export function bulkApproveMappings(mappingIds: number[], reason?: string): Promise<unknown> {
+  return apiFetch<unknown>(`${_MAP_BASE}/bulk-approve`, {
+    method: "POST",
+    body: { mapping_ids: mappingIds, reason: reason ?? null },
+  });
+}
+
+export function bulkRejectMappings(mappingIds: number[], reason: string): Promise<unknown> {
+  return apiFetch<unknown>(`${_MAP_BASE}/bulk-reject`, {
+    method: "POST",
+    body: { mapping_ids: mappingIds, reason },
   });
 }

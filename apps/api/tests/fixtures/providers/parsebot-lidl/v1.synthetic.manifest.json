@@ -1,0 +1,7 @@
+{
+  "provider": "parsebot-lidl",
+  "fixture_version": "v1",
+  "schema_fingerprint": "34b73c46c3c060e33a213e7a33f82cc44318e67b113fbc90f8968aee76c87fa0",
+  "synthetic_structure": true,
+  "record_count": 10
+}

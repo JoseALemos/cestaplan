@@ -9,6 +9,7 @@ const TABS = [
   { href: "/admin", label: "Resumen" },
   { href: "/admin/importacion", label: "Importación" },
   { href: "/admin/fuentes", label: "Estado de fuentes" },
+  { href: "/admin/ingredient-mappings", label: "Mapeos" },
 ] as const;
 
 export function AdminSubNav() {

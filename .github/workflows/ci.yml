@@ -77,15 +77,18 @@ jobs:
         # pyright is heavier than ruff but the codebase is small; keep it in CI.
         run: uv run pyright
 
+      - name: Apply migrations (create the schema the tests run against)
+        # Tests connect to the Postgres service with the schema already in place; migrations
+        # must be applied BEFORE pytest (the drift check stays after).
+        run: uv run alembic upgrade head
+
       - name: Run tests (pytest)
         run: uv run pytest
 
-      - name: Migration validation (apply + drift check)
-        # Apply all migrations, then assert models and migrations are in sync.
-        # `alembic check` exits non-zero if autogenerate would emit operations.
-        run: |
-          uv run alembic upgrade head
-          uv run alembic check
+      - name: Migration validation (drift check)
+        # Assert models and migrations are in sync; `alembic check` exits non-zero if
+        # autogenerate would emit operations.
+        run: uv run alembic check
 
   # -------------------------------------------------------------------------
   # Frontend: lint, typecheck, production build (standalone).

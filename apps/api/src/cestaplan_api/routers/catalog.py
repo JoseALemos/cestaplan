@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
+from cestaplan_api.ingestion.providers.onboarding import RETAILER_MATRIX
 from cestaplan_api.models import (
     HouseholdMember,
     Ingredient,
@@ -22,6 +23,7 @@ from cestaplan_api.models import (
     Product,
     ProductBarcode,
     ProductPrice,
+    ProviderActivation,
     Recipe,
     Retailer,
     Store,
@@ -41,6 +43,105 @@ _COSTING_MIN_INGREDIENTS = 20
 
 def _s(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+# All badge strings the UI understands (spec §16). "Sin cobertura" and "Bloqueado por
+# autenticación" are reserved for providers that report those states (none do yet).
+PROVIDER_BADGES = (
+    "Disponible para validación",
+    "Experimental",
+    "Ofertas solamente",
+    "Configuración pendiente",
+    "Fuente insuficiente",
+    "Sin cobertura",
+    "Bloqueado por autenticación",
+)
+
+
+def _provider_badge(entry: Any, activation: ProviderActivation | None) -> str:
+    """UI badge for a chain (§16). Reflects OBSERVED costing eligibility, never intent.
+
+    A chain reads "Disponible para validación" (usable to cost a basket) only when its measured
+    ``costing_eligibility`` is ``sufficient``. A configured source whose sample is priced but not
+    costable stays "Experimental"; an offers-only (partial) source is "Ofertas solamente"; a
+    source whose API works but lacks costing-critical fields is "Fuente insuficiente". Nothing is
+    dressed up as available on the strength of a handful of records.
+    """
+    if activation is None or activation.transport_status in ("down", "unknown"):
+        return "Configuración pendiente"
+    if activation.mapper_status == "blocked":
+        return "Fuente insuficiente"  # API reachable but schema lacks costing-critical fields
+    if entry.intended_catalog_scope == "partial":
+        return "Ofertas solamente"
+    if activation.costing_eligibility == "sufficient":
+        return "Disponible para validación"
+    # Configured/captured but coverage is insufficient to cost plans -> experimental.
+    return "Experimental"
+
+
+@router.get("/price-providers")
+def list_price_providers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
+    """Retailer onboarding matrix for the chain selector (§6): badge, scope, role, rights.
+
+    Surfaces every declared chain — not only the priced ones — so the UI can show which are
+    available, experimental, offers-only or pending configuration. A partial source is never
+    presented as a full costed catalogue.
+    """
+    activations = {
+        a.provider_code: a for a in db.execute(select(ProviderActivation)).scalars()
+    }
+    retailers = {r.slug: r for r in db.execute(select(Retailer)).scalars()}
+    out: list[dict[str, Any]] = []
+    for entry in RETAILER_MATRIX:
+        activation = activations.get(entry.provider_code)
+        retailer = retailers.get(entry.retailer_slug)
+        out.append(
+            {
+                "provider": entry.provider_code,
+                "retailer": entry.retailer_slug,
+                "retailer_id": str(retailer.public_id) if retailer is not None else None,
+                "intended_role": entry.intended_role,
+                # Declared intent vs. what was actually observed — kept strictly separate.
+                "intended_catalog_scope": entry.intended_catalog_scope,
+                "observed_catalog_scope": (
+                    activation.observed_catalog_scope if activation else "unknown"
+                ),
+                "price_coverage": _s(activation.price_coverage) if activation else None,
+                "package_quantity_coverage": (
+                    _s(activation.package_quantity_coverage) if activation else None
+                ),
+                "package_unit_coverage": (
+                    _s(activation.package_unit_coverage) if activation else None
+                ),
+                "geographic_scope_coverage": (
+                    _s(activation.geographic_scope_coverage) if activation else None
+                ),
+                "package_coverage": _s(activation.package_coverage) if activation else None,
+                "variable_weight_coverage": (
+                    _s(activation.variable_weight_coverage) if activation else None
+                ),
+                "unresolved_costing_coverage": (
+                    _s(activation.unresolved_costing_coverage) if activation else None
+                ),
+                "costing_eligible_product_coverage": (
+                    _s(activation.costing_eligible_product_coverage) if activation else None
+                ),
+                "costing_eligibility": (
+                    activation.costing_eligibility if activation else "unknown"
+                ),
+                "production_eligibility": (
+                    bool(activation.production_eligibility) if activation else False
+                ),
+                "activation_state": activation.activation_state if activation else "disabled",
+                "transport_status": activation.transport_status if activation else "unknown",
+                "mapper_status": activation.mapper_status if activation else "unknown",
+                "data_rights_status": (
+                    activation.data_rights_status if activation else "under_review"
+                ),
+                "badge": _provider_badge(entry, activation),
+            }
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
