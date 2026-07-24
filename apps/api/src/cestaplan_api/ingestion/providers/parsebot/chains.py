@@ -64,10 +64,15 @@ _UNIT_ALIASES: dict[str, ContentUnit] = {
 _UNIT_PRICE_UNITS: dict[str, str] = {
     "per_litre": "l",
     "per_liter": "l",
+    "per_1l": "l",
+    "per_1litre": "l",
     "fop.price.per.litre": "l",
+    "fop.price.per.l": "l",
     "per_kilo": "kg",
     "per_kilogram": "kg",
+    "per_1kg": "kg",
     "fop.price.per.kilo": "kg",
+    "fop.price.per.kg": "kg",
     "kg": "kg",
     "l": "l",
     "ml": "ml",
@@ -106,6 +111,17 @@ def _pct(text: object) -> Decimal | None:
 
 # Textual evidence that an item is genuinely sold loose (by weight/volume), not a fixed package.
 _VARIABLE_MARKERS = ("granel", "al peso", "a peso", "aprox", "/kg", "/ kg", "por kg", "por peso")
+
+# A size like '750g - 1250g' (a range) or '…aprox' is NOT a clean fixed net content.
+_SIZE_TOKEN_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:ml|cl|l|mg|kg|g)\b", re.I)
+
+
+def _is_approximate_size(text: object) -> bool:
+    """True when the pack-size text is a range or explicitly approximate (never a fixed pack)."""
+    t = str(text or "").lower()
+    if "aprox" in t or "~" in t:
+        return True
+    return len(_SIZE_TOKEN_RE.findall(t)) >= 2  # e.g. '750 g - 1250 g'
 
 
 def _variable_sale_kind(name: object, up_unit: str | None) -> SellUnit | None:
@@ -195,10 +211,24 @@ class ParseBotAlcampoMapper(_BaseParseBotMapper):
         if regular is None:
             raise UnsupportedSchemaError("alcampo record without a decodable price")
         currency = price.get("currency") or "EUR"  # explicit in the response
-        qty, unit = _parse_content(r.get("packSizeDescription"))
-        up = (r.get("unitPrice") or {}).get("price") or {}
+        size_text = r.get("packSizeDescription")
+        qty, unit = _parse_content(size_text)
+        up_meta = r.get("unitPrice") or {}
+        up = up_meta.get("price") or {}
         up_amount = _dec(up.get("amount"))
-        up_unit = _UNIT_PRICE_UNITS.get(str((r.get("unitPrice") or {}).get("unitName", "")).lower())
+        up_unit = _UNIT_PRICE_UNITS.get(
+            str(up_meta.get("unit") or "").lower()
+        ) or _UNIT_PRICE_UNITS.get(str(up_meta.get("unitName") or "").lower())
+        # Evidence-based sale basis (audit §2): a fixed net content is only trusted when the item
+        # is not sold loose and its size is unambiguous. Loose sale ('al peso'/'granel') -> variable
+        # weight/volume priced by the €/kg unit price; a size range/'aprox' -> no fixed pack.
+        sale_kind = (
+            _variable_sale_kind(r.get("name"), up_unit) if (up_amount and up_unit) else None
+        )
+        variable = sale_kind is not None
+        sell_unit = sale_kind or SellUnit.PACKAGE
+        if variable or _is_approximate_size(size_text):
+            qty, unit = None, None  # not a clean fixed package -> stays uncosted unless variable
         cats = r.get("categoryPath") or []
         return ExternalCatalogProduct(
             provider=self.provider_code,
@@ -208,7 +238,7 @@ class ParseBotAlcampoMapper(_BaseParseBotMapper):
             brand=r.get("brand") or None,
             category=(cats[-1] if isinstance(cats, list) and cats else None),
             barcode=None,  # not provided by Alcampo search
-            sell_unit=SellUnit.PACKAGE,
+            sell_unit=sell_unit,
             regular_price=regular,
             promotional_price=None,  # no strikethrough/promo price in this endpoint
             loyalty_price=None,
@@ -216,7 +246,7 @@ class ParseBotAlcampoMapper(_BaseParseBotMapper):
             price_scope=PriceScope.UNKNOWN,  # search response carries no store/zone
             observed_at=retrieved_at,
             availability=Availability.IN_STOCK if r.get("available") else Availability.OUT_OF_STOCK,
-            variable_weight=False,
+            variable_weight=variable,
             net_content_quantity=qty,
             net_content_unit=unit,
             unit_price=up_amount if (up_amount and up_unit) else None,
