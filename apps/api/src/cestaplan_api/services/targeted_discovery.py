@@ -266,13 +266,13 @@ def discover_and_map(
         return report
     ing_ids = _ingredient_ids(db, ingredient_keys)
     out_dir = _LOCAL / provider_code
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) INGESTION happens ONCE per unique product and NEVER during matching. Search providers
     #    (Alcampo/DIA) capture then persist once per unique product; staged providers (Carrefour)
     #    reuse the EXISTING product ids and write nothing — matching never creates an observation.
     products: list[tuple[ExternalCatalogProduct, int]] = []
     if provider_code in ("parsebot-alcampo", "parsebot-dia"):
+        out_dir.mkdir(parents=True, exist_ok=True)  # capture files: only the search-based providers
         captured: dict[str, ExternalCatalogProduct] = {}
         for key in ingredient_keys:
             if report.api_calls >= max_calls:
