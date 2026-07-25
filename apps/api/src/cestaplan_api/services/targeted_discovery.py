@@ -15,6 +15,7 @@ fixtures are never replaced.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -207,6 +208,40 @@ class ApprovalMode(StrEnum):
     DETERMINISTIC_AUTOAPPROVAL = "deterministic_autoapproval"
 
 
+# Conservative, tunable bounds so a generic term never relates one product to dozens of ingredients
+# (candidate explosion). Excess is dropped and surfaced in metrics, never silently hidden.
+_MAX_CANDIDATES_PER_PRODUCT = 3
+_MAX_CANDIDATES_PER_INGREDIENT = 25
+_MIN_REVIEWABLE_CONFIDENCE = Decimal("0.30")
+# Mapping-algorithm version: a re-run under a new version supersedes the prior candidates (§6).
+_MAPPING_VERSION = "2.0.0"
+
+
+def _classify_candidates(
+    product: ExternalCatalogProduct, keys: list[str]
+) -> list[tuple[str, object]]:
+    """All COMPATIBLE ``(key, candidate)`` for a product, ranked by confidence desc. Hard
+    incompatibles (family/unit/prep/diet/allergen/rejected) are dropped; a product is classified
+    exactly ONCE against the whole ingredient set."""
+    known = specs()
+    out: list[tuple[str, object]] = []
+    for key in keys:
+        if key not in known:
+            continue  # not in the ingredient dictionary -> cannot classify (never fabricate)
+        cand = classify_mapping(
+            key,
+            product_name=product.product_name,
+            brand=product.brand,
+            category_code=normalize_provider_category(product.category),
+            net_content_unit=product.net_content_unit.value if product.net_content_unit else None,
+        )
+        if cand.mapping_status in ("incompatible", "rejected"):
+            continue
+        out.append((key, cand))
+    out.sort(key=lambda kc: kc[1].confidence, reverse=True)  # type: ignore[attr-defined]
+    return out
+
+
 def discover_and_map(
     db: Session,
     provider_code: str,
@@ -233,43 +268,51 @@ def discover_and_map(
     out_dir = _LOCAL / provider_code
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for key in ingredient_keys:
-        d = IngredientDiscovery(key)
-        report.per_ingredient.append(d)
-        ing_id = ing_ids.get(key)
-        if ing_id is None:
-            continue
-        # Alcampo/DIA support keyword search -> one bounded query per ingredient.
-        products: list[ExternalCatalogProduct] = []
-        if provider_code in ("parsebot-alcampo", "parsebot-dia") and report.api_calls < max_calls:
+    # 1) INGESTION happens ONCE per unique product and NEVER during matching. Search providers
+    #    (Alcampo/DIA) capture then persist once per unique product; staged providers (Carrefour)
+    #    reuse the EXISTING product ids and write nothing — matching never creates an observation.
+    products: list[tuple[ExternalCatalogProduct, int]] = []
+    if provider_code in ("parsebot-alcampo", "parsebot-dia"):
+        captured: dict[str, ExternalCatalogProduct] = {}
+        for key in ingredient_keys:
+            if report.api_calls >= max_calls:
+                break
             try:
-                products = _capture_alcampo(provider_code, settings, key, per_query_limit, out_dir)
+                fetched = _capture_alcampo(provider_code, settings, key, per_query_limit, out_dir)
                 report.api_calls += 1
                 report.queries += 1
-                _log_usage(db, provider_code, len(products), now)
+                _log_usage(db, provider_code, len(fetched), now)
             except Exception:
-                products = []
-            (out_dir / f"{key}.count").write_text(str(len(products)))
-        else:
-            # No keyword search (Carrefour): reuse already-staged variants, classify locally.
-            products = _staged_products(db, retailer_id)
+                fetched = []
+            for p in fetched:
+                captured.setdefault(p.external_product_id, p)  # one observation per unique product
+            (out_dir / f"{key}.count").write_text(str(len(fetched)))
+        for p in captured.values():
+            product_id, _vid = _persist_product(db, retailer_id, p, now=now)
+            products.append((p, product_id))
+    else:
+        products = [(dto, pid) for dto, pid, _vid in _staged_products(db, retailer_id)]
 
-        report.products_seen += len(products)
-        seen_products: set[str] = set()
-        for product in products:
-            if product.external_product_id in seen_products:
+    report.products_seen = len(products)
+
+    # 2) MATCHING reads + writes ONLY candidate rows. Each product is classified ONCE against all
+    #    ingredients; candidates are bounded per product and per ingredient so a generic term cannot
+    #    relate one product to dozens of ingredients (excess is dropped, surfaced in metrics).
+    per_key = {key: IngredientDiscovery(key) for key in ingredient_keys}
+    report.per_ingredient = list(per_key.values())
+    per_ingredient_count: Counter[str] = Counter()
+    for dto, product_id in products:
+        costable = classify_costing_mode(dto).value != "unresolved"
+        kept = [
+            (key, cand)
+            for key, cand in _classify_candidates(dto, ingredient_keys)
+            if cand.confidence >= _MIN_REVIEWABLE_CONFIDENCE  # type: ignore[attr-defined]
+        ][:_MAX_CANDIDATES_PER_PRODUCT]
+        for key, cand in kept:
+            ing_id = ing_ids.get(key)
+            if ing_id is None or per_ingredient_count[key] >= _MAX_CANDIDATES_PER_INGREDIENT:
                 continue
-            seen_products.add(product.external_product_id)
-            match = _classify_best(product, [key])
-            if match is None:
-                d.rejected += 1
-                continue
-            _, cand = match
-            product_id, _vid = _persist_product(db, retailer_id, product, now=now)
-            costable = classify_costing_mode(product).value != "unresolved"
             status = cand.mapping_status  # type: ignore[attr-defined]
-            # Only deterministic-autoapproval mode may ever activate a mapping; review-only never
-            # does. Activation additionally requires an exact deterministic match.
             active = (
                 approval_mode is ApprovalMode.DETERMINISTIC_AUTOAPPROVAL
                 and status == "auto_approved"
@@ -280,13 +323,16 @@ def discover_and_map(
                 retailer_slug,
                 ing_id,
                 key,
-                product,
+                dto,
                 product_id,
                 cand,
                 active=active,
                 now=now,
                 approval_mode=approval_mode,
+                mapping_version=_MAPPING_VERSION,
             )
+            per_ingredient_count[key] += 1
+            d = per_key[key]
             d.candidates += 1
             d.costable += costable
             if status == "auto_approved":
@@ -298,8 +344,15 @@ def discover_and_map(
     return report
 
 
-def _staged_products(db: Session, retailer_id: int) -> list[ExternalCatalogProduct]:
-    """Reconstruct ExternalCatalogProduct-like DTOs from already-staged variants (no network)."""
+def _staged_products(
+    db: Session, retailer_id: int
+) -> list[tuple[ExternalCatalogProduct, int, int]]:
+    """Existing staged products as ``(dto, product_id, variant_id)``, ONE per variant.
+
+    The DTO carries the REAL provider ``external_id`` (via ``ExternalProduct``) — never the FK id —
+    and the caller gets the EXISTING ``product_id``/``variant_id`` so the mapping layer uses them
+    WITHOUT re-persisting anything. Reading staged data never writes a new observation/product.
+    """
     from cestaplan_api.ingestion.providers.contracts import (
         Availability,
         ContentUnit,
@@ -307,32 +360,41 @@ def _staged_products(db: Session, retailer_id: int) -> list[ExternalCatalogProdu
         SellUnit,
     )
 
-    out: list[ExternalCatalogProduct] = []
     rows = db.execute(
-        select(ProductVariant, PriceObservation)
+        select(ProductVariant, ExternalProduct.external_id, PriceObservation)
+        .join(ExternalProduct, ExternalProduct.id == ProductVariant.external_product_id)
         .join(PriceObservation, PriceObservation.product_variant_id == ProductVariant.id)
         .where(ProductVariant.retailer_id == retailer_id, PriceObservation.staging_only.is_(True))
-    ).all()
-    for v, obs in rows:
-        out.append(
-            ExternalCatalogProduct(
-                provider="staged",
-                retailer_slug="",
-                external_product_id=str(v.external_product_id),
-                product_name=v.display_name,
-                sell_unit=SellUnit(v.sell_unit or "package"),
-                regular_price=obs.amount,
-                currency=obs.currency,
-                price_scope=PriceScope(obs.price_scope),
-                observed_at=obs.observed_at,
-                availability=Availability.UNKNOWN,
-                variable_weight=v.variable_weight,
-                net_content_quantity=v.net_content_quantity,
-                net_content_unit=ContentUnit(v.net_content_unit) if v.net_content_unit else None,
-                unit_price=v.unit_price,
-                unit_price_unit=v.unit_price_unit,
-            )
+        .order_by(
+            ProductVariant.id,
+            PriceObservation.observed_at.desc(),
+            PriceObservation.id.desc(),
         )
+    ).all()
+    out: list[tuple[ExternalCatalogProduct, int, int]] = []
+    seen_variants: set[int] = set()
+    for v, external_id, obs in rows:
+        if v.id in seen_variants or v.product_id is None:
+            continue
+        seen_variants.add(v.id)  # one DTO per variant (its latest staging observation)
+        dto = ExternalCatalogProduct(
+            provider="staged",
+            retailer_slug="",
+            external_product_id=str(external_id),
+            product_name=v.display_name,
+            sell_unit=SellUnit(v.sell_unit or "package"),
+            regular_price=obs.amount,
+            currency=obs.currency,
+            price_scope=PriceScope(obs.price_scope),
+            observed_at=obs.observed_at,
+            availability=Availability.UNKNOWN,
+            variable_weight=v.variable_weight,
+            net_content_quantity=v.net_content_quantity,
+            net_content_unit=ContentUnit(v.net_content_unit) if v.net_content_unit else None,
+            unit_price=v.unit_price,
+            unit_price_unit=v.unit_price_unit,
+        )
+        out.append((dto, v.product_id, v.id))
     return out
 
 
@@ -349,6 +411,7 @@ def _upsert_mapping(
     active: bool,
     now: datetime,
     approval_mode: ApprovalMode,
+    mapping_version: str = "1.0.0",
 ) -> None:
     row = db.execute(
         select(ProviderIngredientMapping).where(
@@ -367,6 +430,7 @@ def _upsert_mapping(
     row.canonical_ingredient_key = key
     row.retailer_slug = retailer_slug
     row.normalized_product_id = product_id
+    row.mapping_version = mapping_version
     row.mapping_method = cand.mapping_method  # type: ignore[attr-defined]
     row.confidence_score = cand.confidence  # type: ignore[attr-defined]
     row.lexical_score = cand.lexical_score  # type: ignore[attr-defined]
