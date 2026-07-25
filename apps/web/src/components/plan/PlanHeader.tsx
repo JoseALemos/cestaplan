@@ -1,6 +1,12 @@
 "use client";
 
-import { coverageLabel, coverageTone } from "@/lib/domain/labels";
+import {
+  coverageLabel,
+  coverageTone,
+  isBackendPriceCoverageWarning,
+  priceCoverageState,
+  PRICE_COVERAGE_NOTICE,
+} from "@/lib/domain/labels";
 import { formatMoney } from "@/lib/utils/format";
 import type { MealPlanDetail } from "@/lib/api/types";
 
@@ -19,6 +25,14 @@ export function PlanHeader({ plan, onRegenerate, regenerating }: PlanHeaderProps
   const currency = plan.budget.currency;
   const budgetDiffNumeric = Number(plan.budget_diff);
   const isOverBudget = !Number.isNaN(budgetDiffNumeric) && budgetDiffNumeric < 0;
+
+  // When the plan is uncosted (no prices) the "0,00 €" figures and the full-budget
+  // "difference" are misleading, so we show "Sin datos" and a localized notice.
+  const coverageState = priceCoverageState(plan.coverage);
+  const noPriceData = coverageState === "none";
+  const notice = coverageState === "ok" ? null : PRICE_COVERAGE_NOTICE[coverageState];
+  // Our notice replaces the engine's raw English price-coverage warning; keep any others verbatim.
+  const otherWarnings = plan.warnings.filter((warning) => !isBackendPriceCoverageWarning(warning));
 
   return (
     <Card>
@@ -42,21 +56,31 @@ export function PlanHeader({ plan, onRegenerate, regenerating }: PlanHeaderProps
           <div className="rounded-md border border-border p-3">
             <p className="text-xs text-ink-muted">Coste conocido</p>
             <p className="font-display text-display-sm text-ink">
-              {formatMoney(plan.totals?.cost_total?.known, currency)}
+              {noPriceData ? "Sin datos" : formatMoney(plan.totals?.cost_total?.known, currency)}
             </p>
           </div>
           <div className="rounded-md border border-border p-3">
             <p className="text-xs text-ink-muted">Diferencia con el presupuesto</p>
-            <p className={`font-display text-display-sm ${isOverBudget ? "text-error" : "text-success"}`}>
-              {formatMoney(plan.budget_diff, currency)}
-            </p>
+            {noPriceData ? (
+              <p className="font-display text-display-sm text-ink-muted">Sin datos</p>
+            ) : (
+              <p className={`font-display text-display-sm ${isOverBudget ? "text-error" : "text-success"}`}>
+                {formatMoney(plan.budget_diff, currency)}
+              </p>
+            )}
           </div>
         </div>
 
-        {plan.warnings.length > 0 ? (
+        {notice ? (
+          <Alert tone={notice.tone} title={notice.title}>
+            {notice.body}
+          </Alert>
+        ) : null}
+
+        {otherWarnings.length > 0 ? (
           <Alert tone="warning" title="Avisos">
             <ul className="flex flex-col gap-1">
-              {plan.warnings.map((warning) => (
+              {otherWarnings.map((warning) => (
                 <li key={warning}>· {warning}</li>
               ))}
             </ul>

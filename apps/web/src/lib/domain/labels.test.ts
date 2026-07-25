@@ -4,6 +4,9 @@ import { test } from "node:test";
 import {
   ACTION_CODE_LABELS,
   INFEASIBILITY_MESSAGES,
+  isBackendPriceCoverageWarning,
+  PRICE_COVERAGE_NOTICE,
+  priceCoverageState,
   READINESS_STATUS_LABELS,
   actionLabel,
   infeasibilityMessage,
@@ -50,4 +53,53 @@ test("every ReadinessStatus maps to a non-empty label", () => {
 
 test("readinessStatusLabel falls back neutrally for unknown status", () => {
   assert.equal(readinessStatusLabel("weird_status"), "Estado desconocido");
+});
+
+test("priceCoverageState: no prices at all -> none (by status or 0 ratio)", () => {
+  assert.equal(priceCoverageState({ status: "none", price_coverage: "0" }), "none");
+  assert.equal(priceCoverageState({ status: "sin_datos" }), "none");
+  assert.equal(priceCoverageState({ status: "no_data" }), "none");
+  assert.equal(priceCoverageState({ price_coverage: "0" }), "none");
+  assert.equal(priceCoverageState({ price_coverage: "0.0000" }), "none");
+});
+
+test("priceCoverageState: some but not all prices -> partial", () => {
+  assert.equal(priceCoverageState({ status: "partial", price_coverage: "0.5" }), "partial");
+  assert.equal(priceCoverageState({ status: "cobertura_parcial" }), "partial");
+  assert.equal(priceCoverageState({ status: "cobertura_insuficiente" }), "partial");
+  assert.equal(priceCoverageState({ status: "datos_caducados" }), "partial");
+  assert.equal(priceCoverageState({ price_coverage: "0.42" }), "partial");
+});
+
+test("priceCoverageState: full/high coverage or unknown -> ok", () => {
+  assert.equal(priceCoverageState({ status: "complete", price_coverage: "1.0000" }), "ok");
+  assert.equal(priceCoverageState({ status: "cobertura_alta", price_coverage: "1" }), "ok");
+  assert.equal(priceCoverageState(null), "ok");
+  assert.equal(priceCoverageState(undefined), "ok");
+  assert.equal(priceCoverageState({}), "ok");
+});
+
+test("priceCoverageState: a 0 ratio means none even with a partial-looking status", () => {
+  assert.equal(priceCoverageState({ status: "cobertura_parcial", price_coverage: "0" }), "none");
+});
+
+test("isBackendPriceCoverageWarning: matches the engine's English coverage warning", () => {
+  assert.equal(
+    isBackendPriceCoverageWarning("price coverage is low; total cost is not reliable"),
+    true,
+  );
+  assert.equal(isBackendPriceCoverageWarning("PRICE COVERAGE IS LOW"), true);
+  assert.equal(isBackendPriceCoverageWarning("total cost is not reliable"), true);
+  assert.equal(isBackendPriceCoverageWarning("nutrición incompleta en 2 platos"), false);
+});
+
+test("PRICE_COVERAGE_NOTICE: localized, non-empty copy for the two unreliable states", () => {
+  for (const state of ["none", "partial"] as const) {
+    const notice = PRICE_COVERAGE_NOTICE[state];
+    assert.ok(notice.title.length > 0);
+    assert.ok(notice.body.length > 0);
+    assert.notEqual(notice.title, state);
+  }
+  assert.equal(PRICE_COVERAGE_NOTICE.none.tone, "info");
+  assert.equal(PRICE_COVERAGE_NOTICE.partial.tone, "warning");
 });

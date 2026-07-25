@@ -86,6 +86,73 @@ export function coverageTone(
   return COVERAGE_TONE[status] ?? "neutral";
 }
 
+// ---------------------------------------------------------------------------
+// Completed-plan price-coverage state. A plan can generate successfully yet be
+// uncosted (no prices in the catalogue) or only partly costed. Rather than show
+// a wall of "0,00 €" plus a raw English engine warning, we derive an honest
+// state and surface a localized notice. Nothing here invents prices; it only
+// describes the coverage the backend reported.
+// ---------------------------------------------------------------------------
+
+/** `none` = no prices at all (every dish uncosted); `partial` = some priced, total is indicative; `ok` = full/high coverage. */
+export type PriceCoverageState = "none" | "partial" | "ok";
+
+const COVERAGE_NONE_STATUSES = new Set(["none", "no_data", "sin_datos"]);
+const COVERAGE_PARTIAL_STATUSES = new Set([
+  "partial",
+  "cobertura_parcial",
+  "insufficient",
+  "cobertura_insuficiente",
+  "expired",
+  "datos_caducados",
+]);
+
+export function priceCoverageState(
+  coverage: { status?: string | null; price_coverage?: string | null } | null | undefined,
+): PriceCoverageState {
+  const status = coverage?.status ?? undefined;
+  const ratio = coverage?.price_coverage;
+  const numeric = ratio === null || ratio === undefined || ratio === "" ? NaN : Number.parseFloat(ratio);
+  if ((status && COVERAGE_NONE_STATUSES.has(status)) || numeric === 0) return "none";
+  if (
+    (status && COVERAGE_PARTIAL_STATUSES.has(status)) ||
+    (!Number.isNaN(numeric) && numeric > 0 && numeric < 1)
+  ) {
+    return "partial";
+  }
+  return "ok";
+}
+
+/** Honest Spanish notice shown for a completed plan whose costs are unreliable. */
+export const PRICE_COVERAGE_NOTICE: Record<
+  "none" | "partial",
+  { tone: "info" | "warning"; title: string; body: string }
+> = {
+  none: {
+    tone: "info",
+    title: "Catálogo de precios en preparación",
+    body:
+      "El plan es válido, pero todavía no podemos calcular su coste: aún no hay precios " +
+      "cargados para esta cadena. Cuando el catálogo tenga precios, verás aquí el coste real.",
+  },
+  partial: {
+    tone: "warning",
+    title: "Cobertura de precios parcial",
+    body:
+      "El coste total es orientativo: algunos platos todavía no tienen precio, así que el " +
+      "coste real puede ser mayor.",
+  },
+};
+
+// The pricing engine emits this warning in English; we surface our own localized
+// notice instead (keyed off coverage), so the raw string is dropped to avoid a
+// duplicated, untranslated message.
+const BACKEND_PRICE_COVERAGE_WARNING = /price coverage is low|total cost is not reliable/i;
+
+export function isBackendPriceCoverageWarning(warning: string): boolean {
+  return BACKEND_PRICE_COVERAGE_WARNING.test(warning);
+}
+
 export const ALLERGEN_OPTIONS: { code: string; label: string }[] = [
   { code: "gluten", label: "Gluten" },
   { code: "crustaceans", label: "Crustáceos" },

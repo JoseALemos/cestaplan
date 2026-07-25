@@ -41,6 +41,11 @@ export function MealCard({
   const feedbackMutation = useRecipeFeedbackMutation(householdId, mealPlanId);
   const regenerateMealMutation = useRegenerateMealMutation(mealPlanId);
 
+  // A per-dish cost of 0 / empty means "no price" (real food is never free), so
+  // show "Sin precio" instead of a misleading "0,00 €".
+  const imputable = meal.cost.imputable;
+  const hasPrice = imputable !== null && imputable !== "" && Number(imputable) > 0;
+
   const toggleFavorite = async () => {
     const nextFavorited = currentStatus !== "favorite";
     try {
@@ -87,7 +92,8 @@ export function MealCard({
             {meal.title}
           </Link>
           <p className="mt-0.5 text-sm text-ink-muted">
-            {meal.servings} ración(es) · {formatMoney(meal.cost.imputable, currency)}
+            {meal.servings} ración(es) ·{" "}
+            {hasPrice ? formatMoney(meal.cost.imputable, currency) : "Sin precio"}
           </p>
         </div>
         <button
