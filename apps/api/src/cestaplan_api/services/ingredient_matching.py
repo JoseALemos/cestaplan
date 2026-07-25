@@ -39,6 +39,7 @@ from cestaplan_api.models import (
     ProductPrice,
     Retailer,
 )
+from cestaplan_api.services.open_prices_sync import guard_legacy_provider_writes
 
 #: Minimum confidence for a mapping to be accepted (documented threshold). Every curated
 #: rule below scores at or above this; ambiguous rules sit just above it so a small nudge
@@ -479,7 +480,11 @@ def map_real_products(
     newly-synced products and never duplicates a row. Only matches at or above
     ``min_confidence`` are written, each with its ``confidence_score`` and the product's
     ``retailer_id``. Flushes but does not commit.
+
+    LEGACY path — creates ACTIVE mappings directly. Blocked by default until mappings go through
+    the staging candidate → review → promotion flow (see ``guard_legacy_provider_writes``).
     """
+    guard_legacy_provider_writes()
     summary = MappingSummary()
     index = _load_ingredient_index(db)
     retailer_names: dict[int, str] = {}

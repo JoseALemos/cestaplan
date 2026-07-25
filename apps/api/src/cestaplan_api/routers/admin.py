@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from cestaplan_api.adapters.registry import list_adapters
+from cestaplan_api.config import get_settings
 from cestaplan_api.deps import AdminUser, DbSession, verify_csrf
 from cestaplan_api.models import DataImport, DataSource, Product, Store
 from cestaplan_api.services import (
@@ -37,6 +38,13 @@ from cestaplan_api.services import (
     open_prices_sync,
 )
 from cestaplan_api.services.catalog_readiness import catalog_readiness_report
+
+# Staging-first migration: the legacy sync endpoints wrote productive Product/ProductPrice
+# directly. They are blocked (409) until data flows through staging → review → audited promotion.
+_LEGACY_SYNC_BLOCKED = (
+    "Deshabilitado: la sincronización directa a producción está bloqueada. Los precios deben "
+    "pasar por staging y una promoción explícita y auditada (vía staging-first)."
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -314,6 +322,8 @@ def sync_open_prices(
     per-store summary plus the ODbL attribution. Idempotent + append-only (see the sync
     service); prices are real (``is_synthetic=False``), never fabricated.
     """
+    if not get_settings().legacy_direct_provider_writes_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=_LEGACY_SYNC_BLOCKED)
     if not open_prices_sync.open_prices_enabled(db):
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail="La fuente Open Prices está deshabilitada"
@@ -437,6 +447,8 @@ def sync_all_sources(admin: AdminUser, db: DbSession) -> dict[str, Any]:
     contributes product data, never a price. The opt-in commercial feed (``authorized_partner``)
     is included only when it is enabled + configured. Returns the combined per-chain summary.
     """
+    if not get_settings().legacy_direct_provider_writes_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=_LEGACY_SYNC_BLOCKED)
     result = open_prices_sync.sync_all_and_enrich(db)
     payload = result.to_dict()
     # The authorized-partner feed only participates when explicitly enabled + configured.

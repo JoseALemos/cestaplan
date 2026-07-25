@@ -40,6 +40,7 @@ from cestaplan_api.adapters.openprices import (
     OpenPrice,
     OpenPricesAdapter,
 )
+from cestaplan_api.config import get_settings
 from cestaplan_api.models import (
     DataImport,
     DataSource,
@@ -255,6 +256,22 @@ def _promotion_note(price: OpenPrice) -> str | None:
 # --------------------------------------------------------------------------- #
 # Sync one store
 # --------------------------------------------------------------------------- #
+class LegacyProviderWriteBlocked(RuntimeError):
+    """A legacy direct-productive-write path ran while the staging-first migration is enforced."""
+
+
+def guard_legacy_provider_writes() -> None:
+    """Block the legacy paths that create Product/ProductBarcode/ProductPrice or ACTIVE ingredient
+    mappings DIRECTLY from a provider. Disabled by default
+    (``legacy_direct_provider_writes_enabled`` is False); productive rows must instead come from
+    staging → review → an explicit, audited promotion. Never enabled by default."""
+    if not get_settings().legacy_direct_provider_writes_enabled:
+        raise LegacyProviderWriteBlocked(
+            "Escritura productiva directa de proveedor bloqueada: los datos deben pasar por "
+            "staging y una promoción explícita y auditada (no se escriben Product/ProductPrice)."
+        )
+
+
 def sync_store(
     db: Session,
     store: Store,
@@ -268,7 +285,11 @@ def sync_store(
     observed_at)`` is skipped. Every price written is real (``is_synthetic=False``,
     ``source_type='open_dataset'``), Decimal money, ODbL-attributed and tagged with a
     per-run ``DataImport`` batch. Errors are collected (partial success), never raised.
+
+    LEGACY productive write path — refuses to run unless the explicit (default-off) legacy flag
+    is enabled (see :func:`guard_legacy_provider_writes`).
     """
+    guard_legacy_provider_writes()
     now = now or datetime.now(UTC)
     summary = SyncSummary(store_public_id=str(store.public_id))
 
@@ -397,7 +418,10 @@ def open_prices_stores(db: Session) -> list[Store]:
 def sync_all(
     db: Session, *, adapter: OpenPricesAdapter | None = None
 ) -> list[SyncSummary]:
-    """Sync every Open-Prices-linked store. Returns one :class:`SyncSummary` per store."""
+    """Sync every Open-Prices-linked store. Returns one :class:`SyncSummary` per store.
+
+    LEGACY productive write path — blocked by default (see :func:`guard_legacy_provider_writes`)."""
+    guard_legacy_provider_writes()
     adapter = adapter or OpenPricesAdapter()
     return [sync_store(db, store, adapter=adapter) for store in open_prices_stores(db)]
 
@@ -516,7 +540,10 @@ def sync_all_and_enrich(
     Gated by the ``DataSource.is_enabled`` flags: a disabled Open Prices source skips the sync
     entirely; a disabled Open Food Facts source (or ``enrich=False``) skips enrichment. Prices
     are never taken from OFF. Returns a combined, per-chain :class:`OrchestrationSummary`.
+
+    LEGACY productive write path — blocked by default (see :func:`guard_legacy_provider_writes`).
     """
+    guard_legacy_provider_writes()
     result = OrchestrationSummary()
     result.open_prices_enabled = open_prices_enabled(db)
     result.openfoodfacts_enabled = off_source_enabled(db)
