@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import engine
@@ -28,13 +28,16 @@ from cestaplan_api.models import (
     ProductVariant,
     Retailer,
 )
+from cestaplan_api.services import observation_identity as ident
 from cestaplan_api.services.observation_persistence import (
     OccurrenceProvenance,
     record_price_fact,
 )
+from cestaplan_api.services.price_history_lane import lane_invariants_hold
 
 T0 = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
 T1 = datetime(2026, 7, 26, 8, 0, tzinfo=UTC)
+T2 = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 
 
 def _session() -> Session:
@@ -299,3 +302,178 @@ def test_discovery_matching_writes_no_observations(db_session: Session) -> None:
         or 0
     )
     assert after == before  # matching writes candidates only, never observations
+
+
+# --------------------------------------------------------------------------- #
+# Temporal-history concurrency (spec §6): the history-lane lock must keep the interval chain
+# coherent (predecessor/successor), never two open rows, under real contention.
+# --------------------------------------------------------------------------- #
+def _rpf(s: Session, candidate: PriceObservation):
+    return record_price_fact(
+        s, candidate, OccurrenceProvenance(provider_code="x"), imported_at=T0
+    )
+
+
+def _mk(rid: int, vid: int, *, amount: str, observed_at: datetime):
+    """Factory: a thunk that records a fact for (amount, observed_at). Binds its own values."""
+    return lambda s: _rpf(s, _candidate(rid, vid, amount=amount, observed_at=observed_at))
+
+
+def _write(rid: int, vid: int, *, amount: str, observed_at: datetime) -> None:
+    s = _session()
+    try:
+        _rpf(s, _candidate(rid, vid, amount=amount, observed_at=observed_at))
+        s.commit()
+    finally:
+        s.close()
+
+
+def _active_rows(rid: int) -> list[PriceObservation]:
+    c = _session()
+    try:
+        return list(
+            c.execute(
+                select(PriceObservation)
+                .where(
+                    PriceObservation.retailer_id == rid,
+                    PriceObservation.verification_status != "disputed",
+                    PriceObservation.rolled_back_at.is_(None),
+                )
+                .order_by(PriceObservation.valid_from)
+            ).scalars()
+        )
+    finally:
+        c.close()
+
+
+def _all_rows(rid: int) -> list[PriceObservation]:
+    c = _session()
+    try:
+        return list(
+            c.execute(
+                select(PriceObservation).where(
+                    PriceObservation.retailer_id == rid,
+                    PriceObservation.rolled_back_at.is_(None),
+                )
+            ).scalars()
+        )
+    finally:
+        c.close()
+
+
+# T1: two distinct prices, same date/lane, concurrent -> 2 facts, <=1 open (deterministic policy).
+def test_temporal_same_date_conflict(seeded) -> None:
+    rid, vid, _runs = seeded
+    _run_concurrently([
+        _mk(rid, vid, amount="1.19", observed_at=T0),
+        _mk(rid, vid, amount="1.29", observed_at=T0),
+    ])
+    rows = _all_rows(rid)
+    assert len(rows) == 2  # history keeps both
+    open_active = [
+        r for r in rows if r.verification_status != "disputed" and r.valid_until is None
+    ]
+    assert len(open_active) <= 1
+    # Documented policy B: both are disputed (no arbitrary current), an anomaly each.
+    assert all(r.verification_status == "disputed" for r in rows)
+    assert lane_invariants_hold(rows)
+
+
+# T2: two time points concurrent -> T0.valid_until = T1, T1 open.
+def test_temporal_two_points_interval_chain(seeded) -> None:
+    rid, vid, _runs = seeded
+    _run_concurrently([
+        _mk(rid, vid, amount="1.19", observed_at=T0),
+        _mk(rid, vid, amount="1.29", observed_at=T1),
+    ])
+    rows = _active_rows(rid)
+    assert len(rows) == 2
+    by_from = {r.valid_from: r for r in rows}
+    assert by_from[T0].valid_until == T1
+    assert by_from[T1].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# T3: out-of-order arrival -> insert T1 first, then T0 -> T0.valid_until = T1, T1 stays open.
+def test_temporal_out_of_order_slots_between(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.29", observed_at=T1)  # later point first
+    _write(rid, vid, amount="1.19", observed_at=T0)  # earlier point after
+    rows = _active_rows(rid)
+    by_from = {r.valid_from: r for r in rows}
+    assert by_from[T0].valid_until == T1
+    assert by_from[T1].valid_until is None  # T1 remains the only open row
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# T4: three points T0/T1/T2 concurrent (random order) -> intervals T0->T1, T1->T2, T2->null.
+def test_temporal_three_points_random_concurrent(seeded) -> None:
+    rid, vid, _runs = seeded
+    _run_concurrently([
+        _mk(rid, vid, amount="1.19", observed_at=T0),
+        _mk(rid, vid, amount="1.29", observed_at=T1),
+        _mk(rid, vid, amount="1.39", observed_at=T2),
+    ])
+    rows = _active_rows(rid)
+    assert len(rows) == 3
+    by_from = {r.valid_from: r for r in rows}
+    assert by_from[T0].valid_until == T1
+    assert by_from[T1].valid_until == T2
+    assert by_from[T2].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# T5: ten writers mixing three facts -> exactly 3 facts, <=1 open, occurrences per unique identity.
+def test_temporal_ten_writers_three_facts(seeded) -> None:
+    rid, vid, _runs = seeded
+    specs = [("1.19", T0), ("1.29", T1), ("1.39", T2)]
+    fns = [_mk(rid, vid, amount=a, observed_at=t) for (a, t) in (specs[i % 3] for i in range(10))]
+    _run_concurrently(fns)
+    rows = _active_rows(rid)
+    assert len(rows) == 3  # exactly three distinct facts
+    assert sum(1 for r in rows if r.valid_until is None) <= 1
+    assert _counts(rid) == (3, 3)  # 3 facts, 3 occurrences (same provenance identity)
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# T7: rollback while holding the lane lock releases it; the next writer reconstructs a valid chain.
+def test_temporal_rollback_holding_lane_lock_then_reconstruct(seeded) -> None:
+    rid, vid, _runs = seeded
+    a = _session()
+    try:
+        _rpf(a, _candidate(rid, vid, amount="1.19", observed_at=T0))
+        a.rollback()
+    finally:
+        a.close()
+    assert _counts(rid) == (0, 0)
+    _write(rid, vid, amount="1.19", observed_at=T0)
+    _write(rid, vid, amount="1.29", observed_at=T1)
+    rows = _active_rows(rid)
+    by_from = {r.valid_from: r for r in rows}
+    assert by_from[T0].valid_until == T1 and by_from[T1].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# T8: lane-lock timeout -> explicit error, zero partial writes.
+def test_temporal_lane_lock_timeout_no_partial_write(seeded) -> None:
+    rid, vid, _runs = seeded
+    key = ident.price_history_lane_lock_key(
+        _candidate(rid, vid, amount="1.19", observed_at=T0)
+    )
+    holder = _session()
+    try:
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})  # hold the lane lock
+        b = _session()
+        try:
+            with pytest.raises(Exception):  # noqa: B017 - lock_not_available surfaces
+                record_price_fact(
+                    b, _candidate(rid, vid, amount="1.19", observed_at=T0),
+                    OccurrenceProvenance(provider_code="x"), imported_at=T0, lock_timeout_ms=200,
+                )
+            b.rollback()
+        finally:
+            b.close()
+    finally:
+        holder.rollback()
+        holder.close()
+    assert _counts(rid) == (0, 0)  # nothing written
