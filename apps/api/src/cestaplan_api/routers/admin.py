@@ -20,6 +20,7 @@ from fastapi import (
     Form,
     HTTPException,
     Request,
+    Response,
     UploadFile,
     status,
 )
@@ -50,8 +51,13 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 
 @router.get("/planner-readiness")
-def planner_readiness(user: AdminUser, db: DbSession) -> dict[str, Any]:
-    """Catalog-readiness snapshot for the planner (admin-only). Read-only; invents nothing."""
+def planner_readiness(user: AdminUser, db: DbSession, response: Response) -> dict[str, Any]:
+    """Catalog-readiness snapshot for the planner (admin-only). Read-only; invents nothing.
+
+    ``no-store`` so no browser/proxy/Next layer ever serves a stale snapshot as current; the payload
+    carries ``fetched_at`` for the same reason.
+    """
+    response.headers["Cache-Control"] = "no-store"
     return catalog_readiness_report(db)
 
 

@@ -6,6 +6,7 @@ import { formatDateTime } from "@/lib/utils/format";
 
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { BadgeTone } from "@/components/ui/Badge";
@@ -69,7 +70,19 @@ export default function AdminReadinessPage() {
                   Última sincronización:{" "}
                   {readiness.last_sync_at ? formatDateTime(readiness.last_sync_at) : "Nunca"}
                 </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto"
+                  loading={readinessQuery.isFetching}
+                  onClick={() => readinessQuery.refetch()}
+                >
+                  Actualizar
+                </Button>
               </div>
+              <p className="text-xs text-ink-muted">
+                Datos a fecha: {formatDateTime(readiness.fetched_at)}
+              </p>
 
               {readiness.blockers.length > 0 ? (
                 <div className="flex flex-col gap-1.5">
