@@ -155,7 +155,7 @@ def supersede_v1_candidates(
     *,
     current_version: str = "2.0.0",
     now: datetime | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     """A.2: supersede stale v1 candidate mappings replaced by the v2 product-first discovery.
 
     Scoped to ``provider_code`` when given (a provider supersedes only its OWN v1 candidates when it

@@ -34,7 +34,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Numeric, select
+from sqlalchemy import Boolean, DateTime, Numeric, select, update
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import SessionLocal
@@ -476,7 +476,7 @@ def restore_manifest(db: Session, manifest_id: str, *, commit: bool) -> dict[str
         # Move relinked occurrences back onto the restored row.
         for occ in r.get("occurrences_relinked", []):
             db.execute(
-                PriceObservationOccurrence.__table__.update()
+                update(PriceObservationOccurrence)
                 .where(PriceObservationOccurrence.id == occ["id"])
                 .values(price_observation_id=occ["original_observation_id"])
             )
