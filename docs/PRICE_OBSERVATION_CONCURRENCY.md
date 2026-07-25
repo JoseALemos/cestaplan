@@ -24,34 +24,72 @@ unlisted writer appears.
 **Invariant:** any *staging* observation MUST be written through `record_price_fact`. A bare
 `db.add(PriceObservation(...))` for a staging row is a bug the guard test is designed to catch.
 
-## Concurrency: transactional advisory locks
+## Concurrency: transactional advisory locks on the history lane
 
-`record_price_fact` removes the search-then-insert race with two PostgreSQL transactional advisory
-locks (`pg_advisory_xact_lock`), acquired in a **fixed order to avoid deadlocks**:
+A per-*fact* lock is not enough: two DIFFERENT facts on the same product line (e.g. 1.19 € then
+1.29 €) have different fact fingerprints, so they would run in parallel, both close the same prior
+open row, and both insert a new `valid_until=NULL` row — **two open rows** for one line. The unit of
+serialization must be the **history lane**, not the fact.
 
-1. **Fact lock** — key derived from `price_fact_fingerprint`. Acquired first, then the fact is
-   re-searched *under the lock* and created only if still absent.
-2. **Occurrence lock** — key derived from the occurrence fingerprint (which includes the now-known
-   `price_observation_id`). Acquired second, then the occurrence is re-searched and created only if
-   still absent.
+`record_price_fact` therefore takes two `pg_advisory_xact_lock`s in a **fixed order to avoid
+deadlocks**:
 
-Both locks release automatically at `COMMIT`/`ROLLBACK`. Two writers of the same fact serialize; a
-rollback frees the lock so the next writer proceeds and finds/creates a single clean row.
+1. **History-lane lock** — key from `price_history_lane_fingerprint` (the shared `LANE_FIELDS`).
+   Acquired first. Under it, the exact fact is re-searched (reused if present) and, if new, placed
+   into the lane's interval chain before insertion. The lane lock **replaces** a separate fact lock:
+   two identical facts necessarily share a lane, so it already serializes their search/create.
+2. **Occurrence lock** — key from the occurrence fingerprint (includes the now-known
+   `price_observation_id`). Acquired second; the occurrence is re-searched and created only if absent.
+
+No writer ever takes the occurrence lock before the lane lock, so the fixed order cannot deadlock.
+Both release at `COMMIT`/`ROLLBACK`. No decisive lane read happens before the lane lock is held.
+
+### Coherent temporal intervals (predecessor / successor)
+
+Under the lane lock, a new fact at `observed_at = T` is placed by its true neighbours, not merely by
+"the currently open row":
+
+- **predecessor** = active row with the greatest `valid_from <= T`;
+- **successor** = active row with the least `valid_from > T`;
+- `candidate.valid_from = T`; `candidate.valid_until = successor.valid_from` (or `NULL` if none);
+- `predecessor.valid_until = T`.
+
+So an **out-of-order** arrival slots *between* its neighbours instead of opening a second current
+row, and there is at most one open (`valid_until IS NULL`) active row per lane.
+
+### Same-timestamp policy (two distinct facts at the same instant)
+
+If a DIFFERENT fact already sits at exactly `T` in the lane, that is a genuine conflict — which price
+was really current at `T`? Policy (chosen, documented, deterministic): **history keeps both facts**,
+but every same-`T` fact (the newcomer and any still-active sibling) is marked `disputed` with an
+empty `[T, T]` interval — never a "current" price — and flagged with a `same_timestamp_conflict`
+`PriceAnomaly`. The lane then has **no** current price at/after `T` until review. This is independent
+of arrival order and never silently picks a row by id or by who arrived first; the current-price
+projection is blocked rather than arbitrary.
 
 ### Lock-key derivation
 
 Keys are deterministic **signed 64-bit** integers taken from the SHA-256 fingerprint bytes
-(`observation_identity.signed_bigint`). Python's built-in `hash()` is **never** used — its per-process
-salt would make two writers compute different keys and defeat the lock.
+(`observation_identity.signed_bigint`). Python's built-in `hash()` is **never** used — its
+per-process salt would make two writers compute different keys and defeat the lock.
 
 ### Timeout and diagnostics
 
-Each transaction runs `SET LOCAL lock_timeout`; a stuck writer therefore raises
-`lock_not_available` instead of waiting forever. `record_price_fact` returns sanitized
-`LockDiagnostics` (`fact_lock_acquired`, `occurrence_lock_acquired`, `lock_wait_ms`,
-`fact_reused_after_lock`, `occurrence_reused_after_lock`) and the run-level `RecordMetrics` aggregate
-them. Diagnostics contain only lock keys (non-reversible hashes) and timings — never payloads, URLs
-or secrets.
+Each transaction runs `SET LOCAL lock_timeout`; a stuck writer therefore raises `lock_not_available`
+instead of waiting forever. `record_price_fact` returns sanitized `LockDiagnostics`
+(`lane_lock_acquired`, `lane_lock_wait_ms`, `occurrence_lock_acquired`, `lock_wait_ms`,
+`fact_reused_after_lane_lock`, `occurrence_reused_after_lock`, `temporal_predecessor_found`,
+`temporal_successor_found`, `out_of_order_insert`, `same_timestamp_conflict`) and the run-level
+`RecordMetrics` aggregate them. Diagnostics contain only lock keys (non-reversible hashes) and
+timings — never payloads, prices, URLs or secrets.
+
+### History-lane invariants & read-only auditor
+
+`services/price_history_lane.lane_invariant_report` / `lane_invariants_hold` check, per lane: at most
+one open row, no overlapping intervals, `valid_from < valid_until` when not null, no repeated
+`valid_from`, and disputed rows empty. `tools/audit_price_history_lanes` is a strictly **read-only**
+CLI that runs the checker over existing data (optionally by provider/staging) and prints only counts
+— for quantifying anomalies in production before any future change.
 
 ## Occurrence identity & NULL semantics
 
