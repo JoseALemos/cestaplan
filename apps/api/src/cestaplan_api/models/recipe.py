@@ -33,6 +33,11 @@ if TYPE_CHECKING:
     from cestaplan_api.models.catalog import Ingredient
 
 RECIPE_ORIGIN = ("seed", "ai_generated", "user", "imported")
+# Provenance / verification vocabularies (documented Text sets; not a DB enum so new values don't
+# need a migration). An AI-estimated quantity is NEVER "verified" — it stays pending_review until a
+# human reviews it.
+RECIPE_VERIFICATION_STATUS = ("pending_review", "verified", "rejected")
+QUANTITY_SOURCE = ("source_original", "ai_estimated", "manually_verified")
 
 
 class Recipe(BaseModel):
@@ -66,6 +71,16 @@ class Recipe(BaseModel):
     storage_instructions: Mapped[str | None] = mapped_column(Text)
     reheating_instructions: Mapped[str | None] = mapped_column(Text)
     generated_by: Mapped[str | None] = mapped_column(Text)
+    # --- Provenance / verification (additive; never overwrites recipe content) --- #
+    source_dataset: Mapped[str | None] = mapped_column(Text)
+    source_reference: Mapped[str | None] = mapped_column(Text)
+    source_license: Mapped[str | None] = mapped_column(Text)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # pending_review | verified | rejected — null for recipes that need no review (seed/user).
+    verification_status: Mapped[str | None] = mapped_column(Text)
+    # LLM used to derive/estimate structure, when any (never implies the data is verified).
+    estimation_model: Mapped[str | None] = mapped_column(Text)
+    estimation_prompt_version: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     ingredients: Mapped[list[RecipeIngredient]] = relationship(
@@ -96,6 +111,12 @@ class RecipeIngredient(BaseModel):
         Boolean, nullable=False, server_default=text("false")
     )
     substitution_group: Mapped[str | None] = mapped_column(Text)
+    # --- Quantity provenance (additive; the quantity value itself is never overwritten) --- #
+    # source_original | ai_estimated | manually_verified. Imported belenarbizu quantities are
+    # ai_estimated (the dataset carried no quantities), so they are NEVER presented as verified.
+    quantity_source: Mapped[str | None] = mapped_column(Text)
+    quantity_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    verification_status: Mapped[str | None] = mapped_column(Text)
 
     recipe: Mapped[Recipe] = relationship(back_populates="ingredients")
     ingredient: Mapped[Ingredient] = relationship(back_populates="recipe_ingredients")

@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     price_sync_max_concurrency: int = 2
     # Safeguards (FASE 2A, spec §O/§R/§S). A threshold <= 0 disables that particular check.
     price_provider_kill_switch: bool = False  # §S: hard stop for all external providers
+    # Staging-first migration: the legacy Open Prices path wrote Product/ProductBarcode/
+    # ProductPrice and ACTIVE ingredient mappings directly. Those direct productive writes are
+    # BLOCKED by default (False) until data goes through the staging → review → explicit,
+    # audited promotion path. Never flip this on by default.
+    legacy_direct_provider_writes_enabled: bool = False
     provider_require_rights_approval: bool = True  # §O: block prod sync without rights approval
     price_provider_max_daily_cost_eur: float = 0.0  # §S: 0 = per-provider caps only
     price_provider_max_daily_requests: int = 0
