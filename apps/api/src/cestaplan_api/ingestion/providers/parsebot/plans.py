@@ -106,12 +106,43 @@ _PLANS: dict[str, tuple[str, CaptureFn]] = {
 }
 
 
+_ENABLED_ATTRS: dict[str, str] = {
+    "parsebot-dia": "parse_bot_dia_enabled",
+    "parsebot-alcampo": "parse_bot_alcampo_enabled",
+    "parsebot-carrefour": "parse_bot_carrefour_enabled",
+    "parsebot-aldi": "parse_bot_aldi_enabled",
+    "parsebot-lidl": "parse_bot_lidl_enabled",
+    "parsebot-deza": "parse_bot_deza_enabled",
+}
+
+
 def has_plan(provider_code: str) -> bool:
     return provider_code in _PLANS
 
 
 def base_url_attr(provider_code: str) -> str:
     return _PLANS[provider_code][0]
+
+
+def enabled_attr(provider_code: str) -> str:
+    return _ENABLED_ATTRS[provider_code]
+
+
+def is_configured(provider_code: str, settings: Settings) -> bool:
+    """Whether a chain may reach the network: globally + per-chain enabled AND key + base URL set.
+
+    A present base URL with the per-chain flag OFF never enables network access; a flag ON with no
+    base URL (or no key) stays blocked. This is the single gate every network path consults.
+    """
+    if provider_code not in _PLANS:
+        return False
+    if not settings.parse_bot_enabled:
+        return False
+    if not getattr(settings, _ENABLED_ATTRS[provider_code], False):
+        return False
+    if not settings.parse_bot_api_key:
+        return False
+    return bool(getattr(settings, _PLANS[provider_code][0], "") or "")
 
 
 def capture_records(
@@ -126,6 +157,11 @@ def capture_records(
     if provider_code not in _PLANS:
         raise ValueError(f"no capture plan for {provider_code!r}")
     attr, fn = _PLANS[provider_code]
+    # Enable gate FIRST: a disabled chain never builds a client or touches the network, even with a
+    # base URL present.
+    chain_enabled = getattr(settings, _ENABLED_ATTRS[provider_code], False)
+    if not settings.parse_bot_enabled or not chain_enabled:
+        raise RuntimeError(f"{provider_code} está deshabilitado (flag enabled off)")
     base = getattr(settings, attr, "") or ""
     if not settings.parse_bot_api_key:
         raise RuntimeError("PARSE_BOT_API_KEY no está configurada")
@@ -141,4 +177,4 @@ def capture_records(
     return fn(cli, limit=min(limit, 10), query=query, postal=postal)
 
 
-__all__ = ["base_url_attr", "capture_records", "has_plan"]
+__all__ = ["base_url_attr", "capture_records", "enabled_attr", "has_plan", "is_configured"]

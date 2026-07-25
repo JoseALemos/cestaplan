@@ -37,6 +37,7 @@ from cestaplan_api.ingestion.providers.contracts import (
     SellUnit,
 )
 from cestaplan_api.ingestion.providers.exceptions import NotSupportedError, ProviderError
+from cestaplan_api.ingestion.providers.parsebot import plans
 from cestaplan_api.ingestion.providers.parsebot.client import ParseBotClient
 from cestaplan_api.ingestion.providers.parsebot.schemas import ParseBotDiaPrices, ParseBotDiaProduct
 from cestaplan_api.ingestion.providers.schema_tools import merge_samples, schema_fingerprint
@@ -200,7 +201,7 @@ class ParseBotDiaProvider(PriceCatalogProvider):
         self._query = query
         if client is not None:
             self._client: ParseBotClient | None = client
-        elif s.parse_bot_api_key and s.parse_bot_dia_base_url:
+        elif plans.is_configured("parsebot-dia", s):
             self._client = ParseBotClient(
                 base_url=s.parse_bot_dia_base_url,
                 api_key=s.parse_bot_api_key,

@@ -263,7 +263,12 @@ def test_aldi_plan_extracts_offers_envelope_and_maps() -> None:
         api_key="k",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    settings = Settings(parse_bot_api_key="k", parse_bot_aldi_base_url="https://x/scraper/aldi")
+    settings = Settings(
+        parse_bot_enabled=True,
+        parse_bot_aldi_enabled=True,
+        parse_bot_api_key="k",
+        parse_bot_aldi_base_url="https://x/scraper/aldi",
+    )
     records = plans.capture_records("parsebot-aldi", settings, limit=10, client=client)
     products = ParseBotAldiMapper().map_products(records, retrieved_at=_NOW)
     assert len(products) == len(offers)

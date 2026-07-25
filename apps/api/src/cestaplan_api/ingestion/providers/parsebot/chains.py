@@ -559,8 +559,9 @@ class _ParseBotChainProvider(PriceCatalogProvider):
         )
 
     def _configured(self) -> bool:
-        base = getattr(self._settings, plans.base_url_attr(self.provider_code), "")
-        return bool(self._settings.parse_bot_api_key and base)
+        # Single gate: global + per-chain enabled AND key + base URL. A present base URL with the
+        # flag off never counts as configured, so no network path opens.
+        return plans.is_configured(self.provider_code, self._settings)
 
     def health_check(self) -> HealthStatus:
         if not self._configured():
