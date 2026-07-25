@@ -164,6 +164,9 @@ class Settings(BaseSettings):
     # audited promotion path. Never flip this on by default.
     legacy_direct_provider_writes_enabled: bool = False
     provider_require_rights_approval: bool = True  # §O: block prod sync without rights approval
+    # Candidate discovery is review-only by default. Deterministic auto-approval is NEVER permitted
+    # in a cloud deployment unless an operator explicitly turns this on.
+    allow_deterministic_autoapproval: bool = False
     price_provider_max_daily_cost_eur: float = 0.0  # §S: 0 = per-provider caps only
     price_provider_max_daily_requests: int = 0
     price_provider_max_products_per_run: int = 1000

@@ -962,3 +962,9 @@ class ProviderIngredientMapping(BaseModel):
     provider_endpoint: Mapped[str | None] = mapped_column(Text)
     enrichment_error_category: Mapped[str | None] = mapped_column(Text)
     evidence_json: Mapped[dict | None] = mapped_column(JSONB)
+    # Review-only discovery records the machine's ORIGINAL proposal here while ``mapping_status`` is
+    # forced to ``candidate`` (never auto-approved). Human review promotes from these; the proposal
+    # is retained for audit even if a reviewer later changes ``mapping_status``.
+    proposed_mapping_status: Mapped[str | None] = mapped_column(Text)
+    proposed_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    proposed_method: Mapped[str | None] = mapped_column(Text)

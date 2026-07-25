@@ -82,7 +82,10 @@ def _by_ext(db: Session, ext: str) -> ProviderIngredientMapping | None:
 def test_discovery_auto_approves_only_the_compatible_fruit(
     db_session: Session, _no_network: None
 ) -> None:
-    td.discover_and_map(db_session, "parsebot-alcampo", ["platano"], max_calls=1, now=_NOW)
+    td.discover_and_map(
+        db_session, "parsebot-alcampo", ["platano"], max_calls=1, now=_NOW,
+        approval_mode=td.ApprovalMode.DETERMINISTIC_AUTOAPPROVAL,
+    )
 
     canarias = _by_ext(db_session, "OFF-CANARIAS")
     assert canarias is not None and canarias.active is True
