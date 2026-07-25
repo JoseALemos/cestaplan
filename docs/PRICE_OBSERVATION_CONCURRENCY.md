@@ -1,0 +1,88 @@
+# Price-observation persistence: staging writers & concurrency guarantees
+
+This document describes how the two-layer price model (`PriceObservation` = the economic fact,
+`PriceObservationOccurrence` = each occasion a provider/crawl/parser confirmed it) is written safely
+under concurrency, and which code paths are allowed to write it.
+
+## Writers and their classification
+
+Every place that constructs a `PriceObservation` or `PriceObservationOccurrence` is classified, and
+an AST guard test (`tests/ingestion/test_writer_architecture_guard.py`) fails the build if a new,
+unlisted writer appears.
+
+| Writer | Class | Rule |
+| --- | --- | --- |
+| `services/observation_persistence.record_price_fact` | **canonical** | The one serialized entry point. All staging writes go through it. |
+| `services/provider_sync` (staging branch) | staging | Builds a candidate and calls `record_price_fact`. |
+| `services/targeted_discovery._persist_product` | staging | Builds a candidate and calls `record_price_fact` (ingests once per unique product). |
+| `services/provider_sync` (production branch) | production append-only | Deliberate append-only current-price history — out of scope for the concurrency work. |
+| `ingestion/price_history.record_observation` | production append-only | The FASE-A pipeline recorder (orchestration, manual entry). |
+| `ingestion/licensed_catalog._append_observation` | production append-only | Licensed-catalog import. |
+| `tools/dedup_staging_observations` | recovery | Exact-restore reconstruction / occurrence relink, run under controlled admin conditions. |
+| `tools/backfill_observation_occurrences` | one-time additive | Backfills one occurrence per historical observation; serial and controlled. |
+
+**Invariant:** any *staging* observation MUST be written through `record_price_fact`. A bare
+`db.add(PriceObservation(...))` for a staging row is a bug the guard test is designed to catch.
+
+## Concurrency: transactional advisory locks
+
+`record_price_fact` removes the search-then-insert race with two PostgreSQL transactional advisory
+locks (`pg_advisory_xact_lock`), acquired in a **fixed order to avoid deadlocks**:
+
+1. **Fact lock** — key derived from `price_fact_fingerprint`. Acquired first, then the fact is
+   re-searched *under the lock* and created only if still absent.
+2. **Occurrence lock** — key derived from the occurrence fingerprint (which includes the now-known
+   `price_observation_id`). Acquired second, then the occurrence is re-searched and created only if
+   still absent.
+
+Both locks release automatically at `COMMIT`/`ROLLBACK`. Two writers of the same fact serialize; a
+rollback frees the lock so the next writer proceeds and finds/creates a single clean row.
+
+### Lock-key derivation
+
+Keys are deterministic **signed 64-bit** integers taken from the SHA-256 fingerprint bytes
+(`observation_identity.signed_bigint`). Python's built-in `hash()` is **never** used — its per-process
+salt would make two writers compute different keys and defeat the lock.
+
+### Timeout and diagnostics
+
+Each transaction runs `SET LOCAL lock_timeout`; a stuck writer therefore raises
+`lock_not_available` instead of waiting forever. `record_price_fact` returns sanitized
+`LockDiagnostics` (`fact_lock_acquired`, `occurrence_lock_acquired`, `lock_wait_ms`,
+`fact_reused_after_lock`, `occurrence_reused_after_lock`) and the run-level `RecordMetrics` aggregate
+them. Diagnostics contain only lock keys (non-reversible hashes) and timings — never payloads, URLs
+or secrets.
+
+## Occurrence identity & NULL semantics
+
+The occurrence identity (`observation_identity.OCCURRENCE_IDENTITY_FIELDS`) is:
+
+`price_observation_id, provider_code, source_id, crawl_run_id, raw_capture_id, connector_version,
+parser_version`
+
+`imported_at` is deliberately **not** part of it (it is when *we* recorded the occurrence).
+
+**NULL semantics:** a missing field equals another missing field. The fingerprint serializes `None`
+to a single canonical token, so two occurrences with the same non-null values **and** the same NULLs
+are the SAME occurrence (reused). A different crawl/parser/capture/source yields a different
+fingerprint and therefore a new occurrence. This matters because ~204 historical Carrefour
+occurrences have ambiguous (all-NULL) provenance and must still compare equal to one another.
+
+## Why there is no UNIQUE index (yet)
+
+A blind `UNIQUE` constraint on the occurrence identity is intentionally **not** added in this change:
+
+- historical duplicate *facts* exist (49 groups / 145 rows for Carrefour) and are kept as evidence;
+- several identity fields are nullable, and standard SQL treats `NULL`s as distinct — the opposite of
+  our intended semantics;
+- ~204 occurrences carry ambiguous, all-NULL provenance;
+- `NULLS NOT DISTINCT` (PostgreSQL 15+) changes uniqueness semantics and must be analyzed on its own.
+
+The correctness guarantee in this change is the **transactional serialization** above.
+
+### Optional future migration (not implemented here)
+
+A later, separately-reviewed migration could add a persistent `fact_fingerprint` /
+`occurrence_fingerprint` column (NULL-safe, computed from the shared identity) plus a `UNIQUE` index
+as defence-in-depth. It must be designed only after resolving the NULL semantics and reconciling the
+historical duplicate facts — never added blindly.
