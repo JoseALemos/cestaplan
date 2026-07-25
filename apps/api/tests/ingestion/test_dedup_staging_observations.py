@@ -44,9 +44,13 @@ _EXPECTED_COLUMNS = {
 
 def test_column_classification_is_complete_and_conscious() -> None:
     assert set(ident.all_columns()) == _EXPECTED_COLUMNS  # fails when a column is added/removed
-    assert set(ident.all_columns()) >= ident.TECHNICAL_FIELDS
-    # No technical field leaks into the fact identity.
-    assert not (set(ident.semantic_columns()) & ident.TECHNICAL_FIELDS)
+    # Every column is CONSCIOUSLY classified as fact-identity or explicitly excluded.
+    assert ident.unclassified_columns() == ()
+    assert set(ident.FACT_FIELDS) | set(ident.EXCLUDED_FIELDS) == set(ident.all_columns())
+    assert not (set(ident.FACT_FIELDS) & set(ident.EXCLUDED_FIELDS))
+    # Provenance/run artefacts are NOT part of the fact identity (two-layer model).
+    for prov in ("crawl_run_id", "raw_capture_id", "connector_version", "parser_version"):
+        assert prov in ident.EXCLUDED_FIELDS and prov not in ident.FACT_FIELDS
 
 
 def _obs(db, rid, vid, run_id, *, amount, observed_at, store=None, imp=T0):
