@@ -108,7 +108,10 @@ def _discover_one(
     )
     pid, _vid = td._persist_product(db, rid, product, now=_NOW)
     active = cand.mapping_status == "auto_approved"
-    td._upsert_mapping(db, _E2E, _E2E, ing_pk, key, product, pid, cand, active=active, now=_NOW)
+    td._upsert_mapping(
+        db, _E2E, _E2E, ing_pk, key, product, pid, cand, active=active, now=_NOW,
+        approval_mode=td.ApprovalMode.DETERMINISTIC_AUTOAPPROVAL,
+    )
     return db.execute(
         select(ProviderIngredientMapping).where(
             ProviderIngredientMapping.provider_code == _E2E,
