@@ -25,6 +25,7 @@ from cestaplan_api.models import (
 )
 from cestaplan_api.services import mapping_enrichment as enrich_svc
 from cestaplan_api.services import mapping_review as mr
+from cestaplan_api.services import observation_metrics as obs_metrics
 
 router = APIRouter(prefix="/api/v1/admin/ingredient-product-mappings", tags=["admin"])
 
@@ -227,9 +228,14 @@ def enrich(mapping_id: int, admin: AdminUser, db: DbSession) -> dict[str, Any]:
 
 @router.get("/summary/{provider_code}")
 def summary(provider_code: str, admin: AdminUser, db: DbSession) -> dict[str, Any]:
-    """Review summary + explosion state + enrichment budget for the admin dashboard."""
+    """Review summary + explosion state + enrichment budget for the admin dashboard.
+
+    ``price_observations`` carries the two-layer A.3 metrics (unique price facts vs provenance
+    occurrences) so the panel never presents repeated confirmations of one fact as different prices.
+    """
     return {
         **mr.candidate_metrics(db, provider_code),
+        "price_observations": obs_metrics.observation_metrics(db, provider_code),
         "enrichment_budget": enrich_svc.enrichment_budget_state(db, provider_code),
         "review_notice": _REVIEW_NOTICE,
     }
