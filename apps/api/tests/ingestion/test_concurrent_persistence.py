@@ -22,6 +22,7 @@ from cestaplan_api.db import engine
 from cestaplan_api.models import (
     CrawlRun,
     ExternalProduct,
+    PriceAnomaly,
     PriceObservation,
     PriceObservationOccurrence,
     ProductVariant,
@@ -77,6 +78,9 @@ def seeded():
                     delete(PriceObservationOccurrence).where(
                         PriceObservationOccurrence.price_observation_id.in_(obs_ids)
                     )
+                )
+                c.execute(
+                    delete(PriceAnomaly).where(PriceAnomaly.price_observation_id.in_(obs_ids))
                 )
             c.execute(delete(PriceObservation).where(PriceObservation.retailer_id == rid))
             c.execute(delete(ProductVariant).where(ProductVariant.retailer_id == rid))

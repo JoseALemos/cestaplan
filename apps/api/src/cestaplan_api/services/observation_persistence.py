@@ -27,7 +27,7 @@ from decimal import Decimal
 from sqlalchemy import and_, select, text
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import PriceObservation, PriceObservationOccurrence
+from cestaplan_api.models import PriceAnomaly, PriceObservation, PriceObservationOccurrence
 from cestaplan_api.services import observation_identity as ident
 
 _LOG = logging.getLogger("cestaplan.observation_persistence")
@@ -35,6 +35,10 @@ _LOG = logging.getLogger("cestaplan.observation_persistence")
 # Bound every lock wait so a stuck writer can never hang the transaction indefinitely; on timeout
 # PostgreSQL raises ``lock_not_available`` (surfaced, not silently swallowed).
 _DEFAULT_LOCK_TIMEOUT_MS = 5000
+
+# A same-timestamp conflict marks its facts disputed (never a current price) — see §7 policy below.
+_DISPUTED = "disputed"
+_SAME_TIMESTAMP_CONFLICT = "same_timestamp_conflict"
 
 # The occurrence-identity fields come from the SHARED definition: replaying the same tuple must not
 # create a duplicate occurrence.
@@ -62,10 +66,12 @@ class RecordMetrics:
     observations_reused: int = 0
     occurrences_created: int = 0
     occurrences_reused: int = 0
-    # Concurrency diagnostics (spec §6): how much serialization actually happened.
+    # Concurrency + temporal diagnostics (spec §6/§8): how much serialization/history work happened.
     total_lock_wait_ms: int = 0
-    facts_reused_after_lock: int = 0
+    facts_reused_after_lane_lock: int = 0
     occurrences_reused_after_lock: int = 0
+    out_of_order_inserts: int = 0
+    same_timestamp_conflicts: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -74,8 +80,10 @@ class RecordMetrics:
             "occurrences_created": self.occurrences_created,
             "occurrences_reused": self.occurrences_reused,
             "total_lock_wait_ms": self.total_lock_wait_ms,
-            "facts_reused_after_lock": self.facts_reused_after_lock,
+            "facts_reused_after_lane_lock": self.facts_reused_after_lane_lock,
             "occurrences_reused_after_lock": self.occurrences_reused_after_lock,
+            "out_of_order_inserts": self.out_of_order_inserts,
+            "same_timestamp_conflicts": self.same_timestamp_conflicts,
         }
 
 
@@ -102,13 +110,18 @@ class LockDiagnostics:
     Never carries payloads, URLs or secrets. Lock keys are non-reversible fingerprints.
     """
 
-    fact_lock_key: int
+    lane_lock_key: int
     occurrence_lock_key: int | None = None
-    fact_lock_acquired: bool = False
+    lane_lock_acquired: bool = False
     occurrence_lock_acquired: bool = False
+    lane_lock_wait_ms: int = 0
     lock_wait_ms: int = 0
-    fact_reused_after_lock: bool = False
+    fact_reused_after_lane_lock: bool = False
     occurrence_reused_after_lock: bool = False
+    temporal_predecessor_found: bool = False
+    temporal_successor_found: bool = False
+    out_of_order_insert: bool = False
+    same_timestamp_conflict: bool = False
 
 
 @dataclass(slots=True)
@@ -159,30 +172,83 @@ def _find_existing_fact(
     return None
 
 
-def _close_prior_open_row(
-    db: Session, candidate: PriceObservation, *, closed_by_run_id: int | None
+def _lane_conditions(candidate: PriceObservation) -> list:
+    """SQL conditions selecting the candidate's history lane (the shared LANE_FIELDS)."""
+    return [_eq(getattr(PriceObservation, f), getattr(candidate, f)) for f in ident.LANE_FIELDS]
+
+
+def _active_lane_rows(db: Session, candidate: PriceObservation) -> list[PriceObservation]:
+    """Lane interval-chain rows: same lane, not rolled back, not disputed."""
+    conds = _lane_conditions(candidate)
+    conds.append(PriceObservation.rolled_back_at.is_(None))
+    conds.append(PriceObservation.verification_status != _DISPUTED)
+    return list(
+        db.execute(select(PriceObservation).where(and_(*conds))).scalars()
+    )
+
+
+def _add_conflict_anomaly(db: Session, observation_id: int) -> None:
+    db.add(
+        PriceAnomaly(
+            price_observation_id=observation_id,
+            anomaly_type=_SAME_TIMESTAMP_CONFLICT,
+            severity="high",
+        )
+    )
+    db.flush()
+
+
+def _place_in_temporal_sequence(
+    db: Session, candidate: PriceObservation, *, closed_by_run_id: int | None, diag: LockDiagnostics
 ) -> None:
-    """Append-only history: close the current open row for the same (variant, store, scope) whose
-    validity started at or before this observation, so a genuinely new fact supersedes it."""
-    prior = (
-        db.execute(
-            select(PriceObservation)
-            .where(
-                PriceObservation.product_variant_id == candidate.product_variant_id,
-                _eq(PriceObservation.store_id, candidate.store_id),
-                PriceObservation.price_scope == candidate.price_scope,
-                PriceObservation.staging_only.is_(candidate.staging_only),
-                PriceObservation.valid_until.is_(None),
+    """Insert ``candidate`` into its lane's interval chain by observed_at ``T`` (spec §4/§7).
+
+    Called ONLY under the lane lock, so the read + placement is atomic per lane. Sets the
+    candidate's ``valid_from``/``valid_until`` from its true predecessor/successor (not merely
+    "the open row") so out-of-order arrivals slot between neighbours and never leave two open rows.
+
+    Same-timestamp conflict (§7, policy B): if a DIFFERENT fact already sits at exactly ``T`` in
+    this lane, every same-``T`` fact — the newcomer and any still-active sibling — is marked
+    ``disputed`` with an empty ``[T, T]`` interval (never a "current" price) and flagged with an
+    anomaly. The lane then has no current price at/after ``T`` until review — honest, and
+    independent of arrival order: no row is silently chosen by id or by who arrived first.
+    """
+    t = candidate.observed_at
+    candidate.valid_from = t
+    at_t = db.execute(
+        select(PriceObservation).where(
+            and_(
+                *_lane_conditions(candidate),
+                PriceObservation.valid_from == t,
                 PriceObservation.rolled_back_at.is_(None),
             )
-            .order_by(PriceObservation.valid_from.desc())
         )
-        .scalars()
-        .first()
+    ).scalars().all()
+    if at_t:  # candidate is a NEW distinct fact (an identical one would have been reused)
+        candidate.valid_until = t  # empty interval -> never current
+        candidate.verification_status = _DISPUTED
+        for e in at_t:
+            if e.verification_status != _DISPUTED:
+                e.verification_status = _DISPUTED
+                e.valid_until = e.valid_from  # collapse the ambiguous sibling to empty too
+                _add_conflict_anomaly(db, e.id)
+        diag.same_timestamp_conflict = True
+        return
+
+    active = _active_lane_rows(db, candidate)
+    predecessor = max(
+        (r for r in active if r.valid_from < t), key=lambda r: r.valid_from, default=None
     )
-    if prior is not None and prior.valid_from <= candidate.observed_at:
-        prior.valid_until = candidate.observed_at
-        prior.closed_by_run_id = closed_by_run_id
+    successor = min(
+        (r for r in active if r.valid_from > t), key=lambda r: r.valid_from, default=None
+    )
+    candidate.valid_until = successor.valid_from if successor is not None else None
+    if predecessor is not None:
+        predecessor.valid_until = t
+        predecessor.closed_by_run_id = closed_by_run_id
+    diag.temporal_predecessor_found = predecessor is not None
+    diag.temporal_successor_found = successor is not None
+    diag.out_of_order_insert = successor is not None
 
 
 def _find_existing_occurrence(
@@ -218,18 +284,22 @@ def record_price_fact(
 ) -> RecordResult:
     """Idempotently record ``candidate`` as a fact + one provenance occurrence, serialized.
 
-    Concurrency (spec §2/§6): two writers of the SAME fact (or occurrence) are serialized with
-    PostgreSQL transactional advisory locks keyed by the shared fingerprints, so the search-then-
-    insert can never race into a duplicate:
+    Concurrency (spec §2/§3/§6): the search-then-insert can never race into a duplicate OR into two
+    open history rows, because writers serialize on PostgreSQL transactional advisory locks in a
+    fixed global order:
 
-    1. acquire the FACT lock (fingerprint-keyed) → re-search under the lock → create only if
-       still absent;
-    2. acquire the OCCURRENCE lock (fingerprint-keyed) → re-search the occurrence → create only if
-       still absent.
+    1. acquire the HISTORY-LANE lock (keyed by the lane fingerprint). Two facts that differ only by
+       amount/observed_at belong to the SAME lane, so this — not the per-fact fingerprint — is what
+       serializes the interval-chain update. Under the lane lock: re-search the exact fact and reuse
+       it if present; otherwise place the new fact into its temporal sequence
+       (predecessor/successor, §4) before inserting. No decisive lane read happens before the lock.
+    2. acquire the OCCURRENCE lock (keyed by the occurrence fingerprint) → re-search → upsert.
 
-    Locks are always taken fact-first then occurrence — a fixed global order that prevents deadlocks
-    — and are released automatically at commit/rollback. A NULL provenance field equals another
-    NULL (shared occurrence identity), so re-confirming a fact never duplicates its occurrence.
+    The lane lock replaces a separate fact lock: two identical facts necessarily share a lane, so
+    the lane lock already serializes their search/create. Fixed order (lane, then occurrence) cannot
+    deadlock — no writer ever takes the occurrence lock before the lane lock. Both release at
+    commit/rollback. A NULL provenance field equals another NULL, so re-confirming a fact never
+    duplicates its occurrence.
     """
     metrics = metrics or RecordMetrics()
     # Server-default identity fields are None on a transient object; coerce so the candidate's
@@ -238,26 +308,32 @@ def record_price_fact(
         candidate.requires_loyalty = False
 
     _set_lock_timeout(db, lock_timeout_ms)
-    diag = LockDiagnostics(fact_lock_key=ident.fact_lock_key(candidate))
+    diag = LockDiagnostics(lane_lock_key=ident.price_history_lane_lock_key(candidate))
 
-    # ---- Fact: serialize on the fact fingerprint, then re-search under the lock ----
-    diag.lock_wait_ms += _advisory_xact_lock(db, diag.fact_lock_key)
-    diag.fact_lock_acquired = True
+    # ---- Fact: serialize on the HISTORY LANE, then re-search + place under the lock ----
+    diag.lane_lock_wait_ms = _advisory_xact_lock(db, diag.lane_lock_key)
+    diag.lock_wait_ms += diag.lane_lock_wait_ms
+    diag.lane_lock_acquired = True
     staging_only = bool(candidate.staging_only)
     existing = _find_existing_fact(db, candidate, staging_only=staging_only)
     if existing is not None:
         fact = existing
         fact_created = False
-        diag.fact_reused_after_lock = True
+        diag.fact_reused_after_lane_lock = True
         metrics.observations_reused += 1
-        metrics.facts_reused_after_lock += 1
+        metrics.facts_reused_after_lane_lock += 1
     else:
-        _close_prior_open_row(db, candidate, closed_by_run_id=provenance.crawl_run_id)
+        _place_in_temporal_sequence(
+            db, candidate, closed_by_run_id=provenance.crawl_run_id, diag=diag
+        )
         candidate.imported_at = candidate.imported_at or imported_at
-        if candidate.valid_from is None:
-            candidate.valid_from = candidate.observed_at
         db.add(candidate)
         db.flush()
+        if diag.same_timestamp_conflict:
+            _add_conflict_anomaly(db, candidate.id)
+            metrics.same_timestamp_conflicts += 1
+        if diag.out_of_order_insert:
+            metrics.out_of_order_inserts += 1
         fact = candidate
         fact_created = True
         metrics.observations_created += 1
@@ -304,12 +380,17 @@ def record_price_fact(
     metrics.total_lock_wait_ms += diag.lock_wait_ms
     # Sanitized diagnostics only (lock keys are non-reversible hashes; no payloads/URLs/secrets).
     _LOG.debug(
-        "record_price_fact fact_lock=%s occ_lock=%s wait_ms=%d fact_reused=%s occ_reused=%s",
-        diag.fact_lock_acquired,
+        "record_price_fact lane_lock=%s occ_lock=%s wait_ms=%d fact_reused=%s occ_reused=%s "
+        "pred=%s succ=%s ooo=%s same_ts_conflict=%s",
+        diag.lane_lock_acquired,
         diag.occurrence_lock_acquired,
         diag.lock_wait_ms,
-        diag.fact_reused_after_lock,
+        diag.fact_reused_after_lane_lock,
         diag.occurrence_reused_after_lock,
+        diag.temporal_predecessor_found,
+        diag.temporal_successor_found,
+        diag.out_of_order_insert,
+        diag.same_timestamp_conflict,
     )
     return RecordResult(
         observation=fact,
