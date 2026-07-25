@@ -191,6 +191,50 @@ def occurrence_lock_key(source: Any) -> int:
     return signed_bigint(occurrence_fingerprint(source))
 
 
+# --------------------------------------------------------------------------- #
+# History-lane identity — the price time-series that may only be modified serially.
+# --------------------------------------------------------------------------- #
+# A "history lane" is one append-only interval chain (valid_from/valid_until) for a variant at a
+# scope/store. Facts that DIFFER only by amount/observed_at/promotion/availability live in the SAME
+# lane (they are successive points of one series); the lane lock serializes all inserts into it so
+# two different-price facts can never both close the prior open row and leave two open rows.
+#
+# ``currency`` is part of the LANE (not just the fact): superseding a price in one currency with a
+# price in another is not a comparable "price change" — different currencies are parallel series,
+# each keeping its own single open row. ``price_type`` is likewise part of the lane (a regular-price
+# series and a promotional-price series coexist and never close each other).
+#
+# EXCLUDED from the lane (these distinguish facts WITHIN a lane, not lanes): amount, observed_at,
+# promotion_text/promotion_valid_*, requires_loyalty, available, and all provenance
+# (crawl/parser/source).
+LANE_FIELDS: tuple[str, ...] = (
+    "staging_only",
+    "retailer_id",
+    "product_variant_id",
+    "store_id",
+    "delivery_zone_id",
+    "price_scope",
+    "price_type",
+    "currency",
+)
+
+
+def price_history_lane_identity(obs: PriceObservation) -> tuple[str, ...]:
+    """Lane identity as JSON tokens (NULL-safe), from the shared LANE_FIELDS."""
+    return tuple(
+        json.dumps(getattr(obs, f), default=_json_default, sort_keys=True) for f in LANE_FIELDS
+    )
+
+
+def price_history_lane_fingerprint(obs: PriceObservation) -> str:
+    return hashlib.sha256("|".join(price_history_lane_identity(obs)).encode()).hexdigest()
+
+
+def price_history_lane_lock_key(obs: PriceObservation) -> int:
+    """Stable advisory-lock key for a history lane (from its fingerprint)."""
+    return signed_bigint(price_history_lane_fingerprint(obs))
+
+
 # Back-compat aliases (the dedup tool + tests use these names).
 fact_key = price_fact_identity
 fact_fingerprint = price_fact_fingerprint
@@ -208,6 +252,7 @@ TECHNICAL_FIELDS = frozenset(EXCLUDED_FIELDS)
 __all__ = [
     "EXCLUDED_FIELDS",
     "FACT_FIELDS",
+    "LANE_FIELDS",
     "OCCURRENCE_IDENTITY_FIELDS",
     "OCCURRENCE_PROVENANCE_FIELDS",
     "TECHNICAL_FIELDS",
@@ -221,6 +266,9 @@ __all__ = [
     "occurrence_provenance_tuple",
     "price_fact_fingerprint",
     "price_fact_identity",
+    "price_history_lane_fingerprint",
+    "price_history_lane_identity",
+    "price_history_lane_lock_key",
     "row_hash",
     "row_values",
     "semantic_columns",
