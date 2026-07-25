@@ -48,6 +48,9 @@ import type {
   PantryItemUpdate,
   PasswordRecoveryRequest,
   PlannerReadiness,
+  ProviderPromotionResult,
+  ProviderPromotionStatus,
+  ProviderProductionApproval,
   Recipe,
   RecipeFeedbackListItem,
   RegisterRequest,
@@ -495,4 +498,39 @@ export function bulkRejectMappings(mappingIds: number[], reason: string): Promis
     method: "POST",
     body: { mapping_ids: mappingIds, reason },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Admin: provider staging → production promotion (platform-admin only).
+// ---------------------------------------------------------------------------
+
+const _PROVIDERS_BASE = "/api/v1/admin/providers";
+
+export function getProviderPromotionStatus(
+  providerCode: string,
+): Promise<ProviderPromotionStatus> {
+  return apiFetch<ProviderPromotionStatus>(
+    `${_PROVIDERS_BASE}/${encodeURIComponent(providerCode)}/promotion-status`,
+  );
+}
+
+/** Grants production approval. Rejects with a 409 (`detail.reasons`) if prerequisites aren't met. */
+export function approveProviderForProduction(
+  providerCode: string,
+): Promise<ProviderProductionApproval> {
+  return apiFetch<ProviderProductionApproval>(
+    `${_PROVIDERS_BASE}/${encodeURIComponent(providerCode)}/production-approval`,
+    { method: "POST" },
+  );
+}
+
+/** `dryRun: true` computes the would-write counts without persisting anything. */
+export function promoteProvider(
+  providerCode: string,
+  dryRun: boolean,
+): Promise<ProviderPromotionResult> {
+  return apiFetch<ProviderPromotionResult>(
+    `${_PROVIDERS_BASE}/${encodeURIComponent(providerCode)}/promote?dry_run=${dryRun}`,
+    { method: "POST" },
+  );
 }

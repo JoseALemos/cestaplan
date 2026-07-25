@@ -990,3 +990,36 @@ export interface MappingEnrichResult {
   provider_endpoint: string | null;
   enrichment_error_category: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Admin: provider staging → production promotion. `gate_reasons` / the
+// `reasons` returned in a 409's `detail` are typed slugs (see
+// `promotionGateReasonLabel` in `lib/domain/labels.ts` for the Spanish copy).
+// ---------------------------------------------------------------------------
+
+export interface ProviderPromotionStatus {
+  provider_code: string;
+  production_ready: boolean;
+  gate_reasons: string[];
+  approved_candidates: number;
+  staged_observations: number;
+}
+
+export interface ProviderProductionApproval {
+  provider_code: string;
+  production_enabled: boolean;
+  production_approved: boolean;
+  production_approved_at: string | null;
+  production_approved_by: string | null;
+  activation_state: string;
+}
+
+export interface ProviderPromotionResult {
+  provider_code: string;
+  dry_run: boolean;
+  approved_candidates: number;
+  mappings_created: number;
+  observations_promoted: number;
+  prices_written: number;
+  retailer_ids: number[];
+}
