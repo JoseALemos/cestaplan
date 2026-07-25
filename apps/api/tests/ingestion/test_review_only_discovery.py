@@ -6,12 +6,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
+from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct
 from cestaplan_api.models import IngredientProductMapping, ProviderIngredientMapping
 from cestaplan_api.services.mapping_review import is_selectable_for_costing
 from cestaplan_api.services.targeted_discovery import ApprovalMode, _upsert_mapping
@@ -62,7 +64,11 @@ def _row(db: Session, ingredient_id: int) -> ProviderIngredientMapping:
 
 def test_review_only_never_activates_and_preserves_proposal(db_session: Session) -> None:
     ing_id, product_id = _setup(db_session)
-    prod = SimpleNamespace(external_product_id="X1", product_name="Leche entera 1L")
+    # Only external_product_id / product_name are read; cast keeps pyright happy for the stub.
+    prod = cast(
+        ExternalCatalogProduct,
+        SimpleNamespace(external_product_id="X1", product_name="Leche entera 1L"),
+    )
     active_before = db_session.scalar(
         select(func.count()).select_from(IngredientProductMapping).where(
             IngredientProductMapping.is_active.is_(True)
@@ -94,7 +100,11 @@ def test_review_only_never_activates_and_preserves_proposal(db_session: Session)
 
 def test_deterministic_activates_and_records_proposal(db_session: Session) -> None:
     ing_id, product_id = _setup(db_session)
-    prod = SimpleNamespace(external_product_id="X1", product_name="Leche entera 1L")
+    # Only external_product_id / product_name are read; cast keeps pyright happy for the stub.
+    prod = cast(
+        ExternalCatalogProduct,
+        SimpleNamespace(external_product_id="X1", product_name="Leche entera 1L"),
+    )
     _upsert_mapping(
         db_session, "parsebot-carrefour", "carrefour", ing_id, "leche_entera", prod, product_id,
         _cand("auto_approved"), active=True, now=NOW,
