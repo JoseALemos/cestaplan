@@ -4,7 +4,9 @@ For ``parsebot-alcampo`` (has keyword search) each ingredient is searched once (
 one page); for ``parsebot-carrefour`` (no keyword search) the already-staged products are
 re-used and classified locally — no extra external calls. Every candidate product is persisted
 as a STAGING variant (never production) plus an auditable :class:`ProviderIngredientMapping`.
-Only deterministic auto-approvals become ``active``; everything else awaits review.
+Discovery is review-only by default: nothing becomes ``active``; every match is a ``candidate``
+awaiting human review, with the machine proposal kept in ``proposed_*``. Deterministic
+auto-approval is an explicit opt-in and never the cloud default (see :class:`ApprovalMode`).
 
 Real captures are written under ``.local/provider-targeted-coverage/`` (git-ignored); synthetic
 fixtures are never replaced.
@@ -16,6 +18,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 
 from sqlalchemy import select
@@ -190,6 +193,20 @@ def _capture_alcampo(
     return list(provider._mapper.map_products(records, retrieved_at=datetime.now(UTC)))  # type: ignore[attr-defined]
 
 
+class ApprovalMode(StrEnum):
+    """How discovery persists matches.
+
+    ``REVIEW_ONLY`` (default) never activates a mapping: every compatible match is stored as a
+    ``candidate`` needing human review, with the machine's original proposal kept in the
+    ``proposed_*`` fields. ``DETERMINISTIC_AUTOAPPROVAL`` restores the legacy behaviour (exact
+    deterministic matches become ``active``) and must be requested explicitly — it is never the
+    cloud default.
+    """
+
+    REVIEW_ONLY = "review_only"
+    DETERMINISTIC_AUTOAPPROVAL = "deterministic_autoapproval"
+
+
 def discover_and_map(
     db: Session,
     provider_code: str,
@@ -199,6 +216,7 @@ def discover_and_map(
     per_query_limit: int = 10,
     max_calls: int = 10,
     now: datetime | None = None,
+    approval_mode: ApprovalMode = ApprovalMode.REVIEW_ONLY,
 ) -> DiscoveryReport:
     """Discover + map priority ingredients for one provider (staging only, never production)."""
     settings = settings or get_settings()
@@ -250,7 +268,12 @@ def discover_and_map(
             product_id, _vid = _persist_product(db, retailer_id, product, now=now)
             costable = classify_costing_mode(product).value != "unresolved"
             status = cand.mapping_status  # type: ignore[attr-defined]
-            active = status == "auto_approved"
+            # Only deterministic-autoapproval mode may ever activate a mapping; review-only never
+            # does. Activation additionally requires an exact deterministic match.
+            active = (
+                approval_mode is ApprovalMode.DETERMINISTIC_AUTOAPPROVAL
+                and status == "auto_approved"
+            )
             _upsert_mapping(
                 db,
                 provider_code,
@@ -262,6 +285,7 @@ def discover_and_map(
                 cand,
                 active=active,
                 now=now,
+                approval_mode=approval_mode,
             )
             d.candidates += 1
             d.costable += costable
@@ -324,6 +348,7 @@ def _upsert_mapping(
     *,
     active: bool,
     now: datetime,
+    approval_mode: ApprovalMode,
 ) -> None:
     row = db.execute(
         select(ProviderIngredientMapping).where(
@@ -342,7 +367,6 @@ def _upsert_mapping(
     row.canonical_ingredient_key = key
     row.retailer_slug = retailer_slug
     row.normalized_product_id = product_id
-    row.mapping_status = cand.mapping_status  # type: ignore[attr-defined]
     row.mapping_method = cand.mapping_method  # type: ignore[attr-defined]
     row.confidence_score = cand.confidence  # type: ignore[attr-defined]
     row.lexical_score = cand.lexical_score  # type: ignore[attr-defined]
@@ -352,10 +376,23 @@ def _upsert_mapping(
     row.preparation_compatibility = cand.preparation_compatibility  # type: ignore[attr-defined]
     row.dietary_compatibility = cand.dietary_compatibility  # type: ignore[attr-defined]
     row.allergen_compatibility = cand.allergen_compatibility  # type: ignore[attr-defined]
-    row.required_review = cand.required_review  # type: ignore[attr-defined]
-    row.active = active
-    if active:
-        row.reviewed_at = now  # deterministic auto-approval is self-documenting
+    # The machine's original proposal is ALWAYS recorded, for audit and for the reviewer.
+    row.proposed_mapping_status = cand.mapping_status  # type: ignore[attr-defined]
+    row.proposed_confidence = cand.confidence  # type: ignore[attr-defined]
+    row.proposed_method = cand.mapping_method  # type: ignore[attr-defined]
+    if approval_mode is ApprovalMode.REVIEW_ONLY:
+        # Never approved, never active: a candidate awaiting human review, whatever the proposal.
+        row.mapping_status = "candidate"
+        row.required_review = True
+        row.active = False
+        row.reviewed_at = None
+        row.reviewed_by = None
+    else:
+        row.mapping_status = cand.mapping_status  # type: ignore[attr-defined]
+        row.required_review = cand.required_review  # type: ignore[attr-defined]
+        row.active = active
+        if active:
+            row.reviewed_at = now  # deterministic auto-approval is self-documenting
     row.evidence_json = {"product_name": product.product_name, **cand.as_dict()}  # type: ignore[attr-defined]
     db.flush()
 
@@ -380,4 +417,10 @@ def write_report(report: DiscoveryReport) -> None:
     out.write_text(json.dumps(report.as_dict(), indent=2, ensure_ascii=False))
 
 
-__all__ = ["DiscoveryReport", "IngredientDiscovery", "discover_and_map", "write_report"]
+__all__ = [
+    "ApprovalMode",
+    "DiscoveryReport",
+    "IngredientDiscovery",
+    "discover_and_map",
+    "write_report",
+]
