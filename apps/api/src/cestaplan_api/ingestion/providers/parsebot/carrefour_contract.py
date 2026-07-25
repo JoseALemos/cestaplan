@@ -59,7 +59,10 @@ _OPTIONAL_ALLOWED: dict[str, tuple[type, ...]] = {
     "promotion_text": _STR,
     "promotion_start_date": _STR,
     "promotion_end_date": _STR,
+    "promotion_conditions": _STR,
     "category": _STR,
+    "image_url": _STR,
+    "product_url": _STR,
 }
 _KNOWN_FIELDS = {_ESSENTIAL_ID, _ESSENTIAL_NAME, "regular_price", *_OPTIONAL_ALLOWED}
 
