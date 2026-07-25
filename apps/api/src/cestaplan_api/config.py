@@ -180,8 +180,15 @@ class Settings(BaseSettings):
     parse_bot_api_key: str = ""
     parse_bot_timeout_seconds: float = 30.0
     parse_bot_max_retries: int = 3
+    # Per-chain enable gates. A chain reaches the network ONLY when parse_bot_enabled AND its own
+    # flag are true AND its base URL + key are set (see parsebot.plans.is_configured). All OFF by
+    # default so a present base URL never implies an active network provider.
     parse_bot_dia_enabled: bool = False
     parse_bot_alcampo_enabled: bool = False
+    parse_bot_carrefour_enabled: bool = False
+    parse_bot_lidl_enabled: bool = False
+    parse_bot_aldi_enabled: bool = False
+    parse_bot_deza_enabled: bool = False
     parse_bot_dia_base_url: str = ""
     parse_bot_alcampo_base_url: str = ""
     # Additional Parse.bot chains — base URLs empty until a verified scraper exists per chain.

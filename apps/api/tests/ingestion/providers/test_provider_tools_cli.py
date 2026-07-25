@@ -23,6 +23,9 @@ def test_capture_refuses_without_credentials(tmp_path: Path, capsys, monkeypatch
     from cestaplan_api.config import get_settings
 
     monkeypatch.setenv("PARSE_BOT_API_KEY", "")  # override any ambient/.env value
+    # Enable the chain so the refusal is the MISSING-KEY path (not the enable gate).
+    monkeypatch.setenv("PARSE_BOT_ENABLED", "true")
+    monkeypatch.setenv("PARSE_BOT_DIA_ENABLED", "true")
     get_settings.cache_clear()
     try:
         out = tmp_path / "raw.json"  # tmp is a safe (git-ignored-style) path
