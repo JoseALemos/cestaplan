@@ -28,16 +28,9 @@ from sqlalchemy.orm import Session
 from cestaplan_api.models import PriceObservation, PriceObservationOccurrence
 from cestaplan_api.services import observation_identity as ident
 
-# The occurrence-identity fields: replaying the same tuple must not create a duplicate occurrence.
-_OCCURRENCE_IDENTITY: tuple[str, ...] = (
-    "price_observation_id",
-    "provider_code",
-    "source_id",
-    "crawl_run_id",
-    "raw_capture_id",
-    "connector_version",
-    "parser_version",
-)
+# The occurrence-identity fields come from the SHARED definition: replaying the same tuple must not
+# create a duplicate occurrence.
+_OCCURRENCE_IDENTITY: tuple[str, ...] = ident.OCCURRENCE_IDENTITY_FIELDS
 
 # Selective subset of the fact identity used to PREFILTER candidate rows before the exact
 # fingerprint comparison (keeps the query cheap; the fingerprint is the source of truth).

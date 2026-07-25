@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -121,6 +122,75 @@ def row_hash(values: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
+# --------------------------------------------------------------------------- #
+# Occurrence (Layer B) identity — which run/parser/source confirmed a fact (spec §3).
+# --------------------------------------------------------------------------- #
+# The FULL occurrence identity. ``imported_at`` is deliberately NOT part of it (it is WHEN we
+# recorded the occurrence, not what distinguishes it). NULL semantics: a missing field equals
+# another missing field — two occurrences with the same non-null values AND the same NULLs are the
+# SAME occurrence (reused), because the fingerprint serializes ``None`` to one canonical token
+# (``"null"``). A different crawl/parser/capture/source yields a different fingerprint -> a new
+# occurrence.
+OCCURRENCE_IDENTITY_FIELDS: tuple[str, ...] = (
+    "price_observation_id",
+    "provider_code",
+    "source_id",
+    "crawl_run_id",
+    "raw_capture_id",
+    "connector_version",
+    "parser_version",
+)
+# The provenance sub-tuple (identity minus the fact it points at); dedup compares the evidence two
+# rows carry independently of which observation currently owns them.
+OCCURRENCE_PROVENANCE_FIELDS: tuple[str, ...] = OCCURRENCE_IDENTITY_FIELDS[1:]
+
+
+def _field(source: Any, field: str) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(field)
+    return getattr(source, field, None)
+
+
+def occurrence_identity(source: Any) -> tuple[str, ...]:
+    """Occurrence identity as JSON tokens (NULL-safe: ``None`` -> the single token ``"null"``).
+
+    ``source`` is anything exposing the identity fields — a ``PriceObservationOccurrence``, an
+    ``OccurrenceProvenance`` (plus ``price_observation_id``), or a plain mapping.
+    """
+    return tuple(
+        json.dumps(_field(source, f), default=_json_default, sort_keys=True)
+        for f in OCCURRENCE_IDENTITY_FIELDS
+    )
+
+
+def occurrence_fingerprint(source: Any) -> str:
+    return hashlib.sha256("|".join(occurrence_identity(source)).encode()).hexdigest()
+
+
+def occurrence_provenance_tuple(source: Any) -> tuple[Any, ...]:
+    """The raw provenance values (NULLs preserved) used for equality comparisons in dedup."""
+    return tuple(_field(source, f) for f in OCCURRENCE_PROVENANCE_FIELDS)
+
+
+def signed_bigint(fingerprint_hex: str) -> int:
+    """Deterministic signed 64-bit int for a PostgreSQL advisory-lock key, from a hex fingerprint.
+
+    Uses the (SHA-256) fingerprint bytes directly and maps to the signed ``bigint`` range — NEVER
+    Python ``hash()`` (its salt changes between processes, so keys would not agree across writers).
+    """
+    return int.from_bytes(bytes.fromhex(fingerprint_hex)[:8], "big", signed=True)
+
+
+def fact_lock_key(obs: PriceObservation) -> int:
+    """Stable advisory-lock key for a price fact (from its fingerprint)."""
+    return signed_bigint(price_fact_fingerprint(obs))
+
+
+def occurrence_lock_key(source: Any) -> int:
+    """Stable advisory-lock key for an occurrence (from its fingerprint)."""
+    return signed_bigint(occurrence_fingerprint(source))
+
+
 # Back-compat aliases (the dedup tool + tests use these names).
 fact_key = price_fact_identity
 fact_fingerprint = price_fact_fingerprint
@@ -138,14 +208,22 @@ TECHNICAL_FIELDS = frozenset(EXCLUDED_FIELDS)
 __all__ = [
     "EXCLUDED_FIELDS",
     "FACT_FIELDS",
+    "OCCURRENCE_IDENTITY_FIELDS",
+    "OCCURRENCE_PROVENANCE_FIELDS",
     "TECHNICAL_FIELDS",
     "all_columns",
     "fact_fingerprint",
     "fact_key",
+    "fact_lock_key",
+    "occurrence_fingerprint",
+    "occurrence_identity",
+    "occurrence_lock_key",
+    "occurrence_provenance_tuple",
     "price_fact_fingerprint",
     "price_fact_identity",
     "row_hash",
     "row_values",
     "semantic_columns",
+    "signed_bigint",
     "unclassified_columns",
 ]
