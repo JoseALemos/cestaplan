@@ -155,6 +155,8 @@ def analyze(db: Session, provider_code: str) -> dict[str, Any]:
         "excluded_groups": 0,
         "unique_fact_count": 0,
         "staging_observations": 0,
+        "total_duplicate_fact_groups": 0,
+        "total_duplicate_observations": 0,
         "new_real_count": 0,
         "groups": [],
     }
@@ -177,6 +179,10 @@ def analyze(db: Session, provider_code: str) -> dict[str, Any]:
         buckets.setdefault(ident.fact_key(o), []).append(o)
     result["staging_observations"] = len(obs)
     result["unique_fact_count"] = len(buckets)
+    # ALL duplicates by fact identity (independent of provenance/FK safety); the removable set below
+    # is the safely-deletable SUBSET of these.
+    result["total_duplicate_fact_groups"] = sum(1 for r in buckets.values() if len(r) > 1)
+    result["total_duplicate_observations"] = sum(len(r) - 1 for r in buckets.values() if len(r) > 1)
 
     ref_tables: set[str] = set()
     for rows in buckets.values():
