@@ -20,6 +20,7 @@ from cestaplan_api.routers import (
     pantry,
     plans,
     prices,
+    provider_promotion_admin,
     usage,
 )
 from cestaplan_api.routers import auth as auth_router
@@ -52,6 +53,7 @@ app.include_router(usage.router)
 app.include_router(pantry.router)
 app.include_router(prices.router)
 app.include_router(ingestion_admin.router)
+app.include_router(provider_promotion_admin.router)
 app.include_router(licensed_admin.router)
 
 
