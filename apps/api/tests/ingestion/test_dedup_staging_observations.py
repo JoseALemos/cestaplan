@@ -32,13 +32,12 @@ T1 = datetime(2026, 7, 26, 8, 0, tzinfo=UTC)
 # is consciously placed in TECHNICAL_FIELDS or accepted as part of the fact.
 _EXPECTED_COLUMNS = {
     "amount", "available", "closed_by_run_id", "confidence_score", "connector_version",
-    "crawl_run_id", "created_at", "currency", "delivery_zone_id", "expires_at", "id", "imported_at",
-    "observed_at", "parser_version", "price_scope", "price_type", "product_variant_id",
-    "promotion_text", "promotion_valid_from", "promotion_valid_until", "public_id",
-    "raw_capture_id",
-    "requires_loyalty", "retailer_id", "rolled_back_at", "rolled_back_by", "source_id", "source_url",
-    "staging_only", "store_id", "unit_amount", "unit_code", "updated_at", "valid_from", "valid_until",
-    "verification_status",
+    "crawl_run_id", "created_at", "currency", "delivery_zone_id", "expires_at", "id",
+    "imported_at", "observed_at", "parser_version", "price_scope", "price_type",
+    "product_variant_id", "promotion_text", "promotion_valid_from", "promotion_valid_until",
+    "public_id", "raw_capture_id", "requires_loyalty", "retailer_id", "rolled_back_at",
+    "rolled_back_by", "source_id", "source_url", "staging_only", "store_id", "unit_amount",
+    "unit_code", "updated_at", "valid_from", "valid_until", "verification_status",
 }
 
 
@@ -119,7 +118,7 @@ def test_ambiguous_provenance_is_excluded(db_session: Session) -> None:
 
 
 def test_referenced_row_is_excluded(db_session: Session) -> None:
-    retailer, _v, _run, d1 = _scenario(db_session)
+    _retailer, _v, _run, _d1 = _scenario(db_session)
     # d1 is the canonical (earliest). Add a promotion rule to a REMOVED duplicate instead.
     removed = dedup.analyze(db_session, PROVIDER)["groups"][0]["removed_observation_ids"]
     db_session.add(PromotionRule(price_observation_id=removed[0], type="percentage"))
