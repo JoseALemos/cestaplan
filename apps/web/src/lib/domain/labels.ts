@@ -319,3 +319,32 @@ export const READINESS_STATUS_LABELS: Record<ReadinessStatus, string> = {
 export function readinessStatusLabel(status: string): string {
   return READINESS_STATUS_LABELS[status as ReadinessStatus] ?? "Estado desconocido";
 }
+
+// ---------------------------------------------------------------------------
+// Admin: provider staging → production promotion gate reasons. Some slugs
+// carry a dynamic suffix (`transport_status=degraded`), so an exact match is
+// tried first, then a known prefix, falling back to the raw slug — never a
+// blank label.
+// ---------------------------------------------------------------------------
+
+export const PROMOTION_GATE_REASON_LABELS: Record<string, string> = {
+  not_manually_approved: "No hay mapeos aprobados manualmente para este proveedor.",
+  production_flags_not_set: "Los flags de producción del proveedor no están activados.",
+  price_providers_disabled: "El proveedor de precios está desactivado.",
+  kill_switch_on: "El interruptor de emergencia (kill switch) está activado.",
+};
+
+const PROMOTION_GATE_REASON_PREFIXES: { prefix: string; label: (value: string) => string }[] = [
+  { prefix: "transport_status=", label: (v) => `Estado de transporte: ${v}.` },
+  { prefix: "mapper_status=", label: (v) => `Estado del mapeador: ${v}.` },
+  { prefix: "data_rights_status=", label: (v) => `Estado de derechos de datos: ${v}.` },
+];
+
+export function promotionGateReasonLabel(reason: string): string {
+  const exact = PROMOTION_GATE_REASON_LABELS[reason];
+  if (exact) return exact;
+  for (const { prefix, label } of PROMOTION_GATE_REASON_PREFIXES) {
+    if (reason.startsWith(prefix)) return label(reason.slice(prefix.length));
+  }
+  return reason;
+}
