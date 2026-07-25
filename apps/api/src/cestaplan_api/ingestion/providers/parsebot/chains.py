@@ -34,6 +34,7 @@ from cestaplan_api.ingestion.providers.contracts import (
     SellUnit,
 )
 from cestaplan_api.ingestion.providers.exceptions import NotSupportedError, ProviderError
+from cestaplan_api.ingestion.providers.parsebot import carrefour_contract as cf_contract
 from cestaplan_api.ingestion.providers.parsebot import plans
 from cestaplan_api.ingestion.providers.schema_tools import merge_samples, schema_fingerprint
 
@@ -297,6 +298,32 @@ class ParseBotCarrefourMapper(_BaseParseBotMapper):
         "in_stock": Availability.IN_STOCK,
         "out_of_stock": Availability.OUT_OF_STOCK,
     }
+
+    def semantic_report(self, records: list[dict]) -> tuple[str, cf_contract.ContractResult]:
+        """The STRICT raw fingerprint (audit) + the semantic-contract classification (gate)."""
+        return self.detect_schema(records), cf_contract.validate_semantic_contract(records)
+
+    def map_products(
+        self, records: list[dict], *, retrieved_at: datetime
+    ) -> list[ExternalCatalogProduct]:
+        """Gate on the SEMANTIC contract, not the (unstable) raw fingerprint. The raw fingerprint is
+        still computed for audit but never blocks a semantically-unchanged capture. Records missing
+        id/name/price are rejected individually; a broken structure blocks the whole batch."""
+        if not records:
+            return []
+        result = cf_contract.validate_semantic_contract(records)
+        if not result.processable:
+            raise UnsupportedSchemaError(
+                f"carrefour semantic contract {result.compatibility.value}: "
+                + "; ".join(result.reasons[:3])
+            )
+        out: list[ExternalCatalogProduct] = []
+        for r in records:
+            try:
+                out.append(self.map_product(r, retrieved_at))
+            except UnsupportedSchemaError:
+                continue  # per-record rejection (already accounted for by the contract)
+        return out
 
     def map_product(self, r: dict, retrieved_at: datetime) -> ExternalCatalogProduct:
         regular = _dec(r.get("regular_price"))
