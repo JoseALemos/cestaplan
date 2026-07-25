@@ -575,6 +575,8 @@ export interface PlannerReadiness {
   total_chains: number;
   production_ready_providers: number;
   last_sync_at: string | null;
+  /** When this snapshot was computed (server clock), so a stale view can never look current. */
+  fetched_at: string;
   blockers: string[];
 }
 

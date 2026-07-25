@@ -8,6 +8,7 @@ activation. The global status is NEVER ``available`` unless at least one provide
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -105,6 +106,9 @@ def catalog_readiness_report(db: Session) -> dict[str, Any]:
         "total_chains": total_chains,
         "production_ready_providers": production_ready_providers,
         "last_sync_at": last_sync.isoformat() if last_sync is not None else None,
+        # When THIS snapshot was computed, so the UI can show its age and never present a stale view
+        # as current.
+        "fetched_at": datetime.now(UTC).isoformat(),
         "blockers": blockers,
     }
 

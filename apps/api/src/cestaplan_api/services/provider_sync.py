@@ -38,6 +38,11 @@ from cestaplan_api.models import (
     ProductVariant,
     Retailer,
 )
+from cestaplan_api.services.observation_persistence import (
+    OccurrenceProvenance,
+    RecordMetrics,
+    record_price_fact,
+)
 
 
 class SyncMode(StrEnum):
@@ -53,6 +58,11 @@ class SyncReport:
     run_id: str | None = None
     fetched: int = 0
     persisted_observations: int = 0
+    # Two-layer metrics (spec §3/§9): new price facts vs reused facts, and provenance occurrences.
+    observations_created: int = 0
+    observations_reused: int = 0
+    occurrences_created: int = 0
+    occurrences_reused: int = 0
     quality_status: str = "insufficient"
     quarantined: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -65,6 +75,10 @@ class SyncReport:
             "run_id": self.run_id,
             "fetched": self.fetched,
             "persisted_observations": self.persisted_observations,
+            "observations_created": self.observations_created,
+            "observations_reused": self.observations_reused,
+            "occurrences_created": self.occurrences_created,
+            "occurrences_reused": self.occurrences_reused,
             "quality_status": self.quality_status,
             "quarantined": self.quarantined,
             "reasons": list(self.reasons),
@@ -117,10 +131,16 @@ def run_provider_sync(
     db.add(run)
     db.flush()
     staging = mode is SyncMode.STAGING
+    metrics = RecordMetrics()
     for product in products:
         variant = _upsert_variant(db, retailer.id, product)
-        _append_observation(db, retailer.id, variant, product, run.id, staging, as_of)
-        report.persisted_observations += 1
+        _append_observation(db, retailer.id, variant, product, run.id, staging, as_of, metrics)
+    # A "persisted observation" is a NEW economic fact; a re-confirmed fact is a reused occurrence.
+    report.persisted_observations = metrics.observations_created
+    report.observations_created = metrics.observations_created
+    report.observations_reused = metrics.observations_reused
+    report.occurrences_created = metrics.occurrences_created
+    report.occurrences_reused = metrics.occurrences_reused
     report.run_id = str(run.public_id)
     report.reasons.append("staging_import" if staging else "production_import")
     return report
@@ -198,8 +218,45 @@ def _append_observation(
     run_id: int,
     staging: bool,
     as_of: datetime,
+    metrics: RecordMetrics,
 ) -> None:
+    """Record one product's price.
+
+    STAGING routes through the shared two-layer persistence (spec §3/§4): idempotency is by the
+    16-field fact fingerprint, so a fact re-confirmed by another crawl/parser adds a provenance
+    OCCURRENCE (never a duplicate observation) and a real change creates a new fact. This is the
+    onboarding/discovery pipeline where the exact-duplicate observations accumulate.
+
+    PRODUCTION keeps the established append-only current-price history (revalidate an unchanged
+    open row in place, close it on a real change) so the production projection is unchanged.
+    """
     scope = product.price_scope
+    confidence = product.confidence_score or Decimal("1.0")
+    if staging:
+        candidate = PriceObservation(
+            retailer_id=retailer_id,
+            product_variant_id=variant.id,
+            price_scope=scope.value,
+            price_type=PriceType.REGULAR.value,
+            amount=product.regular_price,
+            currency=product.currency,
+            available=True,
+            observed_at=product.observed_at,
+            imported_at=as_of,
+            valid_from=product.observed_at,
+            confidence_score=confidence,
+            crawl_run_id=run_id,
+            staging_only=True,
+        )
+        provenance = OccurrenceProvenance(
+            provider_code=product.provider,
+            crawl_run_id=run_id,
+            confidence_score=confidence,
+        )
+        record_price_fact(db, candidate, provenance, imported_at=as_of, metrics=metrics)
+        return
+
+    # Production: append-only history (unchanged behavior).
     prior = (
         db.execute(
             select(PriceObservation)
@@ -207,6 +264,7 @@ def _append_observation(
                 PriceObservation.product_variant_id == variant.id,
                 PriceObservation.store_id.is_(None),
                 PriceObservation.price_scope == scope.value,
+                PriceObservation.staging_only.is_(False),
                 PriceObservation.valid_until.is_(None),
                 PriceObservation.rolled_back_at.is_(None),
             )
@@ -232,11 +290,12 @@ def _append_observation(
             observed_at=product.observed_at,
             imported_at=as_of,
             valid_from=product.observed_at,
-            confidence_score=product.confidence_score or Decimal("1.0"),
+            confidence_score=confidence,
             crawl_run_id=run_id,
-            staging_only=staging,
+            staging_only=False,
         )
     )
+    metrics.observations_created += 1
     db.flush()
 
 

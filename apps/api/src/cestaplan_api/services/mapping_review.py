@@ -136,6 +136,62 @@ def consolidate_duplicates(db: Session, *, now: datetime | None = None) -> dict[
     return {"exact_duplicate_groups": len(groups), "superseded_exact_duplicates": superseded}
 
 
+_SUPERSEDE_V2_REASON = "candidate_quality_v2"
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for p in (version or "").split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts) or (0,)
+
+
+def supersede_v1_candidates(
+    db: Session,
+    provider_code: str | None = None,
+    *,
+    current_version: str = "2.0.0",
+    now: datetime | None = None,
+) -> dict[str, int | str]:
+    """A.2: supersede stale v1 candidate mappings replaced by the v2 product-first discovery.
+
+    Scoped to ``provider_code`` when given (a provider supersedes only its OWN v1 candidates when it
+    re-runs v2 discovery). Only UNREVIEWED candidates (``reviewed_at IS NULL``) older than
+    ``current_version`` are superseded — a human decision is never overwritten. Superseding sets
+    ``superseded_at``, ``superseded_reason='candidate_quality_v2'`` and ``active=False`` while
+    PRESERVING the machine proposal (``proposed_*``) and ``evidence_json`` and leaving
+    ``reviewed_at``/``reviewed_by`` untouched. Idempotent: already-superseded rows are skipped.
+    """
+    now = now or datetime.now(UTC)
+    target = _version_tuple(current_version)
+    stmt = select(ProviderIngredientMapping).where(
+        ProviderIngredientMapping.superseded_at.is_(None),
+        ProviderIngredientMapping.reviewed_at.is_(None),
+        ProviderIngredientMapping.mapping_status == "candidate",
+    )
+    if provider_code is not None:
+        stmt = stmt.where(ProviderIngredientMapping.provider_code == provider_code)
+    rows = list(db.execute(stmt).scalars())
+    superseded = 0
+    for m in rows:
+        if _version_tuple(m.mapping_version) >= target:
+            continue  # already v2 (or newer) — nothing to supersede
+        m.superseded_at = now
+        m.superseded_reason = _SUPERSEDE_V2_REASON
+        m.active = False
+        # proposed_* and evidence_json are deliberately left intact (audit of the machine proposal).
+        superseded += 1
+    db.flush()
+    return {
+        "candidates_scanned": len(rows),
+        "superseded_v1_candidates": superseded,
+        "current_version": current_version,
+    }
+
+
 def tag_conflicts(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """Assign a stable conflict_group_id to every product claimed by more than one ingredient
     and mark unresolved members ``competing``. Idempotent (re-runnable)."""
@@ -588,5 +644,6 @@ __all__ = [
     "recipes_potentially_unlocked",
     "reject",
     "revoke",
+    "supersede_v1_candidates",
     "tag_conflicts",
 ]

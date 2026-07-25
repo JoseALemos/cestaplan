@@ -389,6 +389,67 @@ class PriceObservation(BaseModel):
     )
 
 
+class PriceObservationOccurrence(BaseModel):
+    """Layer B of the two-layer model (spec §1): each occasion a provider/crawl/parser confirmed
+    an economic price fact.
+
+    A :class:`PriceObservation` (Layer A) is ONE unique economic fact — its identity is the 16
+    fields in :mod:`cestaplan_api.services.observation_identity`. This table records the PROVENANCE
+    of that fact: a re-sync (new ``crawl_run_id``) or a new parser producing the SAME fact is a new
+    OCCURRENCE here, never a new observation. One fact -> many occurrences.
+
+    Occurrence identity (for idempotency, spec §3) is
+    ``(price_observation_id, provider_code, source_id, crawl_run_id, raw_capture_id,
+    connector_version, parser_version)``: replaying the exact same occurrence must NOT duplicate it.
+    Only sanitized provenance is stored here — never secrets or raw payloads (those live, redacted,
+    in :class:`RawCapture`).
+    """
+
+    __tablename__ = "price_observation_occurrence"
+    __table_args__ = (
+        Index("ix_price_obs_occurrence_observation", "price_observation_id"),
+        # Fast lookup for idempotent upsert by occurrence identity (service-enforced dedup).
+        Index(
+            "ix_price_obs_occurrence_identity",
+            "price_observation_id",
+            "provider_code",
+            "source_id",
+            "crawl_run_id",
+            "raw_capture_id",
+        ),
+    )
+
+    price_observation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("price_observation.id"), nullable=False
+    )
+    # Free-text provider slug (e.g. "parsebot-carrefour"); not every historical row has one, and it
+    # is not a FK — never invented during backfill (spec §5).
+    provider_code: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("data_source.id"))
+    # Sanitized source URL (query/secrets stripped upstream); provenance, never the fact identity.
+    source_url: Mapped[str | None] = mapped_column(Text)
+    crawl_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("crawl_run.id")
+    )
+    raw_capture_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("raw_capture.id")
+    )
+    connector_version: Mapped[str | None] = mapped_column(Text)
+    parser_version: Mapped[str | None] = mapped_column(Text)
+    # When WE recorded this occurrence (mirrors the fact's imported_at at creation time).
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    verification_status: Mapped[str] = mapped_column(
+        enum_col(*VERIFICATION_STATUS, name="price_obs_occurrence_verification_status"),
+        nullable=False,
+        server_default="unverified",
+    )
+    # Sanitized evidence fingerprint (e.g. semantic-contract fingerprint / capture body_hash); a
+    # non-reversible pointer to evidence, not the evidence itself.
+    evidence_fingerprint: Mapped[str | None] = mapped_column(Text)
+    # ``created_at`` (when the occurrence row was written) comes from TimestampMixin.
+
+
 class PromotionRule(BaseModel):
     """Structured promotion attached to a price observation (parsed from ``promotion_text``)."""
 

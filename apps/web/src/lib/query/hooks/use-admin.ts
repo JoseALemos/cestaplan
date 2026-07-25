@@ -66,6 +66,12 @@ export function useReadinessQuery() {
     queryKey: queryKeys.plannerReadiness(),
     queryFn: listPlannerReadiness,
     enabled: isAdmin,
+    // Readiness changes out-of-band (a CLI sync/discovery, another admin) so a cached snapshot must
+    // never linger: always refetch on mount/focus and treat it as immediately stale. Overrides the
+    // 30s global staleTime so a prior "0/0/0" never persists after the catalogue is updated.
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 }
 

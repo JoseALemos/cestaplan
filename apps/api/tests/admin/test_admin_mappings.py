@@ -82,6 +82,24 @@ def test_competing_candidate_is_visible_and_approvable(
     assert row.mapping_status == "manually_approved"
 
 
+def test_summary_carries_two_layer_price_metrics(client: TestClient, db_session: Session) -> None:
+    _competing(db_session, "tomate", "SUM-1")
+    register(client, "adm-sum@x.com")
+    login(client, "adm-sum@x.com")
+    promote_to_admin(db_session, "adm-sum@x.com")
+
+    resp = client.get(f"{_BASE}/summary/parsebot-alcampo")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Candidate metrics stay; the two-layer price block is nested separately (never conflated).
+    assert "candidate_pair_ratio" in body
+    price = body["price_observations"]
+    assert "unique_price_facts" in price
+    assert "provenance_occurrences" in price
+    assert "confirmed repeatedly" in price["note"]
+    assert price["quality_gate"]["status"] in ("ok", "warning", "critical")
+
+
 def test_detail_and_reject_flow(client: TestClient, db_session: Session) -> None:
     row = _competing(db_session, "cebolla", "CMP-DET-1")
     register(client, "adm2@x.com")
