@@ -18,15 +18,23 @@ crawl/capture/parser reporting the SAME fact is a new OCCURRENCE, never a new fa
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import PriceObservation, PriceObservationOccurrence
 from cestaplan_api.services import observation_identity as ident
+
+_LOG = logging.getLogger("cestaplan.observation_persistence")
+
+# Bound every lock wait so a stuck writer can never hang the transaction indefinitely; on timeout
+# PostgreSQL raises ``lock_not_available`` (surfaced, not silently swallowed).
+_DEFAULT_LOCK_TIMEOUT_MS = 5000
 
 # The occurrence-identity fields come from the SHARED definition: replaying the same tuple must not
 # create a duplicate occurrence.
@@ -54,6 +62,10 @@ class RecordMetrics:
     observations_reused: int = 0
     occurrences_created: int = 0
     occurrences_reused: int = 0
+    # Concurrency diagnostics (spec §6): how much serialization actually happened.
+    total_lock_wait_ms: int = 0
+    facts_reused_after_lock: int = 0
+    occurrences_reused_after_lock: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -61,6 +73,9 @@ class RecordMetrics:
             "observations_reused": self.observations_reused,
             "occurrences_created": self.occurrences_created,
             "occurrences_reused": self.occurrences_reused,
+            "total_lock_wait_ms": self.total_lock_wait_ms,
+            "facts_reused_after_lock": self.facts_reused_after_lock,
+            "occurrences_reused_after_lock": self.occurrences_reused_after_lock,
         }
 
 
@@ -81,15 +96,48 @@ class OccurrenceProvenance:
 
 
 @dataclass(slots=True)
+class LockDiagnostics:
+    """Sanitized per-call concurrency diagnostics (spec §6) — only lock keys (hashes) + timings.
+
+    Never carries payloads, URLs or secrets. Lock keys are non-reversible fingerprints.
+    """
+
+    fact_lock_key: int
+    occurrence_lock_key: int | None = None
+    fact_lock_acquired: bool = False
+    occurrence_lock_acquired: bool = False
+    lock_wait_ms: int = 0
+    fact_reused_after_lock: bool = False
+    occurrence_reused_after_lock: bool = False
+
+
+@dataclass(slots=True)
 class RecordResult:
     observation: PriceObservation
     occurrence: PriceObservationOccurrence
     fact_created: bool
     occurrence_created: bool
+    diagnostics: LockDiagnostics | None = None
 
 
 def _eq(column, value):
     return column.is_(None) if value is None else column == value
+
+
+def _set_lock_timeout(db: Session, timeout_ms: int) -> None:
+    """Bound lock waits for this transaction. ``timeout_ms`` is an int we control (no injection)."""
+    db.execute(text(f"SET LOCAL lock_timeout = '{int(timeout_ms)}ms'"))
+
+
+def _advisory_xact_lock(db: Session, key: int) -> int:
+    """Acquire a transactional advisory lock (released at commit/rollback). Returns the wait in ms.
+
+    Blocks up to the transaction ``lock_timeout``; on timeout PostgreSQL raises
+    ``lock_not_available`` which propagates (contention is surfaced, never an infinite wait).
+    """
+    start = time.monotonic()
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+    return int((time.monotonic() - start) * 1000)
 
 
 def _find_existing_fact(
@@ -166,13 +214,22 @@ def record_price_fact(
     *,
     imported_at: datetime,
     metrics: RecordMetrics | None = None,
+    lock_timeout_ms: int = _DEFAULT_LOCK_TIMEOUT_MS,
 ) -> RecordResult:
-    """Idempotently record ``candidate`` as an economic fact + one provenance occurrence.
+    """Idempotently record ``candidate`` as a fact + one provenance occurrence, serialized.
 
-    ``candidate`` is an UNSAVED :class:`PriceObservation` carrying the fact-identity fields. If a
-    fact with the same fingerprint already exists (same staging routing) it is REUSED — the
-    candidate is not persisted and no history is closed; otherwise the candidate becomes a new fact
-    and the prior open history row is closed. Either way exactly one occurrence is upserted.
+    Concurrency (spec §2/§6): two writers of the SAME fact (or occurrence) are serialized with
+    PostgreSQL transactional advisory locks keyed by the shared fingerprints, so the search-then-
+    insert can never race into a duplicate:
+
+    1. acquire the FACT lock (fingerprint-keyed) → re-search under the lock → create only if
+       still absent;
+    2. acquire the OCCURRENCE lock (fingerprint-keyed) → re-search the occurrence → create only if
+       still absent.
+
+    Locks are always taken fact-first then occurrence — a fixed global order that prevents deadlocks
+    — and are released automatically at commit/rollback. A NULL provenance field equals another
+    NULL (shared occurrence identity), so re-confirming a fact never duplicates its occurrence.
     """
     metrics = metrics or RecordMetrics()
     # Server-default identity fields are None on a transient object; coerce so the candidate's
@@ -180,12 +237,20 @@ def record_price_fact(
     if candidate.requires_loyalty is None:
         candidate.requires_loyalty = False
 
+    _set_lock_timeout(db, lock_timeout_ms)
+    diag = LockDiagnostics(fact_lock_key=ident.fact_lock_key(candidate))
+
+    # ---- Fact: serialize on the fact fingerprint, then re-search under the lock ----
+    diag.lock_wait_ms += _advisory_xact_lock(db, diag.fact_lock_key)
+    diag.fact_lock_acquired = True
     staging_only = bool(candidate.staging_only)
     existing = _find_existing_fact(db, candidate, staging_only=staging_only)
     if existing is not None:
         fact = existing
         fact_created = False
+        diag.fact_reused_after_lock = True
         metrics.observations_reused += 1
+        metrics.facts_reused_after_lock += 1
     else:
         _close_prior_open_row(db, candidate, closed_by_run_id=provenance.crawl_run_id)
         candidate.imported_at = candidate.imported_at or imported_at
@@ -197,10 +262,25 @@ def record_price_fact(
         fact_created = True
         metrics.observations_created += 1
 
+    # ---- Occurrence: serialize on the occurrence fingerprint (fact.id is known now) ----
+    occ_identity = {
+        "price_observation_id": fact.id,
+        "provider_code": provenance.provider_code,
+        "source_id": provenance.source_id,
+        "crawl_run_id": provenance.crawl_run_id,
+        "raw_capture_id": provenance.raw_capture_id,
+        "connector_version": provenance.connector_version,
+        "parser_version": provenance.parser_version,
+    }
+    diag.occurrence_lock_key = ident.occurrence_lock_key(occ_identity)
+    diag.lock_wait_ms += _advisory_xact_lock(db, diag.occurrence_lock_key)
+    diag.occurrence_lock_acquired = True
     occurrence = _find_existing_occurrence(db, fact.id, provenance)
     if occurrence is not None:
         occurrence_created = False
+        diag.occurrence_reused_after_lock = True
         metrics.occurrences_reused += 1
+        metrics.occurrences_reused_after_lock += 1
     else:
         occurrence = PriceObservationOccurrence(
             price_observation_id=fact.id,
@@ -221,15 +301,27 @@ def record_price_fact(
         occurrence_created = True
         metrics.occurrences_created += 1
 
+    metrics.total_lock_wait_ms += diag.lock_wait_ms
+    # Sanitized diagnostics only (lock keys are non-reversible hashes; no payloads/URLs/secrets).
+    _LOG.debug(
+        "record_price_fact fact_lock=%s occ_lock=%s wait_ms=%d fact_reused=%s occ_reused=%s",
+        diag.fact_lock_acquired,
+        diag.occurrence_lock_acquired,
+        diag.lock_wait_ms,
+        diag.fact_reused_after_lock,
+        diag.occurrence_reused_after_lock,
+    )
     return RecordResult(
         observation=fact,
         occurrence=occurrence,
         fact_created=fact_created,
         occurrence_created=occurrence_created,
+        diagnostics=diag,
     )
 
 
 __all__ = [
+    "LockDiagnostics",
     "OccurrenceProvenance",
     "RecordMetrics",
     "RecordResult",
