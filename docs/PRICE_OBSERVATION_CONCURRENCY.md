@@ -152,3 +152,30 @@ A later, separately-reviewed migration could add a persistent `fact_fingerprint`
 `occurrence_fingerprint` column (NULL-safe, computed from the shared identity) plus a `UNIQUE` index
 as defence-in-depth. It must be designed only after resolving the NULL semantics and reconciling the
 historical duplicate facts — never added blindly.
+
+## Preexisting-lane preflight & rolled-back exclusion
+
+**The lane lock guarantees consistency only when the incoming lane is valid.** Under the lane lock,
+before any write, `record_price_fact` runs a preflight over the lane's existing non-rolled-back rows
+(`_preexisting_lane_anomaly`). If the lane is **already** temporally corrupt — more than one open
+active row, overlapping active intervals, a repeated active timestamp with no disputed policy, a
+non-positive non-disputed interval, an active interval crossing a disputed barrier, or a disputed row
+with a non-empty interval — it raises `PreexistingHistoryLaneAnomaly` and makes **no** change: no
+fact, no occurrence, no `valid_until` edit, no flag. The transaction leaves no partial write.
+
+- This write path **never auto-repairs** old history. An invalid historical lane is *blocked* and
+  needs a separate, reviewed remediation.
+- This PR **prevents new anomalies** on valid lanes; it does not silently rewrite legacy history.
+- A lane with only correct disputed barriers / blocked gaps is **not** an anomaly.
+- In `provider_sync`, a blocked lane surfaces as a **quality rejection** (`blocked_lane_anomalies`
+  and a `lane_anomaly_blocked_N` reason) — never an empty catalogue. Sanitized metrics only
+  (`lane_preflight_checked`, `lane_preexisting_*`, `write_blocked_by_lane_anomaly`), no commercial
+  data.
+
+**Rolled-back is never a current price.** By model contract (§T) a row with `rolled_back_at` is
+ignored by current-price selection. The current/latest selectors (`CurrentPriceService`,
+`coverage._VariantPrice`, `readiness` open-observation count, and `project_current_prices` via
+`_latest_valid`) filter `rolled_back_at IS NULL` for **both** staging and production — the exclusion
+is on `rolled_back_at`, not on `valid_until` / `verification_status` alone. A rolled-back row can
+never be current/latest, selectable, costable, shadow-usable, promotable or projected to
+`ProductPrice`, even when `as_of` falls inside its interval.
