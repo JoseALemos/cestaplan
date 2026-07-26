@@ -56,8 +56,8 @@ from cestaplan_api.models import (
 from cestaplan_api.services import observation_identity as ident
 from cestaplan_api.services.price_history_lane import lane_invariant_report
 
-SCHEMA_VERSION = 3
-TOOL_VERSION = "0.3.0-plan-only"
+SCHEMA_VERSION = 4
+TOOL_VERSION = "0.4.0-plan-only"
 
 MUTABLE_STATE_FIELDS = (
     "valid_from", "valid_until", "verification_status",
@@ -115,18 +115,35 @@ _FK_HANDLERS: dict[tuple[str, str, str], dict[str, Any]] = {
 }
 
 
-# The referred table is always price_observation; its schema is known from the model, so a reflected
-# referred_schema of None (Postgres returns None when the referred table is in the default schema)
-# resolves to price_observation's real schema — NEVER to the referencing table's schema.
+# The ONLY canonical referred side is our own price_observation primary key. It is derived from the
+# model (never hardcoded), so a reflected referred_schema of None (Postgres returns None when the
+# referred table is in the default schema) resolves here, and a homonymous table in another schema
+# (e.g. audit.price_observation) is NEVER mistaken for our domain table.
 _PO_SCHEMA = PriceObservation.__table__.schema or "public"
+_PO_TABLE = PriceObservation.__tablename__
+_PO_PK = PriceObservation.id.key  # the canonical referred column, straight from the model
 
 
 def _fk_key(fk: dict[str, Any]) -> tuple[str, str, str]:
     return (fk["referencing_schema"], fk["referencing_table"], fk["referencing_column"])
 
 
+def _referred_is_canonical(fk: dict[str, Any]) -> bool:
+    """True only when the FK points EXACTLY at our price_observation primary key (spec §2)."""
+    return (fk["referred_schema"] == _PO_SCHEMA and fk["referred_table"] == _PO_TABLE
+            and fk["referred_column"] == _PO_PK)
+
+
 def _fk_supported(fk: dict[str, Any]) -> bool:
-    return _fk_key(fk) in _FK_HANDLERS
+    """Support requires BOTH sides: the canonical referred PK AND a registered referencing key
+    (spec §3). A shared referencing key pointing at a homonymous table is never supported."""
+    return _referred_is_canonical(fk) and _fk_key(fk) in _FK_HANDLERS
+
+
+def _fk_classification(fk: dict[str, Any]) -> str:
+    if not _referred_is_canonical(fk):
+        return "foreign_homonym"          # points at another table named price_observation
+    return "domain_supported" if _fk_key(fk) in _FK_HANDLERS else "domain_unknown"
 
 
 def _fk_ident(fk: dict[str, Any]) -> str:
@@ -307,25 +324,30 @@ def discover_incoming_fks(db: Session) -> list[dict[str, Any]]:
     for referencing_schema in schemas:
         for referencing_table in insp.get_table_names(schema=referencing_schema):
             for fk in insp.get_foreign_keys(referencing_table, schema=referencing_schema):
-                if fk.get("referred_table") != "price_observation":
+                if fk.get("referred_table") != _PO_TABLE:  # not even the right table NAME
                     continue
-                # referred_schema is None when price_observation sits in the default schema; resolve
-                # it to price_observation's real schema, never to the referencing schema.
+                # referred_schema is None when the referred table sits in the default schema;
+                # resolve to that default so an in-default homonym fails the canonical check.
                 referred_schema = fk.get("referred_schema") or _PO_SCHEMA
                 for con_col, ref_col in zip(
                     fk["constrained_columns"], fk.get("referred_columns") or [], strict=False
                 ):
-                    if ref_col != "id":
-                        continue
                     entry = {
                         "referencing_schema": referencing_schema,
                         "referencing_table": referencing_table,
                         "referencing_column": con_col,
                         "referred_schema": referred_schema,
-                        "referred_table": "price_observation",
+                        "referred_table": fk["referred_table"],
                         "referred_column": ref_col,
                         "constraint_name": fk.get("name"),
                     }
+                    # Composite-safe: keep only the pairing that lands on OUR canonical PK, plus any
+                    # pairing onto a same-named PK column of a homonym (reported as foreign, never a
+                    # dependency). Pairings onto unrelated columns are not domain FKs — skip them.
+                    if ref_col != _PO_PK:
+                        continue
+                    entry["referred_is_canonical"] = _referred_is_canonical(entry)
+                    entry["classification"] = _fk_classification(entry)
                     entry["supported"] = _fk_supported(entry)
                     found.append(entry)
     return found
@@ -350,7 +372,9 @@ def _unknown_fk_refs(db: Session, discovered, obs_ids) -> dict[int, list[str]]:
     if not obs_ids:
         return refs
     for fk in discovered:
-        if _fk_supported(fk):
+        # Only a DOMAIN FK that is unknown can exclude a lane. A supported FK is handled; a
+        # foreign homonym (points at another table named price_observation) is never our dependency.
+        if fk["classification"] != "domain_unknown":
             continue
         ref = _fk_ident(fk)
         t = Table(fk["referencing_table"], MetaData(), schema=fk["referencing_schema"],
@@ -430,10 +454,12 @@ def _load(db: Session, provider_code: str | None):
     discovered = discover_incoming_fks(db)
     supported_fk: dict[int, list[dict[str, Any]]] = defaultdict(list)
     if obs_ids:
-        # Inventory dependency rows for each SUPPORTED, emitting FK, keyed by its exact handler.
+        # Inventory dependency rows for each SUPPORTED (both sides validated), emitting FK.
         for fk in discovered:
-            handler = _FK_HANDLERS.get(_fk_key(fk))
-            if not handler or not handler["emit"] or handler["model"] is None:
+            if fk["classification"] != "domain_supported":
+                continue
+            handler = _FK_HANDLERS[_fk_key(fk)]
+            if not handler["emit"] or handler["model"] is None:
                 continue
             model = handler["model"]
             col = getattr(model, fk["referencing_column"])
@@ -511,15 +537,30 @@ def _template_hash(row, expected: dict[str, Any]) -> str:
     return ident.row_hash(tmpl)
 
 
-def _excluded_lane(lane_fp, rows, occ_by_obs, supported_fk, reasons) -> dict[str, Any]:
+def _preflight_diag(reasons) -> str:
+    """Explicit diagnostic for EARLY exclusions, where a row was not yet classified (spec §4)."""
+    if "null_timestamp" in reasons:
+        return "unclassified_null_timestamp"
+    if any(str(x).startswith("uncovered_fk") for x in reasons):
+        return "unclassified_unknown_fk"
+    return "preflight_not_classified"
+
+
+def _excluded_lane(lane_fp, rows, occ_by_obs, supported_fk, reasons,
+                   diagnostic=None) -> dict[str, Any]:
     """An excluded lane carries ZERO executable changes (spec §4): every row reverts to its ORIGINAL
-    state, its template hash IS the original full-row hash, and it keeps full evidence."""
+    state, its template hash IS the original full-row hash, and it keeps full evidence. The
+    ``diagnostic_classification`` PRESERVES the classification computed before a late exclusion (or
+    explicit ``unclassified_*`` marker for early, pre-classification exclusions)."""
+    fallback = _preflight_diag(reasons)
+    diag = diagnostic or {}
     manifest_rows = []
     for r in rows:
         identity, temporal, integrity = _split_row(r)
         manifest_rows.append({
             "id": r.id, "fact_fingerprint": ident.price_fact_fingerprint(r),
-            "classification": "excluded", "diagnostic_classification": "excluded",
+            "classification": "excluded",
+            "diagnostic_classification": diag.get(r.id) or fallback,
             "action": "excluded_no_action",
             "immutable_identity": identity, "original_temporal_state": temporal,
             "integrity": integrity,
@@ -625,7 +666,7 @@ def _plan_lane(lane_fp, rows, occ_by_obs, supported_fk, unknown_fk) -> dict[str,
     if not sim_ok:
         reasons.append("post_sim_invariant_fail")
     if reasons:  # late exclusion (human-reviewed conflict / failed sim) -> no residual actions
-        return _excluded_lane(lane_fp, rows, occ_by_obs, supported_fk, reasons)
+        return _excluded_lane(lane_fp, rows, occ_by_obs, supported_fk, reasons, diagnostic)
 
     side_effects: list[dict[str, Any]] = []
     for r in disputed_reps:
@@ -792,13 +833,18 @@ def _dry_run_in_snapshot(
     report["exclusion_reasons"] = dict(exclusion_reasons)
     report["projected_invariants_all_ok"] = all(
         _sim_report_ok(p["projected_invariants"]) for p in lane_plans if not p["excluded"])
+    def _ref(f):
+        return f"{f['referencing_schema']}.{f['referencing_table']}.{f['referencing_column']}"
+
     report["fk_discovered"] = sorted(_fk_ident(f) for f in discovered)
+    # Only FKs that point EXACTLY at our canonical price_observation PK enter supported/unknown.
     report["fk_supported"] = sorted(
-        f"{f['referencing_schema']}.{f['referencing_table']}.{f['referencing_column']}"
-        for f in discovered if _fk_supported(f))
+        _ref(f) for f in discovered if f["classification"] == "domain_supported")
     report["fk_unknown"] = sorted(
-        f"{f['referencing_schema']}.{f['referencing_table']}.{f['referencing_column']}"
-        for f in discovered if not _fk_supported(f))
+        _ref(f) for f in discovered if f["classification"] == "domain_unknown")
+    # FKs to a table merely NAMED price_observation elsewhere — reported, never a dependency.
+    report["fk_foreign_ignored"] = sorted(
+        _fk_ident(f) for f in discovered if f["classification"] == "foreign_homonym")
     report["apply_ready"] = False
     report["apply_blockers"] = blockers
     report["writer_contract_status"] = "unverified"
@@ -850,7 +896,7 @@ def _seal(provider_code, retailer_id, baseline, lane_plans, discovered, provenan
         "commit_provenance": {**provenance, "complete": prov_complete},
         "provider_code": provider_code, "retailer_id": retailer_id, "baseline_counts": baseline,
         "fk_discovered": sorted(
-            f"{_fk_ident(f)}:{f['constraint_name']}:{f['supported']}" for f in discovered),
+            f"{_fk_ident(f)}:{f['constraint_name']}:{f['classification']}" for f in discovered),
         "apply_ready": False, "apply_blockers": sorted(blockers),
         "apply_prerequisites": sorted(apply_prerequisites),
         "lanes": lanes_seal,

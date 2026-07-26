@@ -538,6 +538,31 @@ def test_seal_changes_with_fk_constraint_name() -> None:  # §5.9
     assert _seal_of(_mini_lane(fk_constraint="c1")) != _seal_of(_mini_lane(fk_constraint="c2"))
 
 
+# --------------------------------------------------------------------------- #
+# §1 manifest versioning (v4)
+# --------------------------------------------------------------------------- #
+def test_manifest_declares_v4(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    m = _plan(db_session)["manifest"]
+    assert m["schema_version"] == 4
+    assert m["tool_version"] == "0.4.0-plan-only"
+    assert planner.SCHEMA_VERSION == 4 and planner.TOOL_VERSION == "0.4.0-plan-only"
+
+
+def test_plan_hash_depends_on_schema_version(monkeypatch) -> None:
+    base = _seal_of(_mini_lane())
+    monkeypatch.setattr(planner, "SCHEMA_VERSION", 999)
+    assert _seal_of(_mini_lane()) != base
+
+
+def test_plan_hash_depends_on_tool_version(monkeypatch) -> None:
+    base = _seal_of(_mini_lane())
+    monkeypatch.setattr(planner, "TOOL_VERSION", "9.9.9-other")
+    assert _seal_of(_mini_lane()) != base
+
+
 def test_seal_stable_and_order_independent() -> None:
     lane = _mini_lane()
     assert _seal_of(lane) == _seal_of(lane)
@@ -611,6 +636,51 @@ def test_excluded_null_timestamp(db_session: Session, monkeypatch) -> None:
     lane = next(x for x in _plan(db_session)["manifest"]["lanes"] if x["excluded"])
     _assert_excluded_clean(lane)
     assert "null_timestamp" in lane["exclusion_reasons"]
+    # §4: an early exclusion could not classify the rows -> explicit preflight diagnostic.
+    for row in lane["rows"]:
+        assert row["diagnostic_classification"] == "unclassified_null_timestamp"
+
+
+# --------------------------------------------------------------------------- #
+# §4 excluded lanes preserve the pre-exclusion diagnostic (or an explicit preflight marker)
+# --------------------------------------------------------------------------- #
+def test_excluded_human_conflict_preserves_diagnostic(db_session: Session) -> None:  # §4.1
+    retailer, v = _fixture(db_session)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0, status="human_verified")
+    _obs(db_session, retailer.id, v.id, amount="1.29", observed_at=T0)
+    lane = next(x for x in _plan(db_session)["manifest"]["lanes"] if x["excluded"])
+    _assert_excluded_clean(lane)
+    diags = {row["diagnostic_classification"] for row in lane["rows"]}
+    assert "same_timestamp_semantic_conflict_representative" in diags  # conflict diagnosis kept
+    assert "excluded" not in diags
+
+
+def test_excluded_lane_with_dups_keeps_dup_diagnostic(db_session: Session) -> None:  # §4.2
+    retailer, v = _fixture(db_session)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)  # exact duplicate of A
+    _obs(db_session, retailer.id, v.id, amount="1.29", observed_at=T0,
+         status="human_verified")  # forces a human-reviewed conflict -> late exclusion
+    lane = next(x for x in _plan(db_session)["manifest"]["lanes"] if x["excluded"])
+    _assert_excluded_clean(lane)
+    diags = [row["diagnostic_classification"] for row in lane["rows"]]
+    assert "exact_duplicate_noncanonical" in diags  # the duplicate is still identifiable
+    assert lane["planned_changes"] == 0 and lane["proposed_side_effects"] == []
+
+
+def test_excluded_unknown_fk_uses_preflight_diagnostic(db_session: Session) -> None:  # §4.3
+    retailer, v = _fixture(db_session)
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    db_session.execute(text("CREATE TABLE synth_ref2 (id bigint PRIMARY KEY, "
+                            "obs_id bigint REFERENCES price_observation(id))"))
+    db_session.execute(text("INSERT INTO synth_ref2 (id, obs_id) VALUES (1, :o)"), {"o": a.id})
+    db_session.flush()
+    lane = next(x for x in _plan(db_session)["manifest"]["lanes"] if x["excluded"])
+    _assert_excluded_clean(lane)
+    for row in lane["rows"]:
+        assert row["diagnostic_classification"] == "unclassified_unknown_fk"
+        assert row["action"] == "excluded_no_action"
 
 
 # --------------------------------------------------------------------------- #
@@ -759,6 +829,52 @@ def test_reflection_never_queries_the_wrong_schema(db_session: Session) -> None:
     assert any(
         "audit.legacy_reference.price_observation_id->public.price_observation.id" in reason
         for reason in lane["exclusion_reasons"])
+
+
+# --------------------------------------------------------------------------- #
+# §2/§3 support requires BOTH sides; a homonym in another schema is foreign, never a dependency
+# --------------------------------------------------------------------------- #
+def _fkdict(*, rsch="public", rtab="price_anomaly", rcol="price_observation_id",
+           dsch="public", dtab="price_observation", dcol="id", name="c"):
+    return {"referencing_schema": rsch, "referencing_table": rtab, "referencing_column": rcol,
+            "referred_schema": dsch, "referred_table": dtab, "referred_column": dcol,
+            "constraint_name": name}
+
+
+def test_support_requires_both_sides() -> None:  # §3.1 / §3.2 / §3.3
+    assert planner._fk_supported(_fkdict())                   # public.price_anomaly -> public PK
+    assert not planner._fk_supported(_fkdict(dsch="audit"))   # -> audit.price_observation.id
+    assert not planner._fk_supported(_fkdict(rsch="audit"))   # audit.price_anomaly -> unknown
+
+
+def test_classification_domain_vs_foreign() -> None:
+    assert planner._fk_classification(_fkdict()) == "domain_supported"
+    assert planner._fk_classification(_fkdict(rtab="synth")) == "domain_unknown"
+    assert planner._fk_classification(_fkdict(dsch="audit")) == "foreign_homonym"
+
+
+def test_homonym_referred_is_foreign_never_a_dependency(db_session: Session) -> None:  # §3.2/§3.4
+    retailer, v = _fixture(db_session)
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    base = _plan(db_session)["report"]["plan_hash"]
+    db_session.execute(text("CREATE SCHEMA IF NOT EXISTS audit"))
+    db_session.execute(text("CREATE TABLE audit.price_observation (id bigint PRIMARY KEY)"))
+    db_session.execute(text("INSERT INTO audit.price_observation (id) VALUES (:o)"), {"o": a.id})
+    db_session.execute(text(
+        "CREATE TABLE pa_like (id bigint PRIMARY KEY, "
+        "price_observation_id bigint REFERENCES audit.price_observation(id))"))
+    db_session.execute(text("INSERT INTO pa_like (id, price_observation_id) VALUES (1, :o)"),
+                       {"o": a.id})
+    db_session.flush()
+    r = _plan(db_session)["report"]
+    # An FK to audit.price_observation is foreign — reported, but NOT supported/unknown, and it
+    # never excludes a lane by an accidental ID match. Its presence still moves the plan_hash.
+    assert any("audit.price_observation.id" in f for f in r["fk_foreign_ignored"])
+    assert not any("pa_like" in f for f in r["fk_supported"])
+    assert not any("pa_like" in f for f in r["fk_unknown"])
+    assert r["lanes_excluded"] == 0
+    assert r["plan_hash"] != base
 
 
 # --------------------------------------------------------------------------- #
