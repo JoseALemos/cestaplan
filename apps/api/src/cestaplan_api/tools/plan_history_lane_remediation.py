@@ -4,13 +4,19 @@ It NEVER writes: it only SELECTs (under a REPEATABLE READ, READ ONLY snapshot), 
 lane's rows, and PROPOSES a reversible plan WITHOUT deleting any fact or evidence. ``--apply`` is
 rejected. This is a PLAN-ONLY tool: ``apply_ready`` is ALWAYS False.
 
-Safety of the portable manifest (spec §1): it never contains a URL, secret, payload, header, token,
-credential or connection string. ``source_url`` (and anything that looks like a URL/secret) is
-redacted to ``*_present`` + ``*_hash`` — the value is hashed in memory, never emitted — and a
-recursive output scanner fails the run if anything sensitive slips through. Each row is split into
-immutable identity, original temporal state, and integrity (a ``full_row_hash`` over ALL fields,
-including the redacted ones, so a future apply can verify the live row is unchanged without ever
-seeing the sensitive value).
+Safety of the portable manifest (spec §1/§4): it never contains a URL, secret, payload, header,
+token, credential or connection string. Redaction is by KEY NAME (case-insensitive, ignoring
+hyphens/underscores) as well as by value shape: a sensitive key never yields its raw value, only
+``*_present`` + ``*_hash``. A recursive output scanner fails the run if any sensitive KEY (any value
+type) or URL/secret VALUE slips through. Each row is split into immutable identity, original
+temporal state, and integrity (a ``full_row_hash`` over ALL fields, including the redacted ones, so
+a future apply can verify the live row is unchanged without seeing the sensitive value).
+
+Incoming foreign keys are discovered from the live catalog with the REFERENCING side (schema/table/
+column holding the FK) kept distinct from the REFERRED side (schema/table/column of the referred
+table), supported only by an EXACT (schema, table, column) handler key — a table sharing a name in
+another schema is treated as unknown (spec §1/§2/§5). The public ``dry_run`` always pins REPEATABLE
+READ ONLY snapshot first, rejecting every unsafe precondition with a typed exception (spec §5/§6).
 
 The plan proposes only temporal-state changes (valid_from/valid_until/verification_status/
 rolled_back_at/rolled_back_by/closed_by_run_id) plus a proposed ``create_price_anomaly`` side
@@ -35,6 +41,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import MetaData, Table, func, inspect, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import Base, SessionLocal
@@ -62,8 +69,27 @@ _DISPUTED = "disputed"
 _SAME_TIMESTAMP_CONFLICT = "same_timestamp_conflict"
 _REDACTED = "<redacted>"
 
-# Fields whose VALUE must never appear in the manifest (only *_present + *_hash).
-_SENSITIVE_FIELD_NAMES = frozenset({"source_url"})
+# §4 — sensitive KEY policy. A key whose normalized name is in this set must never emit its raw
+# value, whatever the value's type (str/int/None/empty/nested). Matching is case-insensitive and
+# ignores hyphens/underscores, so "API-Key", "api_key" and "apikey" all collapse to the same name.
+_SENSITIVE_KEY_NAMES = frozenset({
+    "api_key", "apikey", "token", "access_token", "refresh_token", "secret", "client_secret",
+    "password", "passwd", "authorization", "bearer", "database_url", "connection_string",
+    "headers", "cookies", "payload", "raw_payload", "request_body", "response_body", "source_url",
+})
+
+
+def _norm_key(k: Any) -> str:
+    return re.sub(r"[-_]", "", str(k).lower())
+
+
+_SENSITIVE_KEY_NORMS = frozenset(_norm_key(k) for k in _SENSITIVE_KEY_NAMES)
+
+
+def _is_sensitive_key(k: Any) -> bool:
+    return isinstance(k, str) and _norm_key(k) in _SENSITIVE_KEY_NORMS
+
+
 _URL_RE = re.compile(r"https?://", re.IGNORECASE)
 _SECRET_RE = re.compile(
     r"(api[_-]?key|secret|passwd|password|bearer|authorization|"
@@ -71,16 +97,41 @@ _SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Incoming-FK handler registry (preserve/restore policy). The set of ACTUAL references is DISCOVERED
-# from the live schema (spec §2/§5); this is only keyed by table name.
-_FK_HANDLERS: dict[str, dict[str, Any]] = {
-    "promotion_rule": {
-        "apply_policy": "preserve_unchanged", "restore_policy": "preserve_unchanged"},
-    "price_anomaly": {
-        "apply_policy": "preserve_unchanged", "restore_policy": "preserve_unchanged"},
+# Incoming-FK handler registry, keyed by the EXACT (referencing_schema, referencing_table,
+# referencing_column) — NEVER by table name alone (spec §2/§5). A table that merely shares a name
+# (e.g. audit.price_anomaly) is treated as UNKNOWN unless its full key is registered. ``emit`` marks
+# the FKs whose rows are inventoried as dependency state; the occurrence FK is handled (it never
+# excludes a lane) but inventoried as occurrences, not as a dependency row.
+_FK_HANDLERS: dict[tuple[str, str, str], dict[str, Any]] = {
+    ("public", "promotion_rule", "price_observation_id"): {
+        "model": PromotionRule, "apply_policy": "preserve_unchanged",
+        "restore_policy": "preserve_unchanged", "emit": True},
+    ("public", "price_anomaly", "price_observation_id"): {
+        "model": PriceAnomaly, "apply_policy": "preserve_unchanged",
+        "restore_policy": "preserve_unchanged", "emit": True},
+    ("public", "price_observation_occurrence", "price_observation_id"): {
+        "model": None, "apply_policy": "preserve_unchanged",
+        "restore_policy": "preserve_unchanged", "emit": False},
 }
-_OCCURRENCE_FK_TABLE = "price_observation_occurrence"
-_HANDLED_FK_TABLES = set(_FK_HANDLERS) | {_OCCURRENCE_FK_TABLE}
+
+
+# The referred table is always price_observation; its schema is known from the model, so a reflected
+# referred_schema of None (Postgres returns None when the referred table is in the default schema)
+# resolves to price_observation's real schema — NEVER to the referencing table's schema.
+_PO_SCHEMA = PriceObservation.__table__.schema or "public"
+
+
+def _fk_key(fk: dict[str, Any]) -> tuple[str, str, str]:
+    return (fk["referencing_schema"], fk["referencing_table"], fk["referencing_column"])
+
+
+def _fk_supported(fk: dict[str, Any]) -> bool:
+    return _fk_key(fk) in _FK_HANDLERS
+
+
+def _fk_ident(fk: dict[str, Any]) -> str:
+    return (f"{fk['referencing_schema']}.{fk['referencing_table']}.{fk['referencing_column']}"
+            f"->{fk['referred_schema']}.{fk['referred_table']}.{fk['referred_column']}")
 
 _OCC_KEEP = (
     "id", "price_observation_id", "provider_code", "source_id", "crawl_run_id", "raw_capture_id",
@@ -128,29 +179,75 @@ def _apply_blockers(prov_complete: bool) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Read-only REPEATABLE READ snapshot (spec §2)
+# Read-only REPEATABLE READ snapshot (spec §2/§6) — typed gates, never `assert`.
 # --------------------------------------------------------------------------- #
+class PlannerSafetyError(RuntimeError):
+    """Base for every planner safety-gate failure. Raised (not asserted) so the gate holds under
+    ``python -O``."""
+
+
+class PlannerSessionNotClean(PlannerSafetyError):
+    """The session has pending new/dirty/deleted objects — an unclean starting point."""
+
+
+class PlannerRequiresPostgres(PlannerSafetyError):
+    """The bind is not a PostgreSQL connection (no REPEATABLE READ READ ONLY snapshot possible)."""
+
+
+class PlannerReadOnlySnapshotFailed(PlannerSafetyError):
+    """The transaction is not READ ONLY at REPEATABLE READ after the snapshot was requested."""
+
+
+class PlannerTransactionAlreadyStarted(PlannerSafetyError):
+    """A query already ran in this transaction, so the snapshot cannot be pinned before it."""
+
+
+def _is_active_txn_error(exc: DBAPIError) -> bool:
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    return code == "25001" or "must be called before any query" in str(exc).lower()
+
+
 def readonly_preflight(db: Session) -> dict[str, Any]:
-    """Assert a clean PostgreSQL session and pin a REPEATABLE READ, READ ONLY snapshot BEFORE any
-    read. Must be the first statement of the transaction."""
-    assert not db.new and not db.dirty and not db.deleted, "planner requires a clean session"
-    assert db.bind is not None and db.bind.dialect.name == "postgresql", "requires PostgreSQL"
-    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-    read_only = db.execute(text("SHOW transaction_read_only")).scalar() == "on"
+    """Pin a REPEATABLE READ, READ ONLY snapshot BEFORE any read, rejecting every unsafe
+    precondition with an explicit typed exception (spec §6). Must be the transaction's 1st stmt."""
+    if db.new:
+        raise PlannerSessionNotClean(f"session has {len(db.new)} pending new object(s)")
+    if db.dirty:
+        raise PlannerSessionNotClean(f"session has {len(db.dirty)} dirty object(s)")
+    if db.deleted:
+        raise PlannerSessionNotClean(f"session has {len(db.deleted)} deleted object(s)")
+    bind = db.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        raise PlannerRequiresPostgres(
+            f"requires PostgreSQL, got {bind.dialect.name if bind else None!r}")
+    try:
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+    except DBAPIError as exc:
+        if _is_active_txn_error(exc):
+            raise PlannerTransactionAlreadyStarted(
+                "a query already ran in this transaction; snapshot cannot be pinned") from exc
+        raise
+    read_only = db.execute(text("SHOW transaction_read_only")).scalar()
     isolation = db.execute(text("SHOW transaction_isolation")).scalar()
-    assert read_only and isolation == "repeatable read", "read-only snapshot not established"
-    return {"transaction_read_only": read_only, "snapshot_isolation": isolation}
+    if read_only != "on":
+        raise PlannerReadOnlySnapshotFailed(f"transaction_read_only={read_only!r}, expected 'on'")
+    if isolation != "repeatable read":
+        raise PlannerReadOnlySnapshotFailed(
+            f"transaction_isolation={isolation!r}, expected 'repeatable read'")
+    return {"transaction_read_only": True, "snapshot_isolation": isolation}
 
 
 # --------------------------------------------------------------------------- #
 # Sensitive-data redaction + output scanner (spec §1)
 # --------------------------------------------------------------------------- #
 def _scrub(v: Any) -> Any:
-    """Recursively replace any URL/secret-looking string with a redaction marker."""
+    """Recursively replace any URL/secret-looking string with a redaction marker, and replace any
+    nested sensitive KEY with its ``*_present`` + ``*_hash`` form."""
     if isinstance(v, str):
         return _REDACTED if (_URL_RE.search(v) or _SECRET_RE.search(v)) else v
     if isinstance(v, dict):
-        return {k: _scrub(x) for k, x in v.items()}
+        return _sanitize_mapping(v)
     if isinstance(v, list):
         return [_scrub(x) for x in v]
     return v
@@ -160,21 +257,36 @@ def _value_hash(v: Any) -> str:
     return hashlib.sha256(json.dumps(v, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def scan_sensitive(obj: Any, path: str = "$") -> list[str]:
-    """Return violation paths if the (already-serialized) output still holds a URL/secret/raw
-    sensitive field (spec §1). Empty list == clean."""
-    hits: list[str] = []
+def _sanitize_mapping(full: dict[Any, Any]) -> dict[str, Any]:
+    """Emit a dict safe for the manifest: a sensitive KEY never yields its raw value — it becomes
+    ``{key}_present`` (bool) + ``{key}_hash`` (sha256 of the value, or None). Non-sensitive values
+    are recursively scrubbed. The full row is hashed elsewhere so apply can verify integrity."""
+    out: dict[str, Any] = {}
+    for k, v in full.items():
+        if _is_sensitive_key(k):
+            out[f"{k}_present"] = v is not None and v != ""
+            out[f"{k}_hash"] = _value_hash(v) if (v is not None and v != "") else None
+        else:
+            out[k] = _scrub(v)
+    return out
+
+
+def scan_sensitive(obj: Any, path: str = "$") -> list[dict[str, str]]:
+    """Return violations if the (already-serialized) output still holds a sensitive KEY (any value,
+    any type) or a URL/secret VALUE (spec §1/§4). Each hit is ``{"path","kind"}`` with
+    kind in {"key","value"}. Empty list == clean."""
+    hits: list[dict[str, str]] = []
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if k in _SENSITIVE_FIELD_NAMES and isinstance(v, str) and v not in (_REDACTED, ""):
-                hits.append(f"{path}.{k}")
+            if _is_sensitive_key(k):
+                hits.append({"path": f"{path}.{k}", "kind": "key"})
             hits += scan_sensitive(v, f"{path}.{k}")
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             hits += scan_sensitive(v, f"{path}[{i}]")
     elif isinstance(obj, str) and obj != _REDACTED and (
             _URL_RE.search(obj) or _SECRET_RE.search(obj)):
-        hits.append(path)
+        hits.append({"path": path, "kind": "value"})
     return hits
 
 
@@ -184,51 +296,67 @@ def scan_sensitive(obj: Any, path: str = "$") -> list[str]:
 _SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast"}
 
 
-def discover_incoming_fks(db: Session) -> list[dict[str, str]]:
-    """Every FK column (any user schema) that references price_observation.id, via Inspector.
-    Composite-safe: only the column paired with ``id`` is recorded."""
+def discover_incoming_fks(db: Session) -> list[dict[str, Any]]:
+    """Every FK column (any user schema) that references price_observation.id, via the Inspector.
+    Distinguishes the REFERENCING side (schema/table/column that holds the FK) from the REFERRED
+    side (schema/table/column of price_observation) — never a single ambiguous "schema" (spec §1).
+    Composite-safe: only the column paired with the referred ``id`` is recorded."""
     insp = inspect(db.connection())
-    found: list[dict[str, str]] = []
+    found: list[dict[str, Any]] = []
     schemas = [s for s in insp.get_schema_names() if s not in _SYSTEM_SCHEMAS]
-    for schema in schemas:
-        for table in insp.get_table_names(schema=schema):
-            for fk in insp.get_foreign_keys(table, schema=schema):
+    for referencing_schema in schemas:
+        for referencing_table in insp.get_table_names(schema=referencing_schema):
+            for fk in insp.get_foreign_keys(referencing_table, schema=referencing_schema):
                 if fk.get("referred_table") != "price_observation":
                     continue
+                # referred_schema is None when price_observation sits in the default schema; resolve
+                # it to price_observation's real schema, never to the referencing schema.
+                referred_schema = fk.get("referred_schema") or _PO_SCHEMA
                 for con_col, ref_col in zip(
                     fk["constrained_columns"], fk.get("referred_columns") or [], strict=False
                 ):
-                    if ref_col == "id":
-                        found.append({
-                            "schema": fk.get("referred_schema") or schema, "table": table,
-                            "column": con_col, "supported": str(table in _HANDLED_FK_TABLES),
-                        })
+                    if ref_col != "id":
+                        continue
+                    entry = {
+                        "referencing_schema": referencing_schema,
+                        "referencing_table": referencing_table,
+                        "referencing_column": con_col,
+                        "referred_schema": referred_schema,
+                        "referred_table": "price_observation",
+                        "referred_column": ref_col,
+                        "constraint_name": fk.get("name"),
+                    }
+                    entry["supported"] = _fk_supported(entry)
+                    found.append(entry)
     return found
 
 
-def metadata_fk_tables() -> set[str]:
-    out: set[str] = set()
+def metadata_fk_keys() -> set[tuple[str, str, str]]:
+    """(schema, table, column) of every model FK to price_observation.id — the keys a handler must
+    cover exactly, so a new model FK without a handler is caught."""
+    out: set[tuple[str, str, str]] = set()
     for table in Base.metadata.tables.values():
         for fk in table.foreign_keys:
-            if fk.column.table.name == "price_observation":
-                out.add(table.name)
+            if fk.column.table.name == "price_observation" and fk.column.name == "id":
+                out.add((table.schema or "public", table.name, fk.parent.name))
     return out
 
 
 def _unknown_fk_refs(db: Session, discovered, obs_ids) -> dict[int, list[str]]:
-    """Which observations are referenced by an UNKNOWN FK (excludes their lane). Uses reflection +
-    SQLAlchemy constructors — never f-string identifiers (spec §5)."""
+    """Which observations are referenced by an UNKNOWN FK (excludes their lane). Reflects and
+    queries the REFERENCING schema+table+column (never the referred side), via SQLAlchemy
+    constructors — never f-string identifiers (spec §1/§5)."""
     refs: dict[int, list[str]] = defaultdict(list)
     if not obs_ids:
         return refs
     for fk in discovered:
-        if fk["table"] in _HANDLED_FK_TABLES:
+        if _fk_supported(fk):
             continue
-        ref = f"{fk['schema']}.{fk['table']}.{fk['column']}"
-        t = Table(fk["table"], MetaData(), schema=fk["schema"], autoload_with=db.connection())
-        for (oid,) in db.execute(
-            select(t.c[fk["column"]]).where(t.c[fk["column"]].in_(obs_ids))
-        ).all():
+        ref = _fk_ident(fk)
+        t = Table(fk["referencing_table"], MetaData(), schema=fk["referencing_schema"],
+                  autoload_with=db.connection())
+        col = t.c[fk["referencing_column"]]
+        for (oid,) in db.execute(select(col).where(col.in_(obs_ids))).all():
             if oid is not None:
                 refs[oid].append(ref)
     return refs
@@ -246,28 +374,39 @@ def _retailer_id(db: Session, provider_code: str) -> int | None:
 def _occ_manifest(o: PriceObservationOccurrence) -> dict[str, Any]:
     full = {c.name: json.loads(json.dumps(getattr(o, c.name), default=str))
             for c in PriceObservationOccurrence.__table__.columns}
-    keep: dict[str, Any] = {k: _scrub(full.get(k)) for k in _OCC_KEEP}
+    keep: dict[str, Any] = {}
+    for k in _OCC_KEEP:
+        if _is_sensitive_key(k):
+            keep[f"{k}_present"] = full.get(k) is not None
+            keep[f"{k}_hash"] = _value_hash(full[k]) if full.get(k) else None
+        else:
+            keep[k] = _scrub(full.get(k))
     keep["occurrence_hash"] = ident.row_hash(full)
     keep["source_url_present"] = full.get("source_url") is not None
     keep["source_url_hash"] = _value_hash(full["source_url"]) if full.get("source_url") else None
     return keep
 
 
-def _fk_manifest(table: str, model, row) -> dict[str, Any]:
+def _fk_manifest(fk: dict[str, Any], model, row) -> dict[str, Any]:
+    """Build a dependency-row entry from the EXACT discovered FK definition and its handler —
+    nothing is hardcoded to public/price_observation_id (spec §2)."""
     full = {c.name: json.loads(json.dumps(getattr(row, c.name), default=str))
             for c in model.__table__.columns}
-    handler = _FK_HANDLERS[table]
-    sanitized = {k: (None if k in _SENSITIVE_FIELD_NAMES else _scrub(v)) for k, v in full.items()}
-    entry = {
-        "schema": "public", "table": table, "pk": row.id, "fk_column": "price_observation_id",
-        "sanitized_values": sanitized, "full_row_hash": ident.row_hash(full),
+    handler = _FK_HANDLERS[_fk_key(fk)]
+    return {
+        "referencing_schema": fk["referencing_schema"],
+        "referencing_table": fk["referencing_table"],
+        "referencing_column": fk["referencing_column"],
+        "referred_schema": fk["referred_schema"],
+        "referred_table": fk["referred_table"],
+        "referred_column": fk["referred_column"],
+        "constraint_name": fk["constraint_name"],
+        "pk": row.id,
+        "sanitized_values": _sanitize_mapping(full),
+        "full_row_hash": ident.row_hash(full),
         "apply_policy": handler["apply_policy"], "restore_policy": handler["restore_policy"],
         "kind": "preexisting",
     }
-    if "source_url" in full:
-        entry["source_url_present"] = full["source_url"] is not None
-        entry["source_url_hash"] = _value_hash(full["source_url"]) if full["source_url"] else None
-    return entry
 
 
 def _load(db: Session, provider_code: str | None):
@@ -290,12 +429,17 @@ def _load(db: Session, provider_code: str | None):
 
     discovered = discover_incoming_fks(db)
     supported_fk: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    _models = {"promotion_rule": PromotionRule, "price_anomaly": PriceAnomaly}
     if obs_ids:
-        for table, model in _models.items():
-            for row in db.execute(
-                select(model).where(model.price_observation_id.in_(obs_ids))).scalars():
-                supported_fk[row.price_observation_id].append(_fk_manifest(table, model, row))
+        # Inventory dependency rows for each SUPPORTED, emitting FK, keyed by its exact handler.
+        for fk in discovered:
+            handler = _FK_HANDLERS.get(_fk_key(fk))
+            if not handler or not handler["emit"] or handler["model"] is None:
+                continue
+            model = handler["model"]
+            col = getattr(model, fk["referencing_column"])
+            for row in db.execute(select(model).where(col.in_(obs_ids))).scalars():
+                supported_fk[getattr(row, fk["referencing_column"])].append(
+                    _fk_manifest(fk, model, row))
     unknown_fk = _unknown_fk_refs(db, discovered, obs_ids)
 
     lanes: dict[str, list[PriceObservation]] = defaultdict(list)
@@ -348,9 +492,9 @@ def _split_row(row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     for k, v in full.items():
         if k in MUTABLE_STATE_FIELDS:
             continue
-        if k in _SENSITIVE_FIELD_NAMES:
-            integrity[f"{k}_present"] = v is not None
-            integrity[f"{k}_hash"] = _value_hash(v) if v is not None else None
+        if _is_sensitive_key(k):
+            integrity[f"{k}_present"] = v is not None and v != ""
+            integrity[f"{k}_hash"] = _value_hash(v) if (v is not None and v != "") else None
             continue
         identity[k] = _scrub(v)
     return identity, {f: full[f] for f in MUTABLE_STATE_FIELDS}, integrity
@@ -568,11 +712,20 @@ def _ambiguous_rows(rows, occ_by_obs) -> int:
     return n
 
 
-def dry_run(
-    db: Session, provider_code: str | None = None, *, snapshot: bool = False
+def dry_run(db: Session, provider_code: str | None = None) -> dict[str, Any]:
+    """Public entry point (spec §5): it ALWAYS pins a REPEATABLE READ, READ ONLY snapshot first —
+    there is no bypass. Tests needing a pre-arranged transaction call ``_dry_run_in_snapshot``
+    directly; no executable planner path can skip the snapshot gate."""
+    snap = readonly_preflight(db)
+    return _dry_run_in_snapshot(db, provider_code, snap)
+
+
+def _dry_run_in_snapshot(
+    db: Session, provider_code: str | None = None, snap: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    snap = readonly_preflight(db) if snapshot else {
-        "transaction_read_only": None, "snapshot_isolation": None}
+    """Body that PRESUPPOSES the read-only snapshot is already active (pinned by the public
+    ``dry_run``). Not a production entry point."""
+    snap = snap or {"transaction_read_only": None, "snapshot_isolation": None}
     lanes, occ_by_obs, supported_fk, unknown_fk, retailer_id, discovered = _load(db, provider_code)
     baseline = {
         "price_observation": int(
@@ -639,12 +792,13 @@ def dry_run(
     report["exclusion_reasons"] = dict(exclusion_reasons)
     report["projected_invariants_all_ok"] = all(
         _sim_report_ok(p["projected_invariants"]) for p in lane_plans if not p["excluded"])
-    report["fk_discovered"] = sorted(
-        f"{f['schema']}.{f['table']}.{f['column']}" for f in discovered)
+    report["fk_discovered"] = sorted(_fk_ident(f) for f in discovered)
     report["fk_supported"] = sorted(
-        {f["table"] for f in discovered if f["table"] in _HANDLED_FK_TABLES})
+        f"{f['referencing_schema']}.{f['referencing_table']}.{f['referencing_column']}"
+        for f in discovered if _fk_supported(f))
     report["fk_unknown"] = sorted(
-        {f["table"] for f in discovered if f["table"] not in _HANDLED_FK_TABLES})
+        f"{f['referencing_schema']}.{f['referencing_table']}.{f['referencing_column']}"
+        for f in discovered if not _fk_supported(f))
     report["apply_ready"] = False
     report["apply_blockers"] = blockers
     report["writer_contract_status"] = "unverified"
@@ -654,7 +808,10 @@ def dry_run(
     report["transaction_read_only"] = snap["transaction_read_only"]
     report["snapshot_isolation"] = snap["snapshot_isolation"]
     report["plan_hash"] = manifest["plan_hash"]
-    report["output_sensitive_scan_passed"] = not scan_sensitive(manifest)
+    scan = scan_sensitive(manifest)
+    report["output_sensitive_scan_passed"] = not scan
+    report["sensitive_key_hits"] = sum(1 for h in scan if h["kind"] == "key")
+    report["sensitive_value_hits"] = sum(1 for h in scan if h["kind"] == "value")
     return {"report": report, "manifest": manifest}
 
 
@@ -671,11 +828,16 @@ def _seal(provider_code, retailer_id, baseline, lane_plans, discovered, provenan
                     "expected_state_template": _canon(r["expected_state_template"]),
                     "expected_template_hash": r["expected_template_hash"],
                     "occurrence_hashes": sorted(o["occurrence_hash"] for o in r["occurrences"]),
+                    # Seal the FULL FK identity (schema/table/column both sides + constraint),
+                    # not only the row hash and policies (spec §2).
                     "fk": sorted((
-                        {"full_row_hash": fk["full_row_hash"], "apply_policy": fk["apply_policy"],
-                         "restore_policy": fk["restore_policy"]}
+                        {k: fk[k] for k in (
+                            "referencing_schema", "referencing_table", "referencing_column",
+                            "referred_schema", "referred_table", "referred_column",
+                            "constraint_name", "full_row_hash", "apply_policy", "restore_policy")}
                         for fk in r["incoming_fk_state"]),
-                        key=lambda x: x["full_row_hash"]),
+                        key=lambda x: (x["full_row_hash"], x["referencing_table"],
+                                       x["referencing_column"])),
                 } for r in p["rows"]),
                 key=lambda x: x["full_row_hash"]),
             # FULL side-effect content is sealed (spec §3), not just the deterministic_action_id.
@@ -688,7 +850,7 @@ def _seal(provider_code, retailer_id, baseline, lane_plans, discovered, provenan
         "commit_provenance": {**provenance, "complete": prov_complete},
         "provider_code": provider_code, "retailer_id": retailer_id, "baseline_counts": baseline,
         "fk_discovered": sorted(
-            f"{f['schema']}.{f['table']}.{f['column']}:{f['supported']}" for f in discovered),
+            f"{_fk_ident(f)}:{f['constraint_name']}:{f['supported']}" for f in discovered),
         "apply_ready": False, "apply_blockers": sorted(blockers),
         "apply_prerequisites": sorted(apply_prerequisites),
         "lanes": lanes_seal,
@@ -720,8 +882,8 @@ def _manifest(provider_code, retailer_id, baseline, lane_plans, discovered, prov
     }
 
 
-def _run(db, provider, snapshot) -> dict[str, Any]:
-    result = dry_run(db, provider, snapshot=snapshot)
+def _run(db, provider) -> dict[str, Any]:
+    result = dry_run(db, provider)
     if scan_sensitive(result["manifest"]):
         raise SystemExit("ABORT: sensitive data detected in manifest output.")
     return result
@@ -739,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
             "ABORT: --apply is not implemented or authorized. This tool only produces a read-only "
             "plan (--dry-run). A separate, reviewed apply tool will consume the manifest.")
     with SessionLocal() as db:
-        result = _run(db, a.provider, snapshot=True)
+        result = _run(db, a.provider)
         db.rollback()
     if a.manifest_path:
         fd = os.open(a.manifest_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

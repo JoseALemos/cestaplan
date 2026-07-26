@@ -10,9 +10,10 @@ import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.exc import InternalError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -71,7 +72,10 @@ def _crawl(db, rid) -> int:
 
 
 def _plan(db):
-    return planner.dry_run(db, PROVIDER)
+    # The shared db_session fixture already holds pending writes and is not a fresh read-only
+    # snapshot, so classification tests call the private in-snapshot body directly (spec §5 — the
+    # snapshot gate itself is exercised separately with committed, independent sessions).
+    return planner._dry_run_in_snapshot(db, PROVIDER)
 
 
 def _lane0(db):
@@ -168,6 +172,59 @@ def test_scanner_catches_injected_url() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# §4 sensitive KEY policy — a sensitive key is a violation regardless of its value's type
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("obj", [
+    {"api_key": "abc123"},
+    {"PASSWORD": "neutral"},
+    {"headers": {"X-Key": "abc"}},
+    {"payload": {"safe": True}},
+    {"token": None},              # None value
+    {"secret": ""},               # empty string
+    {"access_token": 12345},      # integer
+    {"client_secret": {"nested": {"refresh_token": "x"}}},
+    {"outer": [{"authorization": "Bearer x"}]},  # sensitive key inside a list
+    {"database_url": "postgresql://u:p@h/db"},
+    {"note": "Bearer abc.def.ghi"},              # sensitive VALUE, non-sensitive key
+    {"url": "https://user:pass@host/x"},         # URL with credentials (value hit)
+])
+def test_scanner_flags_sensitive_keys_and_values(obj) -> None:
+    assert planner.scan_sensitive(obj)
+
+
+def test_scanner_key_hit_is_independent_of_value_type() -> None:
+    hits = planner.scan_sensitive({"api_key": 0, "password": None, "amount": "1.19"})
+    kinds = {h["kind"] for h in hits}
+    assert kinds == {"key"} and len(hits) == 2  # amount is not flagged
+
+
+def test_scanner_accepts_url_without_credentials_but_flags_the_key() -> None:
+    # A plain https URL VALUE is a value hit; but a non-sensitive key holding a bare host is clean.
+    assert planner.scan_sensitive({"host": "example.com"}) == []
+    assert planner.scan_sensitive({"link": "https://example.com/page"})  # value hit (http scheme)
+
+
+def test_normalization_matches_hyphen_and_case_variants() -> None:
+    for key in ("API-Key", "api_key", "APIKEY", "Access-Token", "raw_payload", "Raw-Payload"):
+        assert planner.scan_sensitive({key: "x"}), key
+
+
+def test_manifest_carries_no_sensitive_key_or_value(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    secret = "https://evil.example.com/x?token=SUPERSECRET123&api_key=abc"
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0, source_url=secret)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _occ(db_session, a.id, crawl=_crawl(db_session, retailer.id), source_url=secret)
+    res = _plan(db_session)
+    dumped = json.dumps(res["manifest"], default=str)
+    assert "SUPERSECRET123" not in dumped and "evil.example.com" not in dumped
+    # sensitive_key_hits == 0 proves no raw `source_url` key survives (only *_present / *_hash).
+    assert res["report"]["sensitive_key_hits"] == 0
+    assert res["report"]["sensitive_value_hits"] == 0
+    assert res["report"]["output_sensitive_scan_passed"] is True
+
+
+# --------------------------------------------------------------------------- #
 # §2 read-only REPEATABLE READ snapshot (independent PG sessions)
 # --------------------------------------------------------------------------- #
 def _isession() -> Session:
@@ -216,7 +273,7 @@ def test_snapshot_is_read_only_and_rejects_writes() -> None:
     try:
         s = _isession()
         try:
-            res = planner.dry_run(s, slug, snapshot=True)
+            res = planner.dry_run(s, slug)
             assert res["report"]["transaction_read_only"] is True
             assert res["report"]["snapshot_isolation"] == "repeatable read"
             with pytest.raises((InternalError, OperationalError, ProgrammingError)):
@@ -230,32 +287,177 @@ def test_snapshot_is_read_only_and_rejects_writes() -> None:
         _cleanup(rid)
 
 
-def test_snapshot_keeps_consistent_view_under_concurrent_write() -> None:
-    _slug, rid, vid = _seed_committed()
+def _obs_id_for(rid) -> int:
+    s = _isession()
     try:
-        s = _isession()
+        val = s.scalar(select(PriceObservation.id).where(
+            PriceObservation.retailer_id == rid).limit(1))
+        assert val is not None
+        return int(val)
+    finally:
+        s.close()
+
+
+def test_snapshot_full_view_is_stable_under_concurrent_write() -> None:  # §7
+    slug, rid, vid = _seed_committed()
+    oid = _obs_id_for(rid)
+    # An UNKNOWN FK table pre-created & committed BEFORE the planner's snapshot (zero rows yet).
+    setup = _isession()
+    try:
+        setup.execute(text("CREATE TABLE snap_unknown_ref (id bigint PRIMARY KEY, "
+                           "obs_id bigint REFERENCES price_observation(id))"))
+        setup.commit()
+    finally:
+        setup.close()
+    try:
+        s1 = _isession()
         try:
-            planner.readonly_preflight(s)
-            before = s.scalar(select(func.count()).select_from(PriceObservation).where(
-                PriceObservation.retailer_id == rid))
+            snap = planner.readonly_preflight(s1)
+            r1 = planner._dry_run_in_snapshot(s1, slug, snap)["report"]
+
+            # A concurrent writer adds an observation, an occurrence, a SUPPORTED FK row, and an
+            # UNKNOWN FK row — all committed AFTER the planner's snapshot was pinned.
             w = _isession()
             try:
                 w.add(PriceObservation(
                     retailer_id=rid, product_variant_id=vid, price_scope="national",
-                    price_type="regular", amount=Decimal("9.99"), currency="EUR", observed_at=T2,
-                    imported_at=T2, valid_from=T2, confidence_score=Decimal("1.0"),
+                    price_type="regular", amount=Decimal("1.19"), currency="EUR", observed_at=T0,
+                    imported_at=T0, valid_from=T0, confidence_score=Decimal("1.0"),
                     staging_only=True))
+                w.add(PriceObservationOccurrence(
+                    price_observation_id=oid, provider_code="p", imported_at=T0))
+                w.add(PromotionRule(price_observation_id=oid, type="percentage"))
+                w.execute(text("INSERT INTO snap_unknown_ref (id, obs_id) VALUES (1, :o)"),
+                          {"o": oid})
                 w.commit()
             finally:
                 w.close()
-            after = s.scalar(select(func.count()).select_from(PriceObservation).where(
-                PriceObservation.retailer_id == rid))
-            assert after == before  # REPEATABLE READ snapshot is stable
-            s.rollback()
+
+            r1b = planner._dry_run_in_snapshot(s1, slug, snap)["report"]
+            # The planner still sees the ENTIRE pre-write state: baseline, rows, occurrences,
+            # dependency inventory, exclusions and plan_hash are all unchanged.
+            for k in ("plan_hash", "lanes_scanned", "lanes_plannable", "lanes_excluded",
+                      "occurrences_scanned_total", "fk_dependencies_scanned",
+                      "facts_to_logically_rollback"):
+                assert r1b[k] == r1[k], k
+            assert r1b["lanes_excluded"] == 0
+            s1.rollback()
         finally:
-            s.close()
+            s1.close()
+
+        # After rollback, a FRESH snapshot DOES see the concurrent changes.
+        s3 = _isession()
+        try:
+            r3 = planner.dry_run(s3, slug)["report"]
+            assert r3["lanes_excluded"] == 1               # the unknown FK row is now visible
+            assert r3["fk_dependencies_scanned"] >= 1       # the promotion_rule is now visible
+            assert r3["plan_hash"] != r1["plan_hash"]
+            s3.rollback()
+        finally:
+            s3.close()
+    finally:
+        drop = _isession()
+        try:
+            drop.execute(text("DROP TABLE IF EXISTS snap_unknown_ref"))
+            drop.execute(text("DELETE FROM promotion_rule WHERE price_observation_id = :o"),
+                         {"o": oid})
+            drop.execute(text("DELETE FROM price_observation_occurrence "
+                             "WHERE price_observation_id = :o"), {"o": oid})
+            drop.commit()
+        finally:
+            drop.close()
+        _cleanup(rid)
+
+
+# --------------------------------------------------------------------------- #
+# §6 typed safety-gate exceptions (never `assert`; hold under python -O)
+# --------------------------------------------------------------------------- #
+class _FakeResult:
+    def __init__(self, v):
+        self._v = v
+
+    def scalar(self):
+        return self._v
+
+
+class _FakeSession:
+    """Minimal stand-in to drive readonly_preflight's SHOW checks deterministically."""
+
+    def __init__(self, read_only="on", isolation="repeatable read"):
+        self.new = self.dirty = self.deleted = ()
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        self._ro, self._iso = read_only, isolation
+
+    def execute(self, clause):
+        sql = str(clause).lower()
+        if "transaction_read_only" in sql:
+            return _FakeResult(self._ro)
+        if "transaction_isolation" in sql:
+            return _FakeResult(self._iso)
+        return _FakeResult(None)
+
+
+def test_preflight_rejects_new_objects() -> None:
+    s = _isession()
+    try:
+        s.add(Retailer(slug="dirty-new", name="x", adapter_key="test", is_synthetic=True))
+        with pytest.raises(planner.PlannerSessionNotClean):
+            planner.readonly_preflight(s)
+    finally:
+        s.rollback()
+        s.close()
+
+
+def test_preflight_rejects_dirty_and_deleted() -> None:
+    _slug, rid, _vid = _seed_committed()
+    try:
+        for mutate in ("dirty", "deleted"):
+            s = _isession()
+            try:
+                r = s.scalar(select(Retailer).where(Retailer.id == rid))
+                assert r is not None
+                if mutate == "dirty":
+                    r.name = "mutated"
+                else:
+                    s.delete(r)
+                with pytest.raises(planner.PlannerSessionNotClean):
+                    planner.readonly_preflight(s)
+            finally:
+                s.rollback()
+                s.close()
     finally:
         _cleanup(rid)
+
+
+def test_preflight_requires_postgres() -> None:
+    eng = create_engine("sqlite://")
+    s = Session(bind=eng)
+    try:
+        with pytest.raises(planner.PlannerRequiresPostgres):
+            planner.readonly_preflight(s)
+    finally:
+        s.close()
+
+
+def test_preflight_rejects_already_started_transaction() -> None:
+    s = _isession()
+    try:
+        s.execute(text("SELECT 1"))  # a query already ran -> SET TRANSACTION must fail
+        with pytest.raises(planner.PlannerTransactionAlreadyStarted):
+            planner.readonly_preflight(s)
+    finally:
+        s.rollback()
+        s.close()
+
+
+def test_preflight_rejects_non_read_only() -> None:
+    with pytest.raises(planner.PlannerReadOnlySnapshotFailed):
+        planner.readonly_preflight(_FakeSession(read_only="off"))  # type: ignore[arg-type]
+
+
+def test_preflight_rejects_wrong_isolation() -> None:
+    with pytest.raises(planner.PlannerReadOnlySnapshotFailed):
+        planner.readonly_preflight(_FakeSession(isolation="serializable"))  # type: ignore[arg-type]
 
 
 def test_snapshot_dry_run_is_deterministic() -> None:
@@ -264,8 +466,8 @@ def test_snapshot_dry_run_is_deterministic() -> None:
         s1 = _isession()
         s2 = _isession()
         try:
-            h1 = planner.dry_run(s1, slug, snapshot=True)["report"]["plan_hash"]
-            h2 = planner.dry_run(s2, slug, snapshot=True)["report"]["plan_hash"]
+            h1 = planner.dry_run(s1, slug)["report"]["plan_hash"]
+            h2 = planner.dry_run(s2, slug)["report"]["plan_hash"]
             s1.rollback()
             s2.rollback()
         finally:
@@ -280,7 +482,7 @@ def test_snapshot_dry_run_is_deterministic() -> None:
 # §3 plan_hash seals full effect content
 # --------------------------------------------------------------------------- #
 def _mini_lane(*, severity="high", restore="delete_only_created_row",
-               apply_policy="preserve_unchanged"):
+               apply_policy="preserve_unchanged", fk_schema="public", fk_constraint="c1"):
     return {
         "lane_fingerprint": "L1", "excluded": False, "exclusion_reasons": [],
         "rows": [{
@@ -289,8 +491,12 @@ def _mini_lane(*, severity="high", restore="delete_only_created_row",
             "expected_state_template": {"valid_from": "T0", "valid_until": None},
             "expected_template_hash": "th1",
             "occurrences": [{"occurrence_hash": "o1"}],
-            "incoming_fk_state": [{"full_row_hash": "f1", "apply_policy": apply_policy,
-                                   "restore_policy": "preserve_unchanged"}],
+            "incoming_fk_state": [{
+                "referencing_schema": fk_schema, "referencing_table": "promotion_rule",
+                "referencing_column": "price_observation_id", "referred_schema": "public",
+                "referred_table": "price_observation", "referred_column": "id",
+                "constraint_name": fk_constraint, "full_row_hash": "f1",
+                "apply_policy": apply_policy, "restore_policy": "preserve_unchanged"}],
         }],
         "proposed_side_effects": [{
             "type": "create_price_anomaly", "anomaly_type": "same_timestamp_conflict",
@@ -322,6 +528,14 @@ def test_seal_changes_with_apply_policy() -> None:
 
 def test_seal_changes_with_prerequisite() -> None:
     assert _seal_of(_mini_lane(), prereqs=("p1",)) != _seal_of(_mini_lane(), prereqs=("p2",))
+
+
+def test_seal_changes_with_fk_schema() -> None:  # §5.9 — schema is part of the sealed FK identity
+    assert _seal_of(_mini_lane(fk_schema="public")) != _seal_of(_mini_lane(fk_schema="audit"))
+
+
+def test_seal_changes_with_fk_constraint_name() -> None:  # §5.9
+    assert _seal_of(_mini_lane(fk_constraint="c1")) != _seal_of(_mini_lane(fk_constraint="c2"))
 
 
 def test_seal_stable_and_order_independent() -> None:
@@ -400,35 +614,67 @@ def test_excluded_null_timestamp(db_session: Session, monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# §5 FK discovery schema-safe + composite-safe
+# §5 FK discovery — referencing vs referred schema, full-key handlers, composite-safe, multi-schema
 # --------------------------------------------------------------------------- #
-def test_all_model_fks_have_handlers() -> None:
-    assert planner.metadata_fk_tables() <= planner._HANDLED_FK_TABLES
+def _fk_for(db, table):
+    return [f for f in planner.discover_incoming_fks(db) if f["referencing_table"] == table]
 
 
-def test_known_fk_without_rows_does_not_exclude(db_session: Session) -> None:
+def test_all_model_fks_have_exact_handlers() -> None:
+    # Every model FK to price_observation.id is covered by an EXACT (schema, table, column) handler.
+    assert planner.metadata_fk_keys() <= set(planner._FK_HANDLERS)
+
+
+def test_public_fk_records_both_schemas(db_session: Session) -> None:  # §5.1
     retailer, v = _fixture(db_session)
     _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    db_session.execute(text("CREATE TABLE pub_ref (id bigint PRIMARY KEY, "
+                            "obs_id bigint REFERENCES price_observation(id))"))
+    db_session.flush()
+    fk = _fk_for(db_session, "pub_ref")[0]
+    assert fk["referencing_schema"] == "public" and fk["referred_schema"] == "public"
+    assert fk["referencing_column"] == "obs_id" and fk["referred_column"] == "id"
+    assert fk["referred_table"] == "price_observation" and fk["supported"] is False
+
+
+def test_audit_schema_fk_keeps_ref_sides_distinct(db_session: Session) -> None:  # §5.2
+    retailer, v = _fixture(db_session)
     _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
-    assert _plan(db_session)["report"]["lanes_excluded"] == 0
+    db_session.execute(text("CREATE SCHEMA IF NOT EXISTS audit"))
+    db_session.execute(text(
+        "CREATE TABLE audit.legacy_reference (id bigint PRIMARY KEY, "
+        "price_observation_id bigint REFERENCES public.price_observation(id))"))
+    db_session.flush()
+    fk = _fk_for(db_session, "legacy_reference")[0]
+    assert fk["referencing_schema"] == "audit"
+    assert fk["referencing_table"] == "legacy_reference"
+    assert fk["referencing_column"] == "price_observation_id"
+    assert fk["referred_schema"] == "public"
+    assert fk["referred_table"] == "price_observation"
+    assert fk["referred_column"] == "id"
+    assert fk["constraint_name"] and fk["supported"] is False  # audit.* not in the public registry
 
 
-def test_unknown_fk_with_quoted_name_excludes(db_session: Session) -> None:
+def test_same_name_in_other_schema_is_unknown(db_session: Session) -> None:  # §5.3
     retailer, v = _fixture(db_session)
     a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
     _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
-    db_session.execute(text('CREATE TABLE "Synth Ref" (id bigint PRIMARY KEY, '
-                            "obs_id bigint REFERENCES price_observation(id))"))
-    db_session.execute(text('INSERT INTO "Synth Ref" (id, obs_id) VALUES (1, :o)'), {"o": a.id})
+    db_session.execute(text("CREATE SCHEMA IF NOT EXISTS audit"))
+    db_session.execute(text(
+        "CREATE TABLE audit.price_anomaly (id bigint PRIMARY KEY, "
+        "price_observation_id bigint REFERENCES public.price_observation(id))"))
+    db_session.execute(text(
+        "INSERT INTO audit.price_anomaly (id, price_observation_id) VALUES (1, :o)"), {"o": a.id})
     db_session.flush()
+    audit_fk = next(f for f in _fk_for(db_session, "price_anomaly")
+                    if f["referencing_schema"] == "audit")
+    assert audit_fk["supported"] is False  # NOT auto-supported by sharing the table name
     r = _plan(db_session)["report"]
-    assert "Synth Ref" in r["fk_unknown"] and r["lanes_excluded"] == 1
+    assert "audit.price_anomaly.price_observation_id" in r["fk_unknown"]
+    assert r["lanes_excluded"] == 1
 
 
-def test_discovery_records_only_the_price_observation_column(db_session: Session) -> None:
-    # A table with TWO single FKs (one to price_observation.id, one to retailer.id): discovery must
-    # record ONLY the price_observation column. (A true composite FK to price_observation is
-    # impossible — no composite unique key — but the zip pairing in the code is composite-safe.)
+def test_composite_fk_only_pairs_the_id_column(db_session: Session) -> None:  # §5.4
     retailer, v = _fixture(db_session)
     a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
     _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
@@ -438,10 +684,81 @@ def test_discovery_records_only_the_price_observation_column(db_session: Session
     db_session.execute(text("INSERT INTO multi_ref (k, obs_id, ret_id) VALUES (1, :o, :r)"),
                        {"o": a.id, "r": retailer.id})
     db_session.flush()
-    cols = [f["column"] for f in planner.discover_incoming_fks(db_session)
-            if f["table"] == "multi_ref"]
+    cols = [f["referencing_column"] for f in _fk_for(db_session, "multi_ref")]
     assert cols == ["obs_id"]  # ret_id (-> retailer) is NOT recorded
     assert _plan(db_session)["report"]["lanes_excluded"] == 1
+
+
+def test_quoted_schema_and_table_reflect_correctly(db_session: Session) -> None:  # §5.5
+    retailer, v = _fixture(db_session)
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    db_session.execute(text('CREATE SCHEMA IF NOT EXISTS "Weird Schema"'))
+    db_session.execute(text('CREATE TABLE "Weird Schema"."Odd Ref" (id bigint PRIMARY KEY, '
+                            "obs_id bigint REFERENCES public.price_observation(id))"))
+    db_session.execute(text('INSERT INTO "Weird Schema"."Odd Ref" (id, obs_id) VALUES (1, :o)'),
+                       {"o": a.id})
+    db_session.flush()
+    r = _plan(db_session)["report"]
+    assert any("Weird Schema" in u and "Odd Ref" in u for u in r["fk_unknown"])
+    assert r["lanes_excluded"] == 1
+
+
+def test_known_fk_without_rows_does_not_exclude(db_session: Session) -> None:  # §5.6
+    retailer, v = _fixture(db_session)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    r = _plan(db_session)["report"]
+    assert r["lanes_excluded"] == 0
+    # The supported FKs are discovered even with zero referencing rows.
+    assert "public.price_anomaly.price_observation_id" in r["fk_supported"]
+
+
+def test_unknown_fk_with_row_excludes_only_its_lane(db_session: Session) -> None:  # §5.7
+    retailer, v = _fixture(db_session)
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _p, v2 = seed_test_catalog_product(db_session, retailer, "PL-2", name="Plan2", price=None)
+    _obs(db_session, retailer.id, v2.id, amount="2.19", observed_at=T0)  # a second, CLEAN lane
+    _obs(db_session, retailer.id, v2.id, amount="2.19", observed_at=T0)
+    db_session.execute(text("CREATE TABLE synth_ref (id bigint PRIMARY KEY, "
+                            "obs_id bigint REFERENCES price_observation(id))"))
+    db_session.execute(text("INSERT INTO synth_ref (id, obs_id) VALUES (1, :o)"), {"o": a.id})
+    db_session.flush()
+    r = _plan(db_session)["report"]
+    assert r["lanes_excluded"] == 1 and r["lanes_plannable"] == 1  # only a's lane excluded
+
+
+def test_unknown_fk_without_rows_inventoried_only(db_session: Session) -> None:  # §5.8
+    retailer, v = _fixture(db_session)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    db_session.execute(text("CREATE TABLE empty_ref (id bigint PRIMARY KEY, "
+                            "obs_id bigint REFERENCES price_observation(id))"))
+    db_session.flush()
+    r = _plan(db_session)["report"]
+    assert "public.empty_ref.obs_id" in r["fk_unknown"]  # inventoried
+    assert r["lanes_excluded"] == 0  # but no referencing rows -> excludes nothing
+
+
+def test_reflection_never_queries_the_wrong_schema(db_session: Session) -> None:  # §5.10
+    # The referencing row lives in audit.legacy_reference; no public table of that name exists. A
+    # correct exclusion via the audit ref proves reflection used schema=audit (never public).
+    retailer, v = _fixture(db_session)
+    a = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    db_session.execute(text("CREATE SCHEMA IF NOT EXISTS audit"))
+    db_session.execute(text(
+        "CREATE TABLE audit.legacy_reference (id bigint PRIMARY KEY, "
+        "price_observation_id bigint REFERENCES public.price_observation(id))"))
+    db_session.execute(
+        text("INSERT INTO audit.legacy_reference (id, price_observation_id) VALUES (1, :o)"),
+        {"o": a.id})
+    db_session.flush()
+    lane = next(x for x in _plan(db_session)["manifest"]["lanes"] if x["excluded"])
+    assert any(
+        "audit.legacy_reference.price_observation_id->public.price_observation.id" in reason
+        for reason in lane["exclusion_reasons"])
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +839,7 @@ def test_dry_run_is_select_only_and_zero_deletes(db_session: Session) -> None:
     before = int(db_session.scalar(select(func.count()).select_from(PriceObservation).where(
         PriceObservation.retailer_id == retailer.id)) or 0)
     with _capture_sql(db_session) as stmts:
-        result = planner.dry_run(db_session, PROVIDER)
+        result = planner._dry_run_in_snapshot(db_session, PROVIDER)
     writes = [s for s in stmts if s.lstrip()[:6].upper() in ("INSERT", "UPDATE", "DELETE")]
     assert writes == []
     actions = {row["action"] for lane in result["manifest"]["lanes"] for row in lane["rows"]}
