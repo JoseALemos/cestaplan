@@ -63,9 +63,37 @@ If a DIFFERENT fact already sits at exactly `T` in the lane, that is a genuine c
 was really current at `T`? Policy (chosen, documented, deterministic): **history keeps both facts**,
 but every same-`T` fact (the newcomer and any still-active sibling) is marked `disputed` with an
 empty `[T, T]` interval — never a "current" price — and flagged with a `same_timestamp_conflict`
-`PriceAnomaly`. The lane then has **no** current price at/after `T` until review. This is independent
-of arrival order and never silently picks a row by id or by who arrived first; the current-price
-projection is blocked rather than arbitrary.
+`PriceAnomaly`. This is independent of arrival order and never silently picks a row by id or by who
+arrived first; the current-price projection is blocked rather than arbitrary.
+
+### Disputed timestamps are temporal barriers
+
+A `disputed` row is excluded from the active price chain, **but it is not ignored** when building the
+timeline — it is a **barrier**. Placement is **anchor-based**: an *anchor* is any non-rolled-back
+row's timestamp (active or disputed). A new fact at `T` uses the nearest anchors, so:
+
+- its `valid_until` is the next anchor — if that anchor is disputed, the fact ends exactly **on** the
+  barrier and never spans it;
+- the predecessor is extended to `T` **only** when the immediate previous anchor is a non-disputed
+  active row; if the previous anchor is a barrier, no earlier interval is extended and a **blocked
+  gap** remains from the conflict up to `T`.
+
+A disputed timestamp therefore never becomes the current price, never acts as an extensible
+predecessor, but **does** bound the neighbouring intervals: it caps the end of an earlier row and
+forbids any active interval from crossing it. Concretely, for every disputed timestamp `D` no active
+row may satisfy `valid_from < D AND (valid_until IS NULL OR valid_until > D)` — an active interval may
+end exactly at `D`, and a new one may start after `D`, but none may cross it. The
+`lane_invariant_report` counts `active_intervals_crossing_disputed` (must be 0) and `blocked_gap_count`
+(barriers that correctly leave a gap); `lane_invariants_hold` fails on any crossing.
+
+### Current-price projection blocks on gaps
+
+New-model (staging) current-price selection (`CurrentPriceService.current(..., staging=True)`) filters
+on `verification_status != 'disputed'` (not merely on `valid_until`) **and** is interval-aware: the
+current price is the row whose validity CONTAINS `as_of`. Inside a conflict's blocked gap there is no
+such row, so there is **no** current price — the selector does not fall back to the prior, already
+closed row. Production append-only selection is unchanged. A disputed row (empty `[T, T]`) can never
+be selected, costed, promoted or used by shadow planning.
 
 ### Lock-key derivation
 
