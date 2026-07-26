@@ -179,3 +179,53 @@ ignored by current-price selection. The current/latest selectors (`CurrentPriceS
 is on `rolled_back_at`, not on `valid_until` / `verification_status` alone. A rolled-back row can
 never be current/latest, selectable, costable, shadow-usable, promotable or projected to
 `ProductPrice`, even when `as_of` falls inside its interval.
+
+## Writer contract v2 — a rolled-back fact is never reused
+
+`record_price_fact` will **never reuse a rolled-back `PriceObservation`** as the existing economic
+fact. Under the lane lock, `_find_existing_fact` loads the exact-fingerprint matches and partitions
+them by rollback state (the SQL prefilter is only an optimization; the full 16-field fingerprint is
+the source of truth). It never returns `rows[0]`/`first()`:
+
+- **A. exactly one active (non-rolled-back) exact fact** → reuse it; the occurrence attaches to that
+  fact.
+- **B. only rolled-back exact facts (or none)** → reuse nothing: create a new **active** fact and
+  attach the occurrence to it; every rolled-back row is preserved, immutable, and receives no new
+  occurrence.
+- **C. two or more active exact facts** → fail **closed** with `MultipleActiveExactFacts` and make
+  zero partial writes; the writer never chooses one by id / query order / `imported_at`. (The lane
+  preflight normally blocks such a lane earlier; this is an explicit last-line defence.)
+
+A candidate that arrives already rolled-back, or already persisted/associated with a database
+identity, is rejected up front with `InvalidPriceFactCandidateState` — the field is never
+auto-cleared, so recording can never resurrect or accidentally reactivate a rolled-back row.
+
+The guarantees are declared, versioned and read-only via
+`RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION` (`"record-price-fact-v2-active-only"`) and
+`writer_contract()`:
+
+| key | value |
+| --- | --- |
+| `exact_fact_reuse_requires_rolled_back_at_null` | `true` |
+| `rolled_back_fact_never_receives_new_occurrence` | `true` |
+| `lane_lock_required` | `true` |
+| `occurrence_lock_required` | `true` |
+| `active_exact_ambiguity_policy` | `fail_closed` |
+| `fresh_transient_candidate_required` | `true` |
+| `candidate_primary_key_must_be_null` | `true` |
+| `candidate_session_must_be_null` | `true` |
+| `invalid_candidate_rejected_before_sql` | `true` |
+
+A candidate is accepted only when it is genuinely new: `state.transient` and **none** of
+`pending` / `persistent` / `detached` / `deleted`, with `session is None` and `id is None`. Any other
+ORM state is rejected up front — before `SET LOCAL lock_timeout`, the advisory locks, the lane read or
+any autoflush (**zero SQL**) — with a stable reason code (`candidate_rolled_back`,
+`candidate_primary_key_set`, `candidate_pending`, `candidate_persistent`, `candidate_detached`,
+`candidate_deleted`, `candidate_session_associated`, `candidate_not_transient`). The id is never
+cleared and no `expunge`/`merge` silently coerces the object to transient.
+
+This contract is **evidence for a future, separately-reviewed apply tool**. Declaring it does **not**
+make the plan-only history-lane remediation planner apply-ready; that planner stays plan-only and
+blocked. Sanitized metrics only: `rolled_back_exact_matches_ignored`, `active_exact_fact_reused`,
+`new_fact_created_after_rolled_back_match`, `multiple_active_exact_fact_blocked`,
+`invalid_candidate_state_blocked` — counts and booleans, never a product/price/URL/fingerprint.

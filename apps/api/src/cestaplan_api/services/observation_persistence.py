@@ -23,8 +23,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import and_, select, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import PriceAnomaly, PriceObservation, PriceObservationOccurrence
@@ -54,6 +56,56 @@ class PreexistingHistoryLaneAnomaly(Exception):
     def __init__(self, causes: dict[str, int]) -> None:
         self.causes = causes
         super().__init__(f"preexisting history-lane anomaly: {causes}")
+
+
+class MultipleActiveExactFacts(Exception):
+    """More than one NON-rolled-back fact shares the candidate's exact fingerprint (spec §2, C).
+
+    The writer refuses to pick one arbitrarily (never by id / query order / imported_at) and fails
+    CLOSED under the lane lock, so the transaction makes ZERO partial writes. The lane preflight
+    normally blocks a corrupt lane earlier; this is an explicit last-line defense. ``count`` is a
+    sanitized integer — no id/product/price.
+    """
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(f"multiple active exact facts for one fingerprint: {count}")
+
+
+class InvalidPriceFactCandidateState(Exception):
+    """The candidate arrived in a state that must never be recorded (spec §3): already rolled back,
+    or already persisted/associated so recording it could ACCIDENTALLY reactivate an existing row.
+
+    The offending field is NEVER auto-cleared; the caller must pass a fresh, transient candidate.
+    ``reason`` is a sanitized string — no id/product/price/URL.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"invalid price-fact candidate state: {reason}")
+
+
+# A stable, versioned declaration of the record_price_fact guarantees. It is EVIDENCE for a future,
+# separately-reviewed apply tool — declaring it here does NOT make the plan-only remediation planner
+# apply-ready; that planner stays plan-only and blocked (spec §4).
+RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION = "record-price-fact-v2-active-only"
+
+
+def writer_contract() -> dict[str, Any]:
+    """Read-only structured declaration of the writer contract (spec §4)."""
+    return {
+        "version": RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION,
+        "exact_fact_reuse_requires_rolled_back_at_null": True,
+        "rolled_back_fact_never_receives_new_occurrence": True,
+        "lane_lock_required": True,
+        "occurrence_lock_required": True,
+        "active_exact_ambiguity_policy": "fail_closed",
+        "fresh_transient_candidate_required": True,
+        "candidate_primary_key_must_be_null": True,
+        "candidate_session_must_be_null": True,
+        "invalid_candidate_rejected_before_sql": True,
+    }
+
 
 # The occurrence-identity fields come from the SHARED definition: replaying the same tuple must not
 # create a duplicate occurrence.
@@ -96,6 +148,12 @@ class RecordMetrics:
     lane_preexisting_repeated_timestamp: int = 0
     lane_preexisting_crossing_disputed: int = 0
     write_blocked_by_lane_anomaly: int = 0
+    # Rolled-back safety (spec §5): a rolled-back exact fact is never reused/reactivated. Counts.
+    rolled_back_exact_matches_ignored: int = 0
+    active_exact_fact_reused: int = 0
+    new_fact_created_after_rolled_back_match: int = 0
+    multiple_active_exact_fact_blocked: int = 0
+    invalid_candidate_state_blocked: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -116,6 +174,12 @@ class RecordMetrics:
             "lane_preexisting_repeated_timestamp": self.lane_preexisting_repeated_timestamp,
             "lane_preexisting_crossing_disputed": self.lane_preexisting_crossing_disputed,
             "write_blocked_by_lane_anomaly": self.write_blocked_by_lane_anomaly,
+            "rolled_back_exact_matches_ignored": self.rolled_back_exact_matches_ignored,
+            "active_exact_fact_reused": self.active_exact_fact_reused,
+            "new_fact_created_after_rolled_back_match": (
+                self.new_fact_created_after_rolled_back_match),
+            "multiple_active_exact_fact_blocked": self.multiple_active_exact_fact_blocked,
+            "invalid_candidate_state_blocked": self.invalid_candidate_state_blocked,
         }
 
 
@@ -186,23 +250,86 @@ def _advisory_xact_lock(db: Session, key: int) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
+@dataclass(slots=True)
+class _FactLookup:
+    """Exact-fingerprint lookup result, partitioned by rollback state (spec §2)."""
+
+    active_fact: PriceObservation | None
+    active_matches: int
+    rolled_back_ignored: int
+
+
+def _validate_candidate_state(candidate: PriceObservation) -> None:
+    """Require a FRESH, TRANSIENT candidate (spec §3), refusing anything else BEFORE any SQL.
+
+    ``record_price_fact`` only accepts an object that is genuinely new — transient, never pending /
+    persistent / detached / deleted, with no session and no primary key — and not already rolled
+    back. Anything else could resurrect or reactivate an existing row, so it is rejected with a
+    STABLE, sanitized reason code (never the object's repr / id / retailer / price / URL). The id is
+    never cleared, and no ``expunge`` / ``merge`` silently converts the object to transient.
+
+    This runs before ``_set_lock_timeout``, the advisory locks, the lane read and any autoflush, so
+    an invalid candidate provokes ZERO SQL — pure in-memory ORM-state inspection.
+    """
+    if candidate.rolled_back_at is not None:
+        raise InvalidPriceFactCandidateState("candidate_rolled_back")
+    state = sa_inspect(candidate)
+    if state.deleted:
+        raise InvalidPriceFactCandidateState("candidate_deleted")
+    if state.persistent:
+        raise InvalidPriceFactCandidateState("candidate_persistent")
+    if state.detached:
+        raise InvalidPriceFactCandidateState("candidate_detached")
+    if state.pending:
+        raise InvalidPriceFactCandidateState("candidate_pending")
+    if state.session is not None:
+        raise InvalidPriceFactCandidateState("candidate_session_associated")
+    if not state.transient:
+        raise InvalidPriceFactCandidateState("candidate_not_transient")
+    if candidate.id is not None:  # transient but with a hand-assigned primary key
+        raise InvalidPriceFactCandidateState("candidate_primary_key_set")
+
+
 def _find_existing_fact(
     db: Session, candidate: PriceObservation, *, staging_only: bool
-) -> PriceObservation | None:
-    """Return an existing fact with the SAME fingerprint, or None. Prefilters on the selective
-    identity subset (+ staging routing) then confirms via the full 16-field fingerprint."""
+) -> _FactLookup:
+    """Find the exact-fingerprint fact to REUSE, partitioned by rollback state (spec §2).
+
+    Only a NON-rolled-back fact may ever be reused. The SQL prefilter (selective identity subset +
+    staging routing) is an OPTIMIZATION; the full 16-field fingerprint is the source of truth. Exact
+    matches partition into:
+
+    - exactly one ACTIVE match  -> reuse it (case A);
+    - zero active matches       -> reuse nothing (case B): the caller creates a new active fact and
+                                   every rolled-back row is preserved untouched;
+    - two or more ACTIVE        -> raise MultipleActiveExactFacts (C): fail closed, never choose
+                                   by id / query order / imported_at.
+
+    A rolled-back exact match is COUNTED (diagnostics) and otherwise ignored — never reused, never
+    reactivated, never given a new occurrence. The result never returns ``rows[0]``/``first()``.
+    """
     conditions = [
         _eq(getattr(PriceObservation, f), getattr(candidate, f)) for f in _FACT_PREFILTER
     ]
     conditions.append(PriceObservation.staging_only.is_(staging_only))
     target = ident.price_fact_fingerprint(candidate)
-    rows = (
-        db.execute(select(PriceObservation).where(and_(*conditions))).scalars().all()
-    )
+    rows = db.execute(select(PriceObservation).where(and_(*conditions))).scalars().all()
+    active: list[PriceObservation] = []
+    rolled_back = 0
     for row in rows:
-        if ident.price_fact_fingerprint(row) == target:
-            return row
-    return None
+        if ident.price_fact_fingerprint(row) != target:
+            continue
+        if row.rolled_back_at is None:
+            active.append(row)
+        else:
+            rolled_back += 1
+    if len(active) > 1:
+        raise MultipleActiveExactFacts(len(active))
+    return _FactLookup(
+        active_fact=active[0] if active else None,
+        active_matches=len(active),
+        rolled_back_ignored=rolled_back,
+    )
 
 
 def _lane_conditions(candidate: PriceObservation) -> list:
@@ -357,6 +484,12 @@ def record_price_fact(
     duplicates its occurrence.
     """
     metrics = metrics or RecordMetrics()
+    # Spec §3: reject a rolled-back / already-persisted candidate BEFORE any lock or write.
+    try:
+        _validate_candidate_state(candidate)
+    except InvalidPriceFactCandidateState:
+        metrics.invalid_candidate_state_blocked += 1
+        raise
     # Server-default identity fields are None on a transient object; coerce so the candidate's
     # fingerprint matches a persisted, refreshed row (requires_loyalty defaults to False in the DB).
     if candidate.requires_loyalty is None:
@@ -385,14 +518,24 @@ def record_price_fact(
         raise PreexistingHistoryLaneAnomaly(causes)
 
     staging_only = bool(candidate.staging_only)
-    existing = _find_existing_fact(db, candidate, staging_only=staging_only)
-    if existing is not None:
-        fact = existing
+    # Spec §2: only a NON-rolled-back exact fact may be reused; rolled-back matches are ignored, and
+    # more than one ACTIVE match fails closed (never chosen arbitrarily).
+    try:
+        lookup = _find_existing_fact(db, candidate, staging_only=staging_only)
+    except MultipleActiveExactFacts:
+        metrics.multiple_active_exact_fact_blocked += 1
+        raise
+    metrics.rolled_back_exact_matches_ignored += lookup.rolled_back_ignored
+    if lookup.active_fact is not None:
+        fact = lookup.active_fact  # case A: reuse the single active exact fact
         fact_created = False
         diag.fact_reused_after_lane_lock = True
         metrics.observations_reused += 1
         metrics.facts_reused_after_lane_lock += 1
+        metrics.active_exact_fact_reused += 1
     else:
+        # case B: no active match (only rolled-back, or none) -> create a NEW active fact; every
+        # rolled-back row stays intact and never receives this occurrence.
         _place_in_temporal_sequence(
             db, candidate, closed_by_run_id=provenance.crawl_run_id, diag=diag
         )
@@ -409,6 +552,8 @@ def record_price_fact(
         fact = candidate
         fact_created = True
         metrics.observations_created += 1
+        if lookup.rolled_back_ignored:
+            metrics.new_fact_created_after_rolled_back_match += 1
 
     # ---- Occurrence: serialize on the occurrence fingerprint (fact.id is known now) ----
     occ_identity = {
@@ -475,10 +620,14 @@ def record_price_fact(
 
 
 __all__ = [
+    "RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION",
+    "InvalidPriceFactCandidateState",
     "LockDiagnostics",
+    "MultipleActiveExactFacts",
     "OccurrenceProvenance",
     "PreexistingHistoryLaneAnomaly",
     "RecordMetrics",
     "RecordResult",
     "record_price_fact",
+    "writer_contract",
 ]

@@ -915,19 +915,24 @@ def test_planner_source_hash_present(db_session: Session) -> None:
     assert len(_plan(db_session)["report"]["planner_source_hash"]) == 64
 
 
-def test_record_price_fact_may_reuse_rolled_back(db_session: Session) -> None:
+def test_record_price_fact_never_reuses_rolled_back(db_session: Session) -> None:
+    # Writer v2 (fix/record-price-fact-rolled-back-selection): a rolled-back exact fact is never
+    # reused; the single active exact fact is reused instead and the rolled-back row stays intact.
     retailer, v = _fixture(db_session)
     rb = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
     rb.rolled_back_at = T0
     db_session.flush()
-    _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
+    active = _obs(db_session, retailer.id, v.id, amount="1.19", observed_at=T0)
     candidate = PriceObservation(
         retailer_id=retailer.id, product_variant_id=v.id, price_scope="national",
         price_type="regular", amount=Decimal("1.19"), currency="EUR", observed_at=T0,
         imported_at=T0, valid_from=T0, confidence_score=Decimal("1.0"), staging_only=True)
     res = record_price_fact(db_session, candidate, OccurrenceProvenance(provider_code="x"),
                             imported_at=T0)
-    assert res.observation.rolled_back_at is not None or res.observation.id == rb.id
+    assert res.observation.id == active.id  # reused the ACTIVE exact fact, not the rolled-back one
+    assert res.observation.rolled_back_at is None
+    db_session.refresh(rb)
+    assert rb.rolled_back_at is not None  # the rolled-back row is preserved untouched
 
 
 # --------------------------------------------------------------------------- #
