@@ -32,6 +32,7 @@ from cestaplan_api.models import (
 from cestaplan_api.services import observation_identity as ident
 from cestaplan_api.services.observation_persistence import (
     OccurrenceProvenance,
+    PreexistingHistoryLaneAnomaly,
     record_price_fact,
 )
 from cestaplan_api.services.price_history_lane import lane_invariants_hold
@@ -622,3 +623,165 @@ def test_barrier_rollback_during_creation(seeded) -> None:
     assert len(rows) == 1  # only the first fact survives
     assert rows[0].verification_status != "disputed" and rows[0].valid_until is None
     assert lane_invariants_hold(rows)
+
+
+# --------------------------------------------------------------------------- #
+# Preexisting-lane preflight (spec §2/§4): a lane already temporally corrupt on arrival blocks the
+# write with a typed error and zero partial changes. Correct disputed barriers/gaps are OK.
+# --------------------------------------------------------------------------- #
+def _raw_insert(rid, vid, *, amount, valid_from, valid_until, disputed=False) -> None:
+    """Commit a row DIRECTLY (bypassing record_price_fact) to build a corrupt/legacy lane state."""
+    s = _session()
+    try:
+        s.add(
+            PriceObservation(
+                retailer_id=rid, product_variant_id=vid, price_scope="national",
+                price_type="regular", amount=Decimal(amount), currency="EUR",
+                observed_at=valid_from, imported_at=valid_from, valid_from=valid_from,
+                valid_until=valid_until, confidence_score=Decimal("1.0"), staging_only=True,
+                verification_status=("disputed" if disputed else "unverified"),
+            )
+        )
+        s.commit()
+    finally:
+        s.close()
+
+
+def _new_variant(rid: int) -> int:
+    s = _session()
+    try:
+        ext = ExternalProduct(retailer_id=rid, external_id=f"CT2-{uuid.uuid4().hex[:6]}")
+        s.add(ext)
+        s.flush()
+        v = ProductVariant(
+            retailer_id=rid, external_product_id=ext.id, display_name="V2", product_id=None
+        )
+        s.add(v)
+        s.commit()
+        return v.id
+    finally:
+        s.close()
+
+
+def _expect_blocked(rid: int, vid: int, *, observed_at=T2) -> None:
+    s = _session()
+    try:
+        with pytest.raises(PreexistingHistoryLaneAnomaly):
+            record_price_fact(
+                s, _candidate(rid, vid, amount="9.99", observed_at=observed_at),
+                OccurrenceProvenance(provider_code="x"), imported_at=observed_at,
+            )
+        s.rollback()
+    finally:
+        s.close()
+
+
+# 1. Two inherited open rows + candidate -> typed error, counts/rows unchanged, zero occurrence.
+def test_preflight_blocks_two_inherited_open(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=None)
+    _raw_insert(rid, vid, amount="1.10", valid_from=T1, valid_until=None)  # second open row
+    before = _counts(rid)
+    _expect_blocked(rid, vid)
+    assert _counts(rid) == before  # no new fact
+    assert before[1] == 0  # and never any occurrence
+
+
+# 2. Inherited overlap + candidate -> blocked, full rollback (no partial write).
+def test_preflight_blocks_overlap(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=T2)  # [T0,T2)
+    _raw_insert(rid, vid, amount="1.10", valid_from=T1, valid_until=None)  # inside -> overlap
+    before = _counts(rid)
+    _expect_blocked(rid, vid, observed_at=datetime(2026, 7, 28, 8, 0, tzinfo=UTC))
+    assert _counts(rid) == before
+
+
+# 3. Inherited repeated ACTIVE timestamp -> blocked, never auto-converted to disputed.
+def test_preflight_blocks_repeated_timestamp_no_auto_dispute(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=T1)
+    _raw_insert(rid, vid, amount="1.10", valid_from=T0, valid_until=T1)  # same active timestamp
+    before = _counts(rid)
+    _expect_blocked(rid, vid)
+    assert _counts(rid) == before
+    assert all(r.verification_status != "disputed" for r in _all_rows(rid))  # not auto-repaired
+
+
+# 4. A VALID disputed barrier [T,T] + gap is accepted; a later observation inserts correctly.
+def test_preflight_accepts_valid_barrier_then_inserts(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=T1)  # active, ends at barrier
+    _raw_insert(rid, vid, amount="1.19", valid_from=T1, valid_until=T1, disputed=True)
+    _raw_insert(rid, vid, amount="1.29", valid_from=T1, valid_until=T1, disputed=True)
+    _write(rid, vid, amount="1.50", observed_at=T2)  # must SUCCEED (lane is valid)
+    active = _by_from(rid)
+    assert active[T2].valid_until is None
+    assert active[T0].valid_until == T1  # not extended across the barrier
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 5. An active interval crossing a disputed barrier is a preexisting anomaly -> blocked.
+def test_preflight_blocks_crossing_disputed(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=None)  # open -> spans T1
+    _raw_insert(rid, vid, amount="1.19", valid_from=T1, valid_until=T1, disputed=True)  # crossed
+    before = _counts(rid)
+    _expect_blocked(rid, vid)
+    assert _counts(rid) == before
+
+
+# 6. A clean lane keeps working normally through record_price_fact.
+def test_preflight_clean_lane_still_works(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.00", observed_at=T0)
+    _write(rid, vid, amount="1.10", observed_at=T1)
+    active = _by_from(rid)
+    assert active[T0].valid_until == T1 and active[T1].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 7. Ten writers over an inherited invalid lane -> all blocked in a controlled way, no extra rows.
+def test_preflight_ten_writers_invalid_lane(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=None)
+    _raw_insert(rid, vid, amount="1.10", valid_from=T1, valid_until=None)  # corrupt (two open)
+    before = _counts(rid)
+    results: list[str] = []
+
+    def run():
+        s = _session()
+        try:
+            record_price_fact(
+                s, _candidate(rid, vid, amount="9.99", observed_at=T2),
+                OccurrenceProvenance(provider_code="x"), imported_at=T2,
+            )
+            s.commit()
+            results.append("wrote")
+        except PreexistingHistoryLaneAnomaly:
+            s.rollback()
+            results.append("blocked")
+        except Exception as exc:
+            s.rollback()
+            results.append(repr(exc))
+        finally:
+            s.close()
+
+    threads = [threading.Thread(target=run) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert results.count("blocked") == 10  # every writer controlled-failed
+    assert _counts(rid) == before  # no extra fact or occurrence
+
+
+# 8. An invalid lane never blocks an independent lane.
+def test_invalid_lane_does_not_block_independent_lane(seeded) -> None:
+    rid, vid, _runs = seeded
+    _raw_insert(rid, vid, amount="1.00", valid_from=T0, valid_until=None)
+    _raw_insert(rid, vid, amount="1.10", valid_from=T1, valid_until=None)  # lane A corrupt
+    vid2 = _new_variant(rid)  # a DIFFERENT lane
+    _write(rid, vid2, amount="2.00", observed_at=T0)  # succeeds despite lane A being corrupt
+    rows_b = [r for r in _all_rows(rid) if r.product_variant_id == vid2]
+    assert len(rows_b) == 1 and rows_b[0].valid_until is None
