@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.models import PriceAnomaly, PriceObservation, PriceObservationOccurrence
 from cestaplan_api.services import observation_identity as ident
+from cestaplan_api.services.price_history_lane import lane_invariant_report
 
 _LOG = logging.getLogger("cestaplan.observation_persistence")
 
@@ -39,6 +40,20 @@ _DEFAULT_LOCK_TIMEOUT_MS = 5000
 # A same-timestamp conflict marks its facts disputed (never a current price) — see §7 policy below.
 _DISPUTED = "disputed"
 _SAME_TIMESTAMP_CONFLICT = "same_timestamp_conflict"
+
+
+class PreexistingHistoryLaneAnomaly(Exception):
+    """The target history lane was ALREADY temporally corrupt on arrival (spec §2).
+
+    Raised under the lane lock BEFORE any write, so the operation for that lane makes no partial
+    changes (no fact, no occurrence, no valid_until edit, no flag). The lane needs a separate,
+    reviewed remediation — this write path never auto-repairs it. ``causes`` carries only sanitized
+    counts (no retailer/product/price/URL).
+    """
+
+    def __init__(self, causes: dict[str, int]) -> None:
+        self.causes = causes
+        super().__init__(f"preexisting history-lane anomaly: {causes}")
 
 # The occurrence-identity fields come from the SHARED definition: replaying the same tuple must not
 # create a duplicate occurrence.
@@ -73,6 +88,14 @@ class RecordMetrics:
     out_of_order_inserts: int = 0
     same_timestamp_conflicts: int = 0
     blocked_gaps: int = 0
+    # Preexisting-lane preflight (spec §2/§3): a lane already corrupt on arrival blocks the write.
+    lane_preflight_checked: int = 0
+    lane_preexisting_anomaly: int = 0
+    lane_preexisting_multiple_open: int = 0
+    lane_preexisting_overlap: int = 0
+    lane_preexisting_repeated_timestamp: int = 0
+    lane_preexisting_crossing_disputed: int = 0
+    write_blocked_by_lane_anomaly: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -86,6 +109,13 @@ class RecordMetrics:
             "out_of_order_inserts": self.out_of_order_inserts,
             "same_timestamp_conflicts": self.same_timestamp_conflicts,
             "blocked_gaps": self.blocked_gaps,
+            "lane_preflight_checked": self.lane_preflight_checked,
+            "lane_preexisting_anomaly": self.lane_preexisting_anomaly,
+            "lane_preexisting_multiple_open": self.lane_preexisting_multiple_open,
+            "lane_preexisting_overlap": self.lane_preexisting_overlap,
+            "lane_preexisting_repeated_timestamp": self.lane_preexisting_repeated_timestamp,
+            "lane_preexisting_crossing_disputed": self.lane_preexisting_crossing_disputed,
+            "write_blocked_by_lane_anomaly": self.write_blocked_by_lane_anomaly,
         }
 
 
@@ -187,6 +217,26 @@ def _lane_rows(db: Session, candidate: PriceObservation) -> list[PriceObservatio
     conds = _lane_conditions(candidate)
     conds.append(PriceObservation.rolled_back_at.is_(None))
     return list(db.execute(select(PriceObservation).where(and_(*conds))).scalars())
+
+
+def _preexisting_lane_anomaly(rows: list[PriceObservation]) -> dict[str, int] | None:
+    """Return sanitized anomaly causes if the lane (its EXISTING rows) is already temporally
+    corrupt, else None (spec §2). A lane with only correct disputed barriers/gaps is NOT an anomaly.
+
+    Blocking causes: >1 active open row, overlapping active intervals, repeated active timestamps
+    (no disputed policy applied), non-positive non-disputed intervals, an active interval crossing a
+    disputed barrier, or a disputed row with a non-empty interval.
+    """
+    rep = lane_invariant_report(rows)
+    causes = {
+        "multiple_open": rep["lanes_multiple_open"],
+        "overlap": rep["lanes_overlapping_intervals"],
+        "repeated_timestamp": rep["lanes_repeated_timestamp"],
+        "non_positive_interval": rep["rows_non_positive_interval"],
+        "crossing_disputed": rep["lanes_active_interval_crosses_disputed"],
+        "disputed_non_empty": rep["disputed_rows_non_empty"],
+    }
+    return causes if any(causes.values()) else None
 
 
 def _add_conflict_anomaly(db: Session, observation_id: int) -> None:
@@ -319,6 +369,21 @@ def record_price_fact(
     diag.lane_lock_wait_ms = _advisory_xact_lock(db, diag.lane_lock_key)
     diag.lock_wait_ms += diag.lane_lock_wait_ms
     diag.lane_lock_acquired = True
+
+    # Preflight (spec §2): if the lane is ALREADY temporally corrupt, abort BEFORE any write — never
+    # auto-repair. Raised here, so no fact/occurrence/valid_until change is made for this lane.
+    metrics.lane_preflight_checked += 1
+    causes = _preexisting_lane_anomaly(_lane_rows(db, candidate))
+    if causes is not None:
+        metrics.lane_preexisting_anomaly += 1
+        metrics.write_blocked_by_lane_anomaly += 1
+        metrics.lane_preexisting_multiple_open += 1 if causes["multiple_open"] else 0
+        metrics.lane_preexisting_overlap += 1 if causes["overlap"] else 0
+        metrics.lane_preexisting_repeated_timestamp += 1 if causes["repeated_timestamp"] else 0
+        metrics.lane_preexisting_crossing_disputed += 1 if causes["crossing_disputed"] else 0
+        _LOG.warning("record_price_fact blocked by preexisting lane anomaly: %s", causes)
+        raise PreexistingHistoryLaneAnomaly(causes)
+
     staging_only = bool(candidate.staging_only)
     existing = _find_existing_fact(db, candidate, staging_only=staging_only)
     if existing is not None:
@@ -412,6 +477,7 @@ def record_price_fact(
 __all__ = [
     "LockDiagnostics",
     "OccurrenceProvenance",
+    "PreexistingHistoryLaneAnomaly",
     "RecordMetrics",
     "RecordResult",
     "record_price_fact",

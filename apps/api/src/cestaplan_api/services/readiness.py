@@ -114,6 +114,8 @@ def _open_observation_conflicts(db: Session, retailer_id: int) -> int:
         .where(
             PriceObservation.retailer_id == retailer_id,
             PriceObservation.valid_until.is_(None),
+            # A rolled-back row is logically closed, never a live open observation (contract).
+            PriceObservation.rolled_back_at.is_(None),
         )
         .group_by(
             PriceObservation.product_variant_id,

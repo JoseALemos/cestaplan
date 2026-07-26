@@ -216,6 +216,10 @@ class CurrentPriceService:
             select(PriceObservation)
             .where(
                 PriceObservation.product_variant_id == product_variant_id,
+                # A rolled-back observation is ignored by current-price selection by MODEL CONTRACT
+                # (§T) — this filter applies to BOTH staging and production, and never depends on
+                # valid_until/verification_status alone.
+                PriceObservation.rolled_back_at.is_(None),
                 # A disputed row (same-timestamp conflict, §7) is NEVER a current price — the filter
                 # is on the status, not merely on valid_until.
                 PriceObservation.verification_status != "disputed",
