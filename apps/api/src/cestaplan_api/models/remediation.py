@@ -50,6 +50,9 @@ class HistoryRemediationRun(BaseModel):
             "uq_history_remediation_run_applied_plan", "plan_hash", unique=True,
             postgresql_where=text("status = 'applied'"),
         ),
+        # A failed run can be superseded by at most one retry (no ambiguous/duplicate links, §2).
+        Index("uq_history_remediation_run_supersedes", "supersedes_run_id", unique=True,
+              postgresql_where=text("supersedes_run_id IS NOT NULL")),
     )
 
     plan_hash: Mapped[str] = mapped_column(Text, nullable=False)
@@ -81,12 +84,24 @@ class HistoryRemediationRun(BaseModel):
     observed_worker_artifact_hash: Mapped[str | None] = mapped_column(Text)
     provenance_document_hash: Mapped[str | None] = mapped_column(Text)
 
-    # --- Backup evidence (§9) ---
+    # --- Backup evidence (§7/§9) — observed values, never a copied expected ---
     backup_sha256: Mapped[str | None] = mapped_column(Text)
     backup_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
-    backup_postgres_version: Mapped[str | None] = mapped_column(Text)
+    backup_postgres_version: Mapped[str | None] = mapped_column(Text)  # expected server version
+    backup_pg_restore_version: Mapped[str | None] = mapped_column(Text)  # observed pg_restore
+    backup_database_version: Mapped[str | None] = mapped_column(Text)  # observed live server
+    backup_dump_database_version: Mapped[str | None] = mapped_column(Text)  # from the dump header
     backup_restore_list_verified: Mapped[bool | None] = mapped_column(Boolean)
+    backup_permissions_verified: Mapped[bool | None] = mapped_column(Boolean)
+    backup_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     backup_storage_reference: Mapped[str | None] = mapped_column(Text)  # sanitized
+    backup_evidence_hash: Mapped[str | None] = mapped_column(Text)
+
+    # --- Post-apply evidence for a same-controls restore (§4), sanitized ---
+    post_apply_occurrence_hashes: Mapped[dict | None] = mapped_column(JSONB)
+    post_apply_supported_fk_hashes: Mapped[dict | None] = mapped_column(JSONB)
+    discovered_fk_fingerprint: Mapped[str | None] = mapped_column(Text)
+    expected_unknown_fk_count: Mapped[int | None] = mapped_column(BigInteger)
 
     before_counts: Mapped[dict | None] = mapped_column(JSONB)
     after_counts: Mapped[dict | None] = mapped_column(JSONB)
@@ -96,10 +111,32 @@ class HistoryRemediationRun(BaseModel):
         enum_col(*REMEDIATION_RESTORE_STATUS, name="history_remediation_restore_status"),
         nullable=False, server_default="none",
     )
-    # Link a retry run to the failed run it supersedes (§5/§9), without mutating the earlier row.
+    # Link a retry run to the failed run it supersedes (§2/§5), without mutating the earlier row. A
+    # partial-unique index makes each failed run supersedable at most once (no ambiguous chains).
     supersedes_run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("history_remediation_run.id")
     )
+
+
+class HistoryRemediationPlanConsumption(BaseModel):
+    """IMMUTABLE record that a plan_hash was applied at least once (apply spec §1).
+
+    ``plan_hash`` is UNIQUE and this row is NEVER deleted — not even by a restore. So a plan that
+    has ever been applied can never be applied again: a re-apply after a restore regenerates a fresh
+    plan over the restored state. It is separate from the mutable run ``status``.
+    """
+
+    __tablename__ = "history_remediation_plan_consumption"
+    __table_args__ = (
+        Index("uq_history_remediation_plan_consumption", "plan_hash", unique=True),
+    )
+
+    plan_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    first_run_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("history_remediation_run.id"), nullable=False
+    )
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    execution_hash: Mapped[str | None] = mapped_column(Text)
 
 
 class HistoryRemediationChange(BaseModel):

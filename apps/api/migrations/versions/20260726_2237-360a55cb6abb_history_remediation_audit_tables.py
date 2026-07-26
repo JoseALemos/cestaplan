@@ -1,8 +1,8 @@
 """history remediation audit tables
 
-Revision ID: 45853a808ec3
+Revision ID: 360a55cb6abb
 Revises: b3c4d5e6f7a8
-Create Date: 2026-07-26 21:31:59.184408
+Create Date: 2026-07-26 22:37:14.935396
 
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '45853a808ec3'
+revision: str = '360a55cb6abb'
 down_revision: str | None = 'b3c4d5e6f7a8'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -47,8 +47,18 @@ def upgrade() -> None:
     sa.Column('backup_sha256', sa.Text(), nullable=True),
     sa.Column('backup_size_bytes', sa.BigInteger(), nullable=True),
     sa.Column('backup_postgres_version', sa.Text(), nullable=True),
+    sa.Column('backup_pg_restore_version', sa.Text(), nullable=True),
+    sa.Column('backup_database_version', sa.Text(), nullable=True),
+    sa.Column('backup_dump_database_version', sa.Text(), nullable=True),
     sa.Column('backup_restore_list_verified', sa.Boolean(), nullable=True),
+    sa.Column('backup_permissions_verified', sa.Boolean(), nullable=True),
+    sa.Column('backup_created_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('backup_storage_reference', sa.Text(), nullable=True),
+    sa.Column('backup_evidence_hash', sa.Text(), nullable=True),
+    sa.Column('post_apply_occurrence_hashes', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('post_apply_supported_fk_hashes', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('discovered_fk_fingerprint', sa.Text(), nullable=True),
+    sa.Column('expected_unknown_fk_count', sa.BigInteger(), nullable=True),
     sa.Column('before_counts', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('after_counts', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('execution_hash', sa.Text(), nullable=True),
@@ -66,6 +76,21 @@ def upgrade() -> None:
     op.create_index(op.f('ix_history_remediation_run_public_id'), 'history_remediation_run', ['public_id'], unique=True)
     op.create_index('ix_history_remediation_run_status', 'history_remediation_run', ['status'], unique=False)
     op.create_index('uq_history_remediation_run_applied_plan', 'history_remediation_run', ['plan_hash'], unique=True, postgresql_where=sa.text("status = 'applied'"))
+    op.create_index('uq_history_remediation_run_supersedes', 'history_remediation_run', ['supersedes_run_id'], unique=True, postgresql_where=sa.text('supersedes_run_id IS NOT NULL'))
+    op.create_table('history_remediation_plan_consumption',
+    sa.Column('plan_hash', sa.Text(), nullable=False),
+    sa.Column('first_run_id', sa.BigInteger(), nullable=False),
+    sa.Column('applied_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('execution_hash', sa.Text(), nullable=True),
+    sa.Column('id', sa.BigInteger(), sa.Identity(always=False), nullable=False),
+    sa.Column('public_id', sa.Uuid(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['first_run_id'], ['history_remediation_run.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_history_remediation_plan_consumption_public_id'), 'history_remediation_plan_consumption', ['public_id'], unique=True)
+    op.create_index('uq_history_remediation_plan_consumption', 'history_remediation_plan_consumption', ['plan_hash'], unique=True)
     op.create_table('history_remediation_change',
     sa.Column('remediation_run_id', sa.BigInteger(), nullable=False),
     sa.Column('deterministic_action_id', sa.Text(), nullable=False),
@@ -106,6 +131,10 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_history_remediation_change_public_id'), table_name='history_remediation_change')
     op.drop_index('ix_history_remediation_change_observation', table_name='history_remediation_change')
     op.drop_table('history_remediation_change')
+    op.drop_index('uq_history_remediation_plan_consumption', table_name='history_remediation_plan_consumption')
+    op.drop_index(op.f('ix_history_remediation_plan_consumption_public_id'), table_name='history_remediation_plan_consumption')
+    op.drop_table('history_remediation_plan_consumption')
+    op.drop_index('uq_history_remediation_run_supersedes', table_name='history_remediation_run', postgresql_where=sa.text('supersedes_run_id IS NOT NULL'))
     op.drop_index('uq_history_remediation_run_applied_plan', table_name='history_remediation_run', postgresql_where=sa.text("status = 'applied'"))
     op.drop_index('ix_history_remediation_run_status', table_name='history_remediation_run')
     op.drop_index(op.f('ix_history_remediation_run_public_id'), table_name='history_remediation_run')

@@ -72,7 +72,6 @@ REQUIRED_WRITER_FLAGS = {
 # fingerprint field — is immutable, and DELETE is never allowed on facts or occurrences.
 WHITELIST_FIELDS = planner.MUTABLE_STATE_FIELDS
 _ROLLBACK_MARKER = planner._ROLLBACK_MARKER
-_DISPUTED = "disputed"
 # Apply v1 scope (§11): same-timestamp DISPUTED marking is deliberately OUT — those conflicts need a
 # separate, future review. keep/excluded_no_action are inert; only the two below actually write.
 _SUPPORTED_ACTIONS = frozenset({
@@ -104,6 +103,7 @@ class ApplyError(RuntimeError):
 
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
+        self.failed_run_id: str | None = None  # set to the durable failed-run public_id (§2)
         super().__init__(f"{code}: {detail}" if detail else code)
 
 
@@ -231,6 +231,29 @@ def _valid_commit(v: str | None) -> bool:
 _BACKUP_MAX_AGE_SECONDS = 6 * 3600
 
 
+def _major(version: str | None) -> str | None:
+    """Extract the PostgreSQL major (e.g. '16' from 'pg_restore (PostgreSQL) 16.2')."""
+    if not version:
+        return None
+    m = re.search(r"(\d+)(?:\.\d+)*", str(version))
+    return m.group(1) if m else None
+
+
+def _stream_sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _dump_db_version(restore_list: str | None) -> str | None:
+    if not restore_list:
+        return None
+    m = re.search(r"database version[:\s]+(\d+)", restore_list, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
 @dataclass(slots=True)
 class BackupEvidence:
     """A verified pre-apply backup. ``verify()`` checks the artifact on disk — never a bare
@@ -239,15 +262,21 @@ class BackupEvidence:
     path: str
     expected_sha256: str
     created_at: datetime
-    expected_postgres_version: str | None = None
+    expected_postgres_version: str | None = None  # the server major we require compatibility with
     storage_reference: str | None = None  # sanitized
 
-    def verify(self, now: datetime) -> tuple[bool, dict[str, Any]]:
-        ev: dict[str, Any] = {"path_present": False, "regular_file": False,
-                              "permissions_not_public": False, "size_positive": False,
-                              "sha256_matches": False, "pg_restore_list_verified": False,
-                              "within_window": False, "size_bytes": 0, "observed_sha256": None,
-                              "postgres_version": self.expected_postgres_version}
+    def verify(self, now: datetime, *,
+               server_version: str | None = None) -> tuple[bool, dict[str, Any]]:
+        ev: dict[str, Any] = {
+            "path_present": False, "regular_file": False, "permissions_not_public": False,
+            "size_positive": False, "sha256_matches": False, "pg_restore_list_verified": False,
+            "within_window": False, "compatibility_ok": False, "reference_sanitized": True,
+            "size_bytes": 0, "observed_sha256": None, "expected_postgres_version": _major(
+                self.expected_postgres_version), "observed_pg_restore_version": None,
+            "observed_database_version": _major(server_version), "dump_database_version": None}
+        if self.storage_reference and ("://" not in self.storage_reference
+                                       or "@" in self.storage_reference):
+            ev["reference_sanitized"] = "@" not in (self.storage_reference or "")
         p = Path(self.path)
         if not p.exists():
             return False, ev
@@ -259,21 +288,31 @@ class BackupEvidence:
         ev["size_positive"] = st.st_size > 0
         if not (ev["regular_file"] and ev["size_positive"]):
             return False, ev
-        observed = hashlib.sha256(p.read_bytes()).hexdigest()
-        ev["observed_sha256"] = observed
-        ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and observed == \
-            self.expected_sha256.removeprefix("sha256:")
+        ev["observed_sha256"] = _stream_sha256(p)  # streaming, never the whole dump in memory
+        ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
+            ev["observed_sha256"] == self.expected_sha256.removeprefix("sha256:")
         try:
-            r = subprocess.run(["pg_restore", "--list", self.path], capture_output=True,
-                               timeout=60, check=False)
-            ev["pg_restore_list_verified"] = r.returncode == 0 and bool(r.stdout)
+            ver = subprocess.run(["pg_restore", "--version"], capture_output=True, text=True,
+                                 timeout=30, check=False)
+            ev["observed_pg_restore_version"] = _major(ver.stdout.strip()) if ver.returncode == 0 \
+                else None
+            lst = subprocess.run(["pg_restore", "--list", self.path], capture_output=True,
+                                 text=True, timeout=60, check=False)
+            ev["pg_restore_list_verified"] = lst.returncode == 0 and bool(lst.stdout)
+            ev["dump_database_version"] = _dump_db_version(lst.stdout)
         except (OSError, subprocess.SubprocessError):
             ev["pg_restore_list_verified"] = False
+        # Compatibility is EXPLICIT: dump/database/pg_restore majors must all agree with expected.
+        majors = {ev["expected_postgres_version"], ev["observed_database_version"],
+                  ev["dump_database_version"], ev["observed_pg_restore_version"]}
+        majors.discard(None)
+        ev["compatibility_ok"] = len(majors) == 1 and ev["expected_postgres_version"] is not None
         age = (now - self.created_at).total_seconds()
         ev["within_window"] = 0 <= age <= _BACKUP_MAX_AGE_SECONDS
-        ok = all(ev[k] for k in ("path_present", "regular_file", "permissions_not_public",
-                                 "size_positive", "sha256_matches", "pg_restore_list_verified",
-                                 "within_window"))
+        ok = all(ev[k] for k in (
+            "path_present", "regular_file", "permissions_not_public", "size_positive",
+            "sha256_matches", "pg_restore_list_verified", "within_window", "compatibility_ok",
+            "reference_sanitized"))
         return ok, ev
 
 
@@ -465,10 +504,17 @@ def _provenance_gates(m: dict[str, Any], ctx: ApplyContext) -> list[tuple[str, b
     ]
 
 
-def _backup_gate(ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
+def _server_version(db: Session) -> str | None:
+    try:
+        return db.execute(text("SHOW server_version")).scalar()
+    except Exception:
+        return None
+
+
+def _backup_gate(db: Session, ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
     if ctx.backup is None:
         return False, {"backup_present": False}
-    return ctx.backup.verify(ctx.now or datetime.now(UTC))
+    return ctx.backup.verify(ctx.now or datetime.now(UTC), server_version=_server_version(db))
 
 
 # --------------------------------------------------------------------------- #
@@ -480,10 +526,17 @@ _KNOWN_BLOCKERS = frozenset({
 })
 
 
+def _full_provenance_ok(m: dict[str, Any], ctx: ApplyContext) -> bool:
+    """The conjunction of EVERY provenance gate (§8): app-commit present, api/worker aligned,
+    main-commit match, immutable build (document present + document/commit/source/api/worker
+    all matching). A blocker is never 'resolved' while any commit or artifact mismatches."""
+    return all(ok for _, ok in _provenance_gates(m, ctx))
+
+
 def _resolve_manifest_blockers(m: dict[str, Any], *, writer_ok: bool,
-                               provenance_ok: bool) -> tuple[list[str], list[str], list[str]]:
-    """Classify each sealed manifest blocker (§2). An unknown blocker, or a known one not PROVEN
-    resolved, stays unresolved (fail closed)."""
+                               full_provenance_ok: bool) -> tuple[list[str], list[str], list[str]]:
+    """Classify each sealed manifest blocker (§2/§8). An unknown blocker, or a known one not PROVEN
+    resolved (via FULL provenance, not merely immutable_build_provenance), stays unresolved."""
     present = list(m.get("apply_blockers", []))
     resolved: list[str] = []
     unresolved: list[str] = []
@@ -492,9 +545,9 @@ def _resolve_manifest_blockers(m: dict[str, Any], *, writer_ok: bool,
             # Resolved solely because this separate, reviewed executor now exists.
             resolved.append(b)
         elif b == "record_price_fact_rolled_back_reuse_not_remediated":
-            (resolved if (writer_ok and provenance_ok) else unresolved).append(b)
+            (resolved if (writer_ok and full_provenance_ok) else unresolved).append(b)
         elif b == "unknown_commit_provenance":
-            (resolved if provenance_ok else unresolved).append(b)
+            (resolved if full_provenance_ok else unresolved).append(b)
         else:
             unresolved.append(b)  # unknown blocker -> fail closed
     return present, resolved, unresolved
@@ -585,6 +638,11 @@ _DML_RE = re.compile(
     r"([a-z_][a-z0-9_]*)\"?", re.IGNORECASE)
 _SET_COLS_RE = re.compile(r"\bset\b(.*?)(?:\bwhere\b|\breturning\b|$)", re.IGNORECASE | re.DOTALL)
 _COL_RE = re.compile(r'["\s,]*"?([a-z_][a-z0-9_]*)"?\s*=')
+# The ONLY anomaly-DELETE shape allowed: a single primary-key equality with a bound param (§5).
+_ANOMALY_DELETE_RE = re.compile(
+    r'^\s*delete\s+from\s+(?:only\s+)?"?(?:public\.)?"?price_anomaly"?\s+'
+    r'where\s+"?price_anomaly"?\s*\.\s*"?id"?\s*=\s*%\(\w+\)s(?:::\w+)?\s*$',
+    re.IGNORECASE)
 
 
 # Per-instance guard state lives in a ContextVar (thread/async-safe), NEVER a shared module dict.
@@ -605,8 +663,12 @@ def _forbid(statement: str, params: Any) -> None:
     if op == "delete":
         if table != _ANOMALY_TABLE or not state.get("allow_anomaly_delete"):
             raise ApplyForbiddenWrite("forbidden_delete", table)
-        if "where" not in stmt.lower():  # a bulk DELETE without WHERE is never allowed
-            raise ApplyForbiddenWrite("forbidden_bulk_delete", table)
+        # Accept ONLY the exact single-id ORM form: `DELETE FROM price_anomaly WHERE
+        # price_anomaly.id = %(param)s`. Any OR/IN/AND/subquery/extra predicate is rejected (§5).
+        if not _ANOMALY_DELETE_RE.match(stmt):
+            raise ApplyForbiddenWrite("forbidden_delete_shape", table)
+        if isinstance(params, (list, tuple)) and len(params) != 1:  # never an executemany batch
+            raise ApplyForbiddenWrite("forbidden_delete_batch", table)
         rid = _param_id(params)
         if rid is None or rid not in state.get("allowed_anomaly_ids", frozenset()):
             raise ApplyForbiddenWrite("forbidden_delete_unauthorized_id", str(rid))
@@ -781,16 +843,16 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
     prov = _provenance_gates(m, ctx)
     for code, ok in prov:
         record(code, ok)
-    provenance_ok = dict(prov).get("immutable_build_provenance", False)
+    full_prov = all(ok for _, ok in prov)
     _present, _resolved, unresolved = _resolve_manifest_blockers(
-        m, writer_ok=wgate_ok, provenance_ok=provenance_ok)
+        m, writer_ok=wgate_ok, full_provenance_ok=full_prov)
     record("manifest_blockers_resolved", not unresolved)  # §2: any unresolved blocker fails closed
     for code, ok in _environment_gates(db, settings, ctx):
         record(code, ok)
     for code, ok in _drift_gates(db, m):
         record(code, ok)
     if for_apply:
-        record("backup_verified", _backup_gate(ctx)[0])
+        record("backup_verified", _backup_gate(db, ctx)[0])
     return passed, blocking
 
 
@@ -845,13 +907,13 @@ def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
     settings = settings or Settings()
     passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True)
     wgate_ok, _ = _writer_contract_gate()
-    provenance_ok = dict(_provenance_gates(m, ctx)).get("immutable_build_provenance", False)
+    full_prov = _full_provenance_ok(m, ctx)
     present, resolved, unresolved = _resolve_manifest_blockers(
-        m, writer_ok=wgate_ok, provenance_ok=provenance_ok)
+        m, writer_ok=wgate_ok, full_provenance_ok=full_prov)
     apply_blockers: list[str] = []
-    if not provenance_ok:
+    if not full_prov:
         apply_blockers.append("immutable_build_provenance_missing")
-    if not _backup_gate(ctx)[0]:
+    if not _backup_gate(db, ctx)[0]:
         apply_blockers.append("verified_backup_missing")
     apply_blockers.extend(f"unresolved_manifest_blocker:{b}" for b in unresolved)
     report = {
@@ -935,6 +997,101 @@ def _require_clean_session(db: Session) -> None:
         raise ApplySessionNotClean("session_deleted")
 
 
+def _require_virgin_session(db: Session) -> None:
+    """The public apply/restore must OWN a freshly-begun transaction (spec §6): no pending ORM
+    state, no open transaction (explicit begin / begin_nested / a prior query), no bound connection.
+    A reused session must have been rolled back to a truly virgin state first."""
+    _require_clean_session(db)
+    if db.in_transaction() or db.in_nested_transaction():
+        raise ApplySessionNotClean("session_transaction_already_started")
+
+
+def _validate_retry(db: Session, plan_hash: str, previous_failed_run_id: str | None) -> int | None:
+    """Validate an explicit retry link (spec §2). Returns the failed run's internal id to supersede,
+    or None. Blocks a missing/mismatched/non-failed/already-superseded/circular previous run."""
+    if previous_failed_run_id is None:
+        return None
+    from cestaplan_api.models import HistoryRemediationRun
+    prev = db.execute(select(HistoryRemediationRun).where(
+        HistoryRemediationRun.public_id == previous_failed_run_id)).scalar_one_or_none()
+    if prev is None:
+        raise ApplyManifestInvalid("retry_previous_run_not_found", previous_failed_run_id)
+    if prev.plan_hash != plan_hash:
+        raise ApplyManifestInvalid("retry_plan_hash_mismatch", previous_failed_run_id)
+    if prev.status != "failed":
+        raise ApplyManifestInvalid("retry_previous_not_failed", prev.status)
+    already = db.execute(select(func.count()).select_from(HistoryRemediationRun).where(
+        HistoryRemediationRun.supersedes_run_id == prev.id)).scalar()
+    if already:
+        raise ApplyManifestInvalid("retry_previous_already_superseded", previous_failed_run_id)
+    # Walk the supersedes chain to reject a cycle.
+    seen, cur = {prev.id}, prev
+    while cur.supersedes_run_id is not None:
+        if cur.supersedes_run_id in seen:
+            raise ApplyManifestInvalid("retry_circular_chain", previous_failed_run_id)
+        seen.add(cur.supersedes_run_id)
+        cur = db.get(HistoryRemediationRun, cur.supersedes_run_id)
+        if cur is None:
+            break
+    return prev.id
+
+
+def _backup_run_fields(ctx: ApplyContext, bev: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "backup_sha256": bev.get("observed_sha256"),
+        "backup_size_bytes": bev.get("size_bytes"),
+        "backup_postgres_version": bev.get("expected_postgres_version"),
+        "backup_pg_restore_version": bev.get("observed_pg_restore_version"),
+        "backup_database_version": bev.get("observed_database_version"),
+        "backup_dump_database_version": bev.get("dump_database_version"),
+        "backup_restore_list_verified": bev.get("pg_restore_list_verified"),
+        "backup_permissions_verified": bev.get("permissions_not_public"),
+        "backup_created_at": ctx.backup.created_at if ctx.backup is not None else None,
+        "backup_storage_reference":
+            ctx.backup.storage_reference if ctx.backup is not None else None,
+        "backup_evidence_hash": planner._value_hash(bev),
+    }
+
+
+def _live_occ_fk(db: Session, obs_ids: list[int]) -> tuple[dict, dict, list]:
+    """Recompute the sanitized occurrence/supported-FK evidence for a set of observations. Values
+    are JSON-safe (lists, not tuples) so they compare cleanly against the JSONB-roundtripped copy.
+    Returns (occurrence_hashes, supported_fk_hashes, discovered_fks)."""
+    occ: dict[str, list[str]] = {}
+    for oid in obs_ids:
+        occ[str(oid)] = sorted(
+            planner._occ_manifest(o)["occurrence_hash"]
+            for o in db.execute(select(planner.PriceObservationOccurrence).where(
+                planner.PriceObservationOccurrence.price_observation_id == oid)).scalars())
+    discovered = planner.discover_incoming_fks(db)
+    fk: dict[str, list[list]] = {str(oid): [] for oid in obs_ids}
+    for fkd in discovered:
+        if fkd.get("classification") != "domain_supported":
+            continue
+        handler = planner._FK_HANDLERS.get(planner._fk_key(fkd))
+        if not handler or not handler["emit"] or handler["model"] is None:
+            continue
+        model = handler["model"]
+        col = getattr(model, fkd["referencing_column"])
+        for row in db.execute(select(model).where(col.in_(obs_ids))).scalars():
+            fk[str(getattr(row, fkd["referencing_column"]))].append(
+                json.loads(json.dumps(list(_supported_fk_identity(
+                    planner._fk_manifest(fkd, model, row))))))
+    return occ, {k: sorted(v) for k, v in fk.items()}, discovered
+
+
+def _capture_post_apply_evidence(db: Session, m: dict[str, Any], run: Any) -> None:
+    """Store sanitized post-apply evidence so a restore can re-verify with the same controls without
+    the (deleted) manifest (spec §4)."""
+    obs_ids = [r["id"] for r in _planned_rows(m)]
+    occ, fk, discovered = _live_occ_fk(db, obs_ids)
+    run.post_apply_occurrence_hashes = occ
+    run.post_apply_supported_fk_hashes = fk
+    run.discovered_fk_fingerprint = planner._value_hash(sorted(planner._fk_ident(f) for f in
+                                                               discovered))
+    run.expected_unknown_fk_count = 0
+
+
 def _lane_lock_key(lane_fp: str) -> int:
     return ident.signed_bigint(hashlib.sha256(lane_fp.encode()).hexdigest())
 
@@ -952,13 +1109,15 @@ def _anomaly_hash(an: PriceAnomaly) -> str:
                                 "status": an.status})
 
 
-def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str) -> None:
+def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str,
+                       supersedes: int | None = None) -> str | None:
     """Durable failure audit in a SEPARATE transaction (§5) so a failed run survives the data
-    rollback and a retry can link to it via supersedes_run_id. Sanitized code only, no raw msg."""
+    rollback and a retry can link to it via supersedes_run_id. Sanitized code only, no raw msg.
+    Returns the failed run's public_id."""
     from cestaplan_api.models import HistoryRemediationRun
     s = SessionLocal()
     try:
-        s.add(HistoryRemediationRun(
+        run = HistoryRemediationRun(
             plan_hash=m["plan_hash"], manifest_schema_version=m.get("schema_version", 0),
             planner_tool_version=m.get("tool_version", ""),
             planner_source_hash=m.get("planner_source_hash", ""),
@@ -968,40 +1127,66 @@ def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str) ->
             execution_mode="apply", status="failed", error_code=error_code,
             started_at=ctx.now or datetime.now(UTC), completed_at=datetime.now(UTC),
             operator_reference=ctx.operator_reference,
-            supersedes_run_id=None, observed_commit_sha=ctx.app_commit_sha))
+            supersedes_run_id=supersedes, observed_commit_sha=ctx.app_commit_sha)
+        s.add(run)
         s.commit()
+        return str(run.public_id)
     finally:
         s.close()
 
 
 def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool = False,
-          confirmations: tuple[str, ...] = (), settings: Settings | None = None,
-          lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Execute the sealed plan atomically (spec §4C/§5/§7). BLOCKED by default: requires explicit
-    authorization + confirmation tokens and a clean session. On a mid-run failure the whole data
-    transaction rolls back and a durable ``failed`` run is recorded in a separate audit txn."""
+          confirmations: tuple[str, ...] = (), previous_failed_run_id: str | None = None,
+          settings: Settings | None = None, lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """Public apply (spec §4C/§5/§6): requires a VIRGIN session (no pending state, no open
+    transaction, no prior queries) that this call owns; then executes atomically."""
+    _require_virgin_session(db)
+    return _apply_guarded(db, m, ctx, authorized=authorized, confirmations=confirmations,
+                          previous_failed_run_id=previous_failed_run_id, settings=settings,
+                          lock_timeout_ms=lock_timeout_ms)
+
+
+def _apply_guarded(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool = False,
+                   confirmations: tuple[str, ...] = (), previous_failed_run_id: str | None = None,
+                   settings: Settings | None = None,
+                   lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """Auth + gates + atomic apply with durable failure auditing (§3/§5). ANY unexpected exception
+    (not just ApplyError, never KeyboardInterrupt/SystemExit) rolls back and records a durable
+    run with a SANITIZED code, then re-raises the original."""
     _require_authorization(authorized, confirmations)
     _require_postgres(db)
     _require_clean_session(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
+    supersedes = _validate_retry(db, m["plan_hash"], previous_failed_run_id)
     try:
-        return _apply_locked(db, m, ctx, settings, lock_timeout_ms)
+        return _apply_locked(db, m, ctx, settings, lock_timeout_ms, supersedes)
     except ApplyAlreadyApplied:
         raise
     except ApplyError as exc:
         db.rollback()
-        _record_failed_run(m, ctx, exc.code)
+        exc.failed_run_id = _record_failed_run(m, ctx, exc.code, supersedes)
+        raise
+    except Exception as exc:
+        db.rollback()
+        fid = _record_failed_run(m, ctx, "unexpected_apply_error", supersedes)
+        exc.failed_run_id = fid  # type: ignore[attr-defined]
         raise
 
 
 def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: Settings,
-                  lock_timeout_ms: int) -> dict[str, Any]:
-    from cestaplan_api.models import HistoryRemediationRun
-    # 1) global remediation lock; 2) deterministic lane locks; 3) full revalidation under the locks.
+                  lock_timeout_ms: int, supersedes: int | None) -> dict[str, Any]:
+    from cestaplan_api.models import HistoryRemediationPlanConsumption, HistoryRemediationRun
+    # 1) global remediation lock; then the irreversible-consumption gate (§1).
     _acquire(db, _GLOBAL_LOCK_KEY, timeout_ms=lock_timeout_ms)
-    if _completed_run(db, m["plan_hash"]) is not None:
-        return {"status": "already_applied", "plan_hash": m["plan_hash"]}
+    consumed = db.execute(select(HistoryRemediationPlanConsumption).where(
+        HistoryRemediationPlanConsumption.plan_hash == m["plan_hash"])).scalar_one_or_none()
+    if consumed is not None:
+        if _completed_run(db, m["plan_hash"]) is not None:
+            return {"status": "already_applied", "plan_hash": m["plan_hash"]}
+        # Consumed once but not currently applied -> it was restored; a NEW plan is required.
+        return {"status": "plan_requires_regeneration", "plan_hash": m["plan_hash"]}
+    # 2) deterministic lane locks; 3) full revalidation under the locks.
     for lane in sorted(m["lanes"], key=lambda x: x["lane_fingerprint"]):
         if not lane.get("excluded"):
             _acquire(db, _lane_lock_key(lane["lane_fingerprint"]), timeout_ms=lock_timeout_ms)
@@ -1012,6 +1197,7 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
     run_ts = ctx.now or datetime.now(UTC)
     before = _count_snapshot(db)
     o, e = ctx.observed_provenance, ctx.expected_provenance
+    bev = _backup_gate(db, ctx)[1]
     run = HistoryRemediationRun(
         plan_hash=m["plan_hash"], manifest_schema_version=m["schema_version"],
         planner_tool_version=m["tool_version"], planner_source_hash=m["planner_source_hash"],
@@ -1019,14 +1205,15 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
         main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha") or "",
         alembic_revision=_alembic_revision(db) or "", execution_mode="apply", status="applied",
         started_at=run_ts, operator_reference=ctx.operator_reference, before_counts=before,
+        supersedes_run_id=supersedes,
         observed_commit_sha=ctx.app_commit_sha, expected_commit_sha=e.commit_sha,
         observed_source_hash=o.source_tree_hash, expected_source_hash=e.source_tree_hash,
         observed_api_artifact_hash=o.api_artifact_hash,
         expected_api_artifact_hash=e.api_artifact_hash,
         observed_worker_artifact_hash=o.worker_artifact_hash,
         expected_worker_artifact_hash=e.worker_artifact_hash,
-        provenance_document_hash=o.document_hash, backup_sha256=_backup_sha(ctx),
-        backup_size_bytes=_backup_int(ctx, "size_bytes"))
+        provenance_document_hash=o.document_hash,
+        **_backup_run_fields(ctx, bev))
     db.add(run)
     try:
         db.flush()  # unique(plan_hash where status=applied) -> concurrent duplicate fails here
@@ -1060,7 +1247,12 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
     run.after_counts = after
     run.completed_at = ctx.now or datetime.now(UTC)
     run.execution_hash = _value_execution_hash(m["plan_hash"], changes)
+    _capture_post_apply_evidence(db, m, run)  # §4: evidence a restore can re-verify against
     _assert_counts_preserved(before, after)
+    # §1: durably mark this plan_hash consumed; NEVER deleted, not even by a restore.
+    db.add(HistoryRemediationPlanConsumption(
+        plan_hash=m["plan_hash"], first_run_id=run.id, applied_at=run_ts,
+        execution_hash=run.execution_hash))
     db.flush()
     return {"status": "applied", "plan_hash": m["plan_hash"], "run_public_id": run_ref,
             "changes": len(changes), "before_counts": before, "after_counts": after}
@@ -1095,6 +1287,18 @@ def _obs_id_for_hash(lane: dict[str, Any], full_row_hash: str) -> int | None:
     return None
 
 
+def _sealed_side_effect_ref(lane: dict[str, Any], full_row_hash: str) -> str:
+    """A stable side-effect reference derived ONLY from the sealed manifest (spec §9) — never a
+    database id generated during execution, so deterministic_action_id is computable before any
+    INSERT and is identical across runs of the same plan."""
+    for se in lane.get("proposed_side_effects", []):
+        if se.get("target_observation_ref") == full_row_hash:
+            return hashlib.sha256("\x1f".join((
+                str(se.get("type")), str(se.get("target_observation_ref")),
+                str(se.get("anomaly_type")), str(se.get("severity")))).encode()).hexdigest()
+    return ""
+
+
 def _apply_row(db: Session, run: HistoryRemediationRun, m: dict[str, Any], lane: dict[str, Any],
                r: dict[str, Any], live: PriceObservation, run_ts: datetime,
                anomaly_by_target: dict[str, PriceAnomaly]) -> HistoryRemediationChange:
@@ -1115,7 +1319,7 @@ def _apply_row(db: Session, run: HistoryRemediationRun, m: dict[str, Any], lane:
         remediation_run_id=run.id,
         deterministic_action_id=_det_action_id(
             m["plan_hash"], lane["lane_fingerprint"], r["integrity"]["full_row_hash"], action,
-            str(anomaly.id) if anomaly is not None else ""),
+            _sealed_side_effect_ref(lane, r["integrity"]["full_row_hash"])),
         lane_fingerprint=lane["lane_fingerprint"], price_observation_id=r["id"], action_type=action,
         original_temporal_state=_json(original), expected_bound_state=_json(bound),
         original_hash=r["integrity"]["full_row_hash"], expected_bound_hash=_thash(bound),
@@ -1134,8 +1338,20 @@ _RESTORE_ENV_GATES = ("production_disabled", "per_chain_flags_false", "price_pro
 def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: bool = False,
             confirmations: tuple[str, ...] = (), settings: Settings | None = None,
             lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Exactly restore one apply run (spec §4D/§6/§10): global + lane locks, full revalidation,
-    SELECT FOR UPDATE, post-flush verify, atomic. On drift, rollback and persist
+    """Public restore (spec §6): requires a VIRGIN session that this call owns."""
+    _require_virgin_session(db)
+    return _restore_guarded(db, run_public_id, ctx, authorized=authorized,
+                            confirmations=confirmations, settings=settings,
+                            lock_timeout_ms=lock_timeout_ms)
+
+
+def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
+                     authorized: bool = False, confirmations: tuple[str, ...] = (),
+                     settings: Settings | None = None,
+                     lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """Exactly restore one apply run (spec §4D/§6): global + lane locks, the SAME provenance /
+    contract / env gates as apply, revalidation against the stored post-apply evidence, SELECT FOR
+    UPDATE, per-anomaly verification before delete, post-flush verify, atomic. On drift, roll back
     manual_review_required in a SEPARATE audit transaction so the state is never lost."""
     from cestaplan_api.models import HistoryRemediationChange, HistoryRemediationRun
     _require_authorization(authorized, confirmations, restore=True)
@@ -1155,19 +1371,49 @@ def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: b
         HistoryRemediationChange.remediation_run_id == run.id)).scalars())
     for lane_fp in sorted({c.lane_fingerprint for c in changes}):
         _acquire(db, _lane_lock_key(lane_fp), timeout_ms=lock_timeout_ms)
-    # Pre-restore environment gates + provenance/contract (§6).
+    # Same provenance/contract/env controls as apply (§4/§6).
     env = dict(_environment_gates(db, settings, ctx))
-    prov_ok = dict(_provenance_gates({"commit_provenance": {}}, ctx)).get(
-        "immutable_build_provenance", False)
     if not all(env.get(g) for g in _RESTORE_ENV_GATES) or not _writer_contract_gate()[0] \
-            or not prov_ok:
+            or not _full_provenance_ok({"commit_provenance": {}}, ctx):
         raise ApplyEnvironmentUnsafe("restore_gates_blocking", "")
     try:
+        _restore_evidence_gates(db, run, changes)  # occurrences / FK / unknown-FK unchanged (§4)
         return _restore_locked(db, run, changes)
-    except ApplyRestoreDrift as exc:
+    except (ApplyRestoreDrift, ApplyForbiddenWrite) as exc:
         db.rollback()
         _mark_manual_review(run_public_id, exc.code)
         raise
+
+
+def _restore_evidence_gates(db: Session, run: HistoryRemediationRun,
+                            changes: list[HistoryRemediationChange]) -> None:
+    """Revalidate against the sanitized POST-APPLY evidence stored on the run — never the deleted
+    manifest (spec §4). Any drift fails closed."""
+    obs_ids = [c.price_observation_id for c in changes]
+    live_occ, live_fk, discovered = _live_occ_fk(db, obs_ids)
+    stored_occ = json.loads(json.dumps(run.post_apply_occurrence_hashes or {}))
+    stored_fk = json.loads(json.dumps(run.post_apply_supported_fk_hashes or {}))
+    if live_occ != stored_occ:
+        raise ApplyRestoreDrift("occurrences_changed_after_apply")
+    if planner._unknown_fk_refs(db, discovered, obs_ids) or \
+            (run.expected_unknown_fk_count or 0) != 0:
+        raise ApplyRestoreDrift("unknown_fk_after_apply")
+    if live_fk != stored_fk:
+        raise ApplyRestoreDrift("supported_fk_changed_after_apply")
+    if planner._value_hash(sorted(planner._fk_ident(f) for f in discovered)) != \
+            run.discovered_fk_fingerprint:
+        raise ApplyRestoreDrift("fk_schema_changed_after_apply")
+
+
+def _verify_anomaly_before_delete(db: Session, ch: HistoryRemediationChange) -> PriceAnomaly:
+    """The anomaly to delete must EXACTLY match what this run created (spec §5) or fail closed."""
+    an = db.get(PriceAnomaly, ch.created_anomaly_live_id)
+    if an is None or an.id != ch.created_anomaly_live_id:
+        raise ApplyRestoreDrift("anomaly_missing", str(ch.created_anomaly_live_id))
+    if _anomaly_hash(an) != ch.created_anomaly_hash or \
+            an.price_observation_id != ch.price_observation_id:
+        raise ApplyRestoreDrift("anomaly_changed", str(an.id))
+    return an
 
 
 def _restore_locked(db: Session, run: HistoryRemediationRun,
@@ -1178,30 +1424,31 @@ def _restore_locked(db: Session, run: HistoryRemediationRun,
         rows = {o.id: o for o in db.execute(select(PriceObservation).where(
             PriceObservation.id.in_([c.price_observation_id for c in changes])
         ).with_for_update()).scalars()}
+        # Every row must still be in its EXPECTED post-apply state (§4).
+        for ch in changes:
+            if ch.action_type in _ACTION_WRITES and \
+                    _thash(_temporal_of(rows[ch.price_observation_id])) != ch.actual_after_hash:
+                raise ApplyRestoreDrift("row_changed_after_apply", str(ch.price_observation_id))
+        # Verify each anomaly BEFORE any delete; a mismatch aborts the whole restore (§5).
+        anomalies = {ch.created_anomaly_live_id: _verify_anomaly_before_delete(db, ch)
+                     for ch in changes if ch.created_anomaly_live_id is not None}
         for ch in changes:
             row = rows[ch.price_observation_id]
-            if ch.action_type in _ACTION_WRITES and \
-                    _thash(_temporal_of(row)) != ch.expected_bound_hash:
-                raise ApplyRestoreDrift("row_changed_after_apply", str(ch.price_observation_id))
             for k in WHITELIST_FIELDS:
                 setattr(row, k, _parse_dt(ch.original_temporal_state.get(k))
                         if k in ("valid_from", "valid_until", "rolled_back_at")
                         else ch.original_temporal_state.get(k))
             ch.restore_state = _json(_temporal_of(row))
             ch.status = "restored"
-        # Delete ONLY the exact allowlisted anomalies; keep the durable historical reference (§7).
         for ch in changes:
-            live_id = ch.created_anomaly_live_id
-            if live_id is None:
+            if ch.created_anomaly_live_id is None:
                 continue
-            an = db.get(PriceAnomaly, live_id)
+            an = anomalies[ch.created_anomaly_live_id]
             ch.created_anomaly_live_id = None  # null the live FK; original id + hash are preserved
             db.flush()
-            if an is not None:
-                db.delete(an)
+            db.delete(an)  # ORM single-id delete of the exact verified object
             ch.created_anomaly_deleted_at = datetime.now(UTC)
         db.flush()
-        # post-flush verify: each row now matches its restored (original) state.
         for ch in changes:
             if _thash(_temporal_of(rows[ch.price_observation_id])) != _thash(
                     ch.original_temporal_state):
@@ -1232,16 +1479,6 @@ def _mark_manual_review(run_public_id: str, code: str) -> None:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def _backup_sha(ctx: ApplyContext) -> str | None:
-    return ctx.backup.expected_sha256 if ctx.backup is not None else None
-
-
-def _backup_int(ctx: ApplyContext, key: str) -> int | None:
-    if ctx.backup is None:
-        return None
-    return ctx.backup.verify(ctx.now or datetime.now(UTC))[1].get(key)
-
-
 def _require_authorization(authorized: bool, confirmations: tuple[str, ...],
                            *, restore: bool = False) -> None:
     needed = ("I_UNDERSTAND_THIS_WRITES", "PLAN_REVIEWED", "BACKUP_VERIFIED")
