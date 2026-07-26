@@ -785,3 +785,149 @@ def test_invalid_lane_does_not_block_independent_lane(seeded) -> None:
     _write(rid, vid2, amount="2.00", observed_at=T0)  # succeeds despite lane A being corrupt
     rows_b = [r for r in _all_rows(rid) if r.product_variant_id == vid2]
     assert len(rows_b) == 1 and rows_b[0].valid_until is None
+
+
+# --------------------------------------------------------------------------- #
+# Rolled-back facts are never reused under real concurrency
+# (fix/record-price-fact-rolled-back-selection §7). Lock order stays lane -> occurrence.
+# --------------------------------------------------------------------------- #
+def _commit_obs(rid, vid, *, amount="1.19", observed_at=T0, rolled_back: bool) -> int:
+    """Commit an exact-fingerprint fact (active or rolled-back) and return its id."""
+    s = _session()
+    try:
+        # Mirror _candidate's identity fields EXACTLY (it leaves ``available`` unset -> NULL, and
+        # requires_loyalty is coerced to False by record_price_fact) so this row is an exact match.
+        o = PriceObservation(
+            retailer_id=rid, product_variant_id=vid, price_scope="national", price_type="regular",
+            amount=Decimal(amount), currency="EUR", requires_loyalty=False,
+            observed_at=observed_at, imported_at=observed_at, valid_from=observed_at,
+            valid_until=(observed_at if rolled_back else None), confidence_score=Decimal("1.0"),
+            staging_only=True, rolled_back_at=(observed_at if rolled_back else None))
+        s.add(o)
+        s.commit()
+        return o.id
+    finally:
+        s.close()
+
+
+def _obs_by_state(rid) -> tuple[list[int], list[int]]:
+    c = _session()
+    try:
+        rows = c.execute(
+            select(PriceObservation).where(PriceObservation.retailer_id == rid)).scalars().all()
+        return ([r.id for r in rows if r.rolled_back_at is None],
+                [r.id for r in rows if r.rolled_back_at is not None])
+    finally:
+        c.close()
+
+
+def _occ_target_ids(rid) -> list[int]:
+    c = _session()
+    try:
+        return [
+            o.price_observation_id
+            for o in c.execute(
+                select(PriceObservationOccurrence).join(
+                    PriceObservation,
+                    PriceObservation.id == PriceObservationOccurrence.price_observation_id,
+                ).where(PriceObservation.retailer_id == rid)
+            ).scalars()
+        ]
+    finally:
+        c.close()
+
+
+def _rpf_x(rid, vid, provider="x"):
+    return lambda s: record_price_fact(
+        s, _candidate(rid, vid), OccurrenceProvenance(provider_code=provider), imported_at=T0)
+
+
+# §7.1 ten writers, only a rolled-back exact exists -> exactly ONE new active + ONE occurrence.
+def test_conc_only_rolled_back_ten_writers(seeded) -> None:
+    rid, vid, _runs = seeded
+    rb_id = _commit_obs(rid, vid, rolled_back=True)
+    _run_concurrently([_rpf_x(rid, vid)] * 10)
+    active, rolled = _obs_by_state(rid)
+    assert len(active) == 1 and rolled == [rb_id]     # rolled-back intact
+    assert _occ_target_ids(rid) == [active[0]]        # one occurrence, on the new active fact
+
+
+# §7.2 ten writers, rolled-back + active exist, same occurrence -> all reuse the active; 1 occ.
+def test_conc_rolled_back_plus_active_reuse_active(seeded) -> None:
+    rid, vid, _runs = seeded
+    rb_id = _commit_obs(rid, vid, rolled_back=True)
+    act_id = _commit_obs(rid, vid, rolled_back=False)
+    _run_concurrently([_rpf_x(rid, vid)] * 10)
+    active, rolled = _obs_by_state(rid)
+    assert active == [act_id] and rolled == [rb_id]   # no new fact; rolled-back untouched
+    assert _occ_target_ids(rid) == [act_id]           # one occurrence for that identity
+
+
+# §7.3 ten writers, rolled-back + active, ten distinct provenances -> 10 occurrences on the active.
+def test_conc_rolled_back_plus_active_ten_provenances(seeded) -> None:
+    rid, vid, _runs = seeded
+    rb_id = _commit_obs(rid, vid, rolled_back=True)
+    act_id = _commit_obs(rid, vid, rolled_back=False)
+    _run_concurrently([_rpf_x(rid, vid, provider=f"p{i}") for i in range(10)])
+    active, rolled = _obs_by_state(rid)
+    assert active == [act_id] and rolled == [rb_id]
+    occ = _occ_target_ids(rid)
+    assert len(occ) == 10 and set(occ) == {act_id}    # all ten on the active
+    assert rb_id not in occ                            # zero on the rolled-back
+
+
+# §7.4 retry after a transactional rollback -> creates/reuses correctly, no orphan facts.
+def test_conc_retry_after_rollback_no_orphan(seeded) -> None:
+    rid, vid, _runs = seeded
+    rb_id = _commit_obs(rid, vid, rolled_back=True)
+    a = _session()
+    try:
+        record_price_fact(a, _candidate(rid, vid), OccurrenceProvenance(provider_code="x"),
+                          imported_at=T0)
+        a.rollback()  # discard the partial write, release the locks
+    finally:
+        a.close()
+    assert _obs_by_state(rid) == ([], [rb_id])         # no orphan; rolled-back intact
+    b = _session()
+    try:
+        res = record_price_fact(b, _candidate(rid, vid), OccurrenceProvenance(provider_code="x"),
+                                imported_at=T0)
+        b.commit()
+        assert res.fact_created is True
+    finally:
+        b.close()
+    active, rolled = _obs_by_state(rid)
+    assert len(active) == 1 and rolled == [rb_id]
+
+
+# §7.5 lane-lock timeout with a rolled-back exact present -> aborted, zero partial writes.
+def test_conc_lane_lock_timeout_no_partial_write(seeded) -> None:
+    rid, vid, _runs = seeded
+    rb_id = _commit_obs(rid, vid, rolled_back=True)
+    key = ident.price_history_lane_lock_key(_candidate(rid, vid))
+    holder = _session()
+    try:
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})  # hold the lane lock
+        b = _session()
+        try:
+            with pytest.raises(Exception):  # noqa: B017 - lock_not_available surfaces
+                record_price_fact(b, _candidate(rid, vid), OccurrenceProvenance(provider_code="x"),
+                                  imported_at=T0, lock_timeout_ms=200)
+            b.rollback()
+        finally:
+            b.close()
+    finally:
+        holder.rollback()
+        holder.close()
+    assert _obs_by_state(rid) == ([], [rb_id])         # nothing written; rolled-back intact
+
+
+# §7.6 two independent lanes (each with a rolled-back exact) never block each other.
+def test_conc_two_independent_lanes_do_not_block(seeded) -> None:
+    rid, vid, _runs = seeded
+    vid2 = _new_variant(rid)
+    _commit_obs(rid, vid, rolled_back=True)
+    _commit_obs(rid, vid2, rolled_back=True)
+    _run_concurrently([_rpf_x(rid, vid), _rpf_x(rid, vid2)])
+    active, _rolled = _obs_by_state(rid)
+    assert len(active) == 2  # both lanes created their own new active fact
