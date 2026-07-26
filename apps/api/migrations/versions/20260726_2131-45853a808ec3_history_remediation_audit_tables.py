@@ -1,8 +1,8 @@
 """history remediation audit tables
 
-Revision ID: 85c38254ddd5
+Revision ID: 45853a808ec3
 Revises: b3c4d5e6f7a8
-Create Date: 2026-07-26 20:31:56.029084
+Create Date: 2026-07-26 21:31:59.184408
 
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '85c38254ddd5'
+revision: str = '45853a808ec3'
 down_revision: str | None = 'b3c4d5e6f7a8'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -29,18 +29,30 @@ def upgrade() -> None:
     sa.Column('planner_source_hash', sa.Text(), nullable=False),
     sa.Column('writer_contract_version', sa.Text(), nullable=False),
     sa.Column('main_commit_sha', sa.Text(), nullable=False),
-    sa.Column('deployed_api_sha', sa.Text(), nullable=True),
-    sa.Column('deployed_worker_sha', sa.Text(), nullable=True),
     sa.Column('alembic_revision', sa.Text(), nullable=False),
     sa.Column('execution_mode', sa.Enum('verify_only', 'simulate', 'apply', 'restore', name='history_remediation_mode', native_enum=False), nullable=False),
     sa.Column('status', sa.Enum('pending', 'verified', 'simulated', 'applied', 'failed', 'restored', 'rolled_back', name='history_remediation_status', native_enum=False), server_default='pending', nullable=False),
     sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('operator_reference', sa.Text(), nullable=True),
+    sa.Column('expected_commit_sha', sa.Text(), nullable=True),
+    sa.Column('observed_commit_sha', sa.Text(), nullable=True),
+    sa.Column('expected_source_hash', sa.Text(), nullable=True),
+    sa.Column('observed_source_hash', sa.Text(), nullable=True),
+    sa.Column('expected_api_artifact_hash', sa.Text(), nullable=True),
+    sa.Column('observed_api_artifact_hash', sa.Text(), nullable=True),
+    sa.Column('expected_worker_artifact_hash', sa.Text(), nullable=True),
+    sa.Column('observed_worker_artifact_hash', sa.Text(), nullable=True),
+    sa.Column('provenance_document_hash', sa.Text(), nullable=True),
     sa.Column('backup_sha256', sa.Text(), nullable=True),
+    sa.Column('backup_size_bytes', sa.BigInteger(), nullable=True),
+    sa.Column('backup_postgres_version', sa.Text(), nullable=True),
+    sa.Column('backup_restore_list_verified', sa.Boolean(), nullable=True),
+    sa.Column('backup_storage_reference', sa.Text(), nullable=True),
     sa.Column('before_counts', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('after_counts', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('execution_hash', sa.Text(), nullable=True),
+    sa.Column('error_code', sa.Text(), nullable=True),
     sa.Column('restore_status', sa.Enum('none', 'restored', 'restore_failed', 'manual_review_required', name='history_remediation_restore_status', native_enum=False), server_default='none', nullable=False),
     sa.Column('supersedes_run_id', sa.BigInteger(), nullable=True),
     sa.Column('id', sa.BigInteger(), sa.Identity(always=False), nullable=False),
@@ -53,14 +65,11 @@ def upgrade() -> None:
     op.create_index('ix_history_remediation_run_plan_hash', 'history_remediation_run', ['plan_hash'], unique=False)
     op.create_index(op.f('ix_history_remediation_run_public_id'), 'history_remediation_run', ['public_id'], unique=True)
     op.create_index('ix_history_remediation_run_status', 'history_remediation_run', ['status'], unique=False)
-    # A sealed plan can COMPLETE (status='applied') at most once; failed retries share the plan_hash.
-    op.create_index(
-        'uq_history_remediation_run_applied_plan', 'history_remediation_run', ['plan_hash'],
-        unique=True, postgresql_where=sa.text("status = 'applied'"),
-    )
+    op.create_index('uq_history_remediation_run_applied_plan', 'history_remediation_run', ['plan_hash'], unique=True, postgresql_where=sa.text("status = 'applied'"))
     op.create_table('history_remediation_change',
     sa.Column('remediation_run_id', sa.BigInteger(), nullable=False),
     sa.Column('deterministic_action_id', sa.Text(), nullable=False),
+    sa.Column('lane_fingerprint', sa.Text(), nullable=False),
     sa.Column('price_observation_id', sa.BigInteger(), nullable=False),
     sa.Column('action_type', sa.Text(), nullable=False),
     sa.Column('original_temporal_state', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -70,16 +79,20 @@ def upgrade() -> None:
     sa.Column('expected_bound_hash', sa.Text(), nullable=False),
     sa.Column('actual_after_hash', sa.Text(), nullable=True),
     sa.Column('restore_state', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    sa.Column('created_anomaly_id', sa.BigInteger(), nullable=True),
+    sa.Column('created_anomaly_original_id', sa.BigInteger(), nullable=True),
+    sa.Column('created_anomaly_hash', sa.Text(), nullable=True),
+    sa.Column('created_anomaly_deleted_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('created_anomaly_live_id', sa.BigInteger(), nullable=True),
     sa.Column('status', sa.Enum('planned', 'applied', 'restored', 'failed', name='history_remediation_change_status', native_enum=False), server_default='planned', nullable=False),
     sa.Column('error_code', sa.Text(), nullable=True),
     sa.Column('id', sa.BigInteger(), sa.Identity(always=False), nullable=False),
     sa.Column('public_id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['created_anomaly_id'], ['price_anomaly.id'], ),
+    sa.ForeignKeyConstraint(['created_anomaly_live_id'], ['price_anomaly.id'], ),
     sa.ForeignKeyConstraint(['remediation_run_id'], ['history_remediation_run.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('remediation_run_id', 'deterministic_action_id', name='uq_history_remediation_change_action')
     )
     op.create_index('ix_history_remediation_change_observation', 'history_remediation_change', ['price_observation_id'], unique=False)
     op.create_index(op.f('ix_history_remediation_change_public_id'), 'history_remediation_change', ['public_id'], unique=True)
@@ -93,7 +106,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_history_remediation_change_public_id'), table_name='history_remediation_change')
     op.drop_index('ix_history_remediation_change_observation', table_name='history_remediation_change')
     op.drop_table('history_remediation_change')
-    op.drop_index('uq_history_remediation_run_applied_plan', table_name='history_remediation_run')
+    op.drop_index('uq_history_remediation_run_applied_plan', table_name='history_remediation_run', postgresql_where=sa.text("status = 'applied'"))
     op.drop_index('ix_history_remediation_run_status', table_name='history_remediation_run')
     op.drop_index(op.f('ix_history_remediation_run_public_id'), table_name='history_remediation_run')
     op.drop_index('ix_history_remediation_run_plan_hash', table_name='history_remediation_run')

@@ -19,17 +19,19 @@ build provenance is available, ``apply_ready`` is false with blocker
 from __future__ import annotations
 
 import argparse
+import contextvars
 import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import event, func, select, text
+from sqlalchemy import event, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -51,7 +53,7 @@ from cestaplan_api.tools import plan_history_lane_remediation as planner
 if TYPE_CHECKING:
     # Annotations only — the audit models are imported lazily at runtime so the module loads even
     # where the migration is not yet applied (verify-only/simulate never touch the audit tables).
-    from cestaplan_api.models import HistoryRemediationRun
+    from cestaplan_api.models import HistoryRemediationChange, HistoryRemediationRun
 
 APPLY_TOOL_VERSION = "0.1.0-apply"
 REQUIRED_SCHEMA_VERSION = 4
@@ -71,14 +73,19 @@ REQUIRED_WRITER_FLAGS = {
 WHITELIST_FIELDS = planner.MUTABLE_STATE_FIELDS
 _ROLLBACK_MARKER = planner._ROLLBACK_MARKER
 _DISPUTED = "disputed"
+# Apply v1 scope (§11): same-timestamp DISPUTED marking is deliberately OUT — those conflicts need a
+# separate, future review. keep/excluded_no_action are inert; only the two below actually write.
 _SUPPORTED_ACTIONS = frozenset({
     "keep", "excluded_no_action", "logical_rollback_exact_duplicate", "reconstruct_interval",
-    "mark_disputed_same_timestamp_conflict",
 })
-_ACTION_WRITES = frozenset({
-    "logical_rollback_exact_duplicate", "reconstruct_interval",
-    "mark_disputed_same_timestamp_conflict",
-})
+_ACTION_WRITES = frozenset({"logical_rollback_exact_duplicate", "reconstruct_interval"})
+_V1_BLOCKED_ACTIONS = frozenset({"mark_disputed_same_timestamp_conflict"})
+# create_price_anomaly side effects: only these types/severities are allowlisted for apply v1.
+_ALLOWED_ANOMALY_TYPES = frozenset({planner._SAME_TIMESTAMP_CONFLICT})
+_ALLOWED_ANOMALY_SEVERITIES = frozenset({"high", "medium", "low"})
+# Full 64-hex sha256 / 40-hex git commit validators for provenance evidence (§1).
+_SHA256_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # A fixed global advisory-lock key so at most one apply/restore runs at a time.
 _GLOBAL_LOCK_KEY = ident.signed_bigint(
     hashlib.sha256(b"cestaplan:history-remediation:global").hexdigest())
@@ -156,24 +163,118 @@ class ApplyRestoreDrift(ApplyError):
     """A row changed after the apply, so an exact restore is impossible — manual review required."""
 
 
-# --------------------------------------------------------------------------- #
-# Immutable build provenance (spec §3/§12)
-# --------------------------------------------------------------------------- #
-def _immutable_build_hash() -> str | None:
-    """Return an IMMUTABLE build-provenance hash, or None if none is available.
+class ApplySessionNotClean(ApplyError):
+    """apply/restore got a session with pending new/dirty/deleted state (spec §10)."""
 
-    Preference: a build-time env (``SOURCE_TREE_HASH`` / ``BUILD_ARTIFACT_HASH``) or a file written
-    during the image build (``BUILD_PROVENANCE_PATH``). ``APP_COMMIT_SHA`` alone is a mutable
-    operational declaration and is intentionally NOT accepted as the immutable evidence.
+
+# --------------------------------------------------------------------------- #
+# Immutable build provenance — exact expected/observed comparison (spec §1/§12)
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class BuildProvenance:
+    """IMMUTABLE, build-time evidence read from a provenance document baked into the image. Never
+    from mutable per-service runtime vars alone (spec §1)."""
+
+    commit_sha: str | None = None
+    source_tree_hash: str | None = None
+    api_artifact_hash: str | None = None
+    worker_artifact_hash: str | None = None
+    document_hash: str | None = None  # sha256 of the provenance document file itself
+
+
+@dataclass(slots=True)
+class ExpectedProvenance:
+    """The EXPECTED evidence, from a separately reviewed and sealed authorization package — never
+    the same runtime variables that supply the observed values (spec §1)."""
+
+    commit_sha: str | None = None
+    source_tree_hash: str | None = None
+    api_artifact_hash: str | None = None
+    worker_artifact_hash: str | None = None
+    document_hash: str | None = None
+
+
+def load_build_provenance(path: str | None = None) -> BuildProvenance:
+    """Read the build-generated provenance document (a JSON file baked into the image) and hash it.
+
+    A missing/unreadable/malformed document yields an empty BuildProvenance — every gate then fails
+    closed. Runtime env vars alone are NOT accepted as immutable evidence.
     """
-    for var in ("SOURCE_TREE_HASH", "BUILD_ARTIFACT_HASH"):
-        val = os.environ.get(var)
-        if val:
-            return val.strip()
-    path = os.environ.get("BUILD_PROVENANCE_PATH")
-    if path and Path(path).is_file():
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    return None
+    path = path or os.environ.get("BUILD_PROVENANCE_PATH")
+    if not path or not Path(path).is_file():
+        return BuildProvenance()
+    try:
+        raw = Path(path).read_bytes()
+        doc = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return BuildProvenance()
+    if not isinstance(doc, dict):
+        return BuildProvenance()
+    return BuildProvenance(
+        commit_sha=doc.get("commit_sha"), source_tree_hash=doc.get("source_tree_hash"),
+        api_artifact_hash=doc.get("api_artifact_hash"),
+        worker_artifact_hash=doc.get("worker_artifact_hash"),
+        document_hash=hashlib.sha256(raw).hexdigest())
+
+
+def _valid_sha256(v: str | None) -> bool:
+    return isinstance(v, str) and bool(_SHA256_RE.match(v))
+
+
+def _valid_commit(v: str | None) -> bool:
+    return isinstance(v, str) and bool(_COMMIT_RE.match(v))
+
+
+# --------------------------------------------------------------------------- #
+# Real backup evidence (spec §9)
+# --------------------------------------------------------------------------- #
+_BACKUP_MAX_AGE_SECONDS = 6 * 3600
+
+
+@dataclass(slots=True)
+class BackupEvidence:
+    """A verified pre-apply backup. ``verify()`` checks the artifact on disk — never a bare
+    boolean (spec §9)."""
+
+    path: str
+    expected_sha256: str
+    created_at: datetime
+    expected_postgres_version: str | None = None
+    storage_reference: str | None = None  # sanitized
+
+    def verify(self, now: datetime) -> tuple[bool, dict[str, Any]]:
+        ev: dict[str, Any] = {"path_present": False, "regular_file": False,
+                              "permissions_not_public": False, "size_positive": False,
+                              "sha256_matches": False, "pg_restore_list_verified": False,
+                              "within_window": False, "size_bytes": 0, "observed_sha256": None,
+                              "postgres_version": self.expected_postgres_version}
+        p = Path(self.path)
+        if not p.exists():
+            return False, ev
+        ev["path_present"] = True
+        ev["regular_file"] = p.is_file()
+        st = p.stat()
+        ev["permissions_not_public"] = (st.st_mode & 0o077) == 0
+        ev["size_bytes"] = st.st_size
+        ev["size_positive"] = st.st_size > 0
+        if not (ev["regular_file"] and ev["size_positive"]):
+            return False, ev
+        observed = hashlib.sha256(p.read_bytes()).hexdigest()
+        ev["observed_sha256"] = observed
+        ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and observed == \
+            self.expected_sha256.removeprefix("sha256:")
+        try:
+            r = subprocess.run(["pg_restore", "--list", self.path], capture_output=True,
+                               timeout=60, check=False)
+            ev["pg_restore_list_verified"] = r.returncode == 0 and bool(r.stdout)
+        except (OSError, subprocess.SubprocessError):
+            ev["pg_restore_list_verified"] = False
+        age = (now - self.created_at).total_seconds()
+        ev["within_window"] = 0 <= age <= _BACKUP_MAX_AGE_SECONDS
+        ok = all(ev[k] for k in ("path_present", "regular_file", "permissions_not_public",
+                                 "size_positive", "sha256_matches", "pg_restore_list_verified",
+                                 "within_window"))
+        return ok, ev
 
 
 @dataclass(slots=True)
@@ -181,17 +282,17 @@ class ApplyContext:
     """What the executor needs beyond the DB session and manifest (injected, never guessed)."""
 
     app_commit_sha: str | None = None
-    immutable_build_hash: str | None = None
     deployed_api_sha: str | None = None
     deployed_worker_sha: str | None = None
     expected_main_sha: str | None = None
     expected_alembic: str | None = None
+    observed_provenance: BuildProvenance = field(default_factory=BuildProvenance)
+    expected_provenance: ExpectedProvenance = field(default_factory=ExpectedProvenance)
     # ProductPrice / active mappings expected counts — 0 unless a future manifest authorizes a
     # change (spec §5). The gate compares the live count to these, never a hardcoded 0.
     expected_product_price: int = 0
     expected_active_mappings: int = 0
-    backup_sha256: str | None = None
-    backup_verified: bool = False
+    backup: BackupEvidence | None = None
     operator_reference: str | None = None
     now: datetime | None = None
 
@@ -199,12 +300,11 @@ class ApplyContext:
     def from_environment(cls, **overrides: Any) -> ApplyContext:
         base = cls(
             app_commit_sha=os.environ.get("APP_COMMIT_SHA"),
-            immutable_build_hash=_immutable_build_hash(),
             deployed_api_sha=os.environ.get("DEPLOYED_API_SHA") or os.environ.get("APP_COMMIT_SHA"),
             deployed_worker_sha=os.environ.get("DEPLOYED_WORKER_SHA"),
             expected_main_sha=os.environ.get("EXPECTED_MAIN_SHA"),
             expected_alembic=os.environ.get("EXPECTED_ALEMBIC_REVISION"),
-        )
+            observed_provenance=load_build_provenance())
         for k, v in overrides.items():
             setattr(base, k, v)
         return base
@@ -330,19 +430,74 @@ def _environment_gates(
 # --------------------------------------------------------------------------- #
 # Provenance gates (spec §3)
 # --------------------------------------------------------------------------- #
+def _eq_sha(a: str | None, b: str | None) -> bool:
+    """True only when both are valid 64-hex sha256 and exactly equal (no bare truthiness)."""
+    return _valid_sha256(a) and _valid_sha256(b) and \
+        a.removeprefix("sha256:") == b.removeprefix("sha256:")  # type: ignore[union-attr]
+
+
+def _eq_commit(a: str | None, b: str | None) -> bool:
+    return _valid_commit(a) and _valid_commit(b) and a == b
+
+
 def _provenance_gates(m: dict[str, Any], ctx: ApplyContext) -> list[tuple[str, bool]]:
+    app = ctx.app_commit_sha
     api = ctx.deployed_api_sha
     worker = ctx.deployed_worker_sha
-    app = ctx.app_commit_sha
-    expected = ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha")
-    aligned = bool(app) and api == app and worker == app
-    return [
-        ("app_commit_sha_present", bool(app)),
-        ("immutable_build_provenance", bool(ctx.immutable_build_hash)),
-        ("api_worker_aligned", aligned),
-        ("main_commit_sha_matches",
-         bool(expected) and expected not in ("unknown", None) and app == expected),
+    expected_main = ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha")
+    o, e = ctx.observed_provenance, ctx.expected_provenance
+    field_gates = [
+        ("provenance_document_present", _valid_sha256(o.document_hash)),
+        ("provenance_document_matches", _eq_sha(o.document_hash, e.document_hash)),
+        ("provenance_commit_matches", _eq_commit(o.commit_sha, e.commit_sha)),
+        ("provenance_source_matches", _eq_sha(o.source_tree_hash, e.source_tree_hash)),
+        ("provenance_api_artifact_matches", _eq_sha(o.api_artifact_hash, e.api_artifact_hash)),
+        ("provenance_worker_artifact_matches",
+         _eq_sha(o.worker_artifact_hash, e.worker_artifact_hash)),
     ]
+    immutable_ok = all(ok for _, ok in field_gates)
+    return [
+        ("app_commit_sha_present", _valid_commit(app)),
+        ("api_worker_aligned", _valid_commit(app) and api == app and worker == app),
+        ("main_commit_sha_matches", _eq_commit(app, expected_main)),
+        ("immutable_build_provenance", immutable_ok),
+        *field_gates,
+    ]
+
+
+def _backup_gate(ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
+    if ctx.backup is None:
+        return False, {"backup_present": False}
+    return ctx.backup.verify(ctx.now or datetime.now(UTC))
+
+
+# --------------------------------------------------------------------------- #
+# Manifest apply_blockers resolution policy (spec §2)
+# --------------------------------------------------------------------------- #
+_KNOWN_BLOCKERS = frozenset({
+    "planner_is_plan_only", "record_price_fact_rolled_back_reuse_not_remediated",
+    "unknown_commit_provenance",
+})
+
+
+def _resolve_manifest_blockers(m: dict[str, Any], *, writer_ok: bool,
+                               provenance_ok: bool) -> tuple[list[str], list[str], list[str]]:
+    """Classify each sealed manifest blocker (§2). An unknown blocker, or a known one not PROVEN
+    resolved, stays unresolved (fail closed)."""
+    present = list(m.get("apply_blockers", []))
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for b in present:
+        if b == "planner_is_plan_only":
+            # Resolved solely because this separate, reviewed executor now exists.
+            resolved.append(b)
+        elif b == "record_price_fact_rolled_back_reuse_not_remediated":
+            (resolved if (writer_ok and provenance_ok) else unresolved).append(b)
+        elif b == "unknown_commit_provenance":
+            (resolved if provenance_ok else unresolved).append(b)
+        else:
+            unresolved.append(b)  # unknown blocker -> fail closed
+    return present, resolved, unresolved
 
 
 # --------------------------------------------------------------------------- #
@@ -357,6 +512,37 @@ def _planned_rows(m: dict[str, Any]) -> list[dict[str, Any]]:
         for r in lane["rows"]:
             out.append(r)
     return out
+
+
+def _supported_fk_identity(fk: dict[str, Any]) -> tuple:
+    return (fk["referencing_schema"], fk["referencing_table"], fk["referencing_column"],
+            fk["referred_schema"], fk["referred_table"], fk["referred_column"],
+            fk["constraint_name"], fk["pk"], fk["full_row_hash"], fk["apply_policy"],
+            fk["restore_policy"])
+
+
+def _supported_fk_unchanged(db: Session, m: dict[str, Any], discovered, obs_ids) -> bool:
+    """Re-derive every SUPPORTED FK dependency live and require the sealed identity set — schema/
+    table/column both sides, constraint_name, PK, full_row_hash and policies — matches EXACTLY
+    (spec §3). Any added / changed / removed dependency row blocks."""
+    if not obs_ids:
+        return True
+    sealed: dict[int, set] = {r["id"]: {_supported_fk_identity(fk)
+                                        for fk in r.get("incoming_fk_state", [])}
+                              for r in _planned_rows(m)}
+    live: dict[int, set] = {oid: set() for oid in obs_ids}
+    for fk in discovered:
+        if fk.get("classification") != "domain_supported":
+            continue
+        handler = planner._FK_HANDLERS.get(planner._fk_key(fk))
+        if not handler or not handler["emit"] or handler["model"] is None:
+            continue
+        model = handler["model"]
+        col = getattr(model, fk["referencing_column"])
+        for row in db.execute(select(model).where(col.in_(obs_ids))).scalars():
+            entry = planner._fk_manifest(fk, model, row)
+            live[getattr(row, fk["referencing_column"])].add(_supported_fk_identity(entry))
+    return all(sealed.get(oid, set()) == live.get(oid, set()) for oid in obs_ids)
 
 
 def _drift_gates(db: Session, m: dict[str, Any]) -> list[tuple[str, bool]]:
@@ -382,7 +568,9 @@ def _drift_gates(db: Session, m: dict[str, Any]) -> list[tuple[str, bool]]:
     discovered = planner.discover_incoming_fks(db)
     if obs_ids and planner._unknown_fk_refs(db, discovered, obs_ids):
         ok_fk = False
+    ok_supported_fk = _supported_fk_unchanged(db, m, discovered, obs_ids)
     return [("row_hashes_match", ok_rows), ("occurrences_unchanged", ok_occ),
+            ("supported_fk_unchanged", ok_supported_fk),
             ("no_unknown_fk", ok_fk)]
 
 
@@ -399,25 +587,35 @@ _SET_COLS_RE = re.compile(r"\bset\b(.*?)(?:\bwhere\b|\breturning\b|$)", re.IGNOR
 _COL_RE = re.compile(r'["\s,]*"?([a-z_][a-z0-9_]*)"?\s*=')
 
 
-def _forbid(statement: str) -> None:
+# Per-instance guard state lives in a ContextVar (thread/async-safe), NEVER a shared module dict.
+_guard_state: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "apply_write_guard", default=None)
+
+
+def _forbid(statement: str, params: Any) -> None:
     stmt = statement.strip()
     mm = _DML_RE.match(stmt)
     if not mm:  # not INSERT/UPDATE/DELETE (SELECT, SET, SHOW, SAVEPOINT, …) -> allowed
         return
     op = mm.group(1).lower().split()[0]
     table = mm.group(2).lower()
+    state = _guard_state.get() or {}
     if table in _FORBIDDEN_TABLES:
         raise ApplyForbiddenWrite("forbidden_write_occurrence", table)
     if op == "delete":
-        if table == _ANOMALY_TABLE and _write_guard_state.get("allow_anomaly_delete"):
-            return
-        raise ApplyForbiddenWrite("forbidden_delete", table)
+        if table != _ANOMALY_TABLE or not state.get("allow_anomaly_delete"):
+            raise ApplyForbiddenWrite("forbidden_delete", table)
+        if "where" not in stmt.lower():  # a bulk DELETE without WHERE is never allowed
+            raise ApplyForbiddenWrite("forbidden_bulk_delete", table)
+        rid = _param_id(params)
+        if rid is None or rid not in state.get("allowed_anomaly_ids", frozenset()):
+            raise ApplyForbiddenWrite("forbidden_delete_unauthorized_id", str(rid))
+        return
     if op == "insert":
         if table in _AUDIT_TABLES or table == _ANOMALY_TABLE:
             return
         raise ApplyForbiddenWrite("forbidden_insert", table)
-    # UPDATE
-    if table in _AUDIT_TABLES:
+    if table in _AUDIT_TABLES:  # UPDATE
         return
     if table == "price_observation":
         body = _SET_COLS_RE.search(stmt)
@@ -429,29 +627,67 @@ def _forbid(statement: str) -> None:
     raise ApplyForbiddenWrite("forbidden_update", table)
 
 
-_write_guard_state: dict[str, bool] = {}
+def _param_id(params: Any) -> Any:
+    if isinstance(params, dict):
+        return params.get("id")
+    if isinstance(params, (list, tuple)) and len(params) == 1 and isinstance(params[0], dict):
+        return params[0].get("id")
+    return None
+
+
+def _orm_flush_guard(session: Session, _flush_ctx: Any, _instances: Any) -> None:
+    """ORM-level defence (§8): a dirty PriceObservation may only touch whitelisted attrs; a fact or
+    occurrence may never be deleted; only anomalies/audit rows may be new; anomaly deletes must be
+    allowlisted. Complements the connection-scoped SQL interceptor for raw SQL."""
+    state = _guard_state.get() or {}
+    allowed = state.get("allowed_anomaly_ids", frozenset())
+    for obj in session.deleted:
+        if isinstance(obj, (PriceObservation, planner.PriceObservationOccurrence)):
+            raise ApplyForbiddenWrite("forbidden_orm_delete_fact", type(obj).__name__)
+        if isinstance(obj, PriceAnomaly) and (
+                not state.get("allow_anomaly_delete") or obj.id not in allowed):
+            raise ApplyForbiddenWrite("forbidden_orm_delete_anomaly", str(obj.id))
+    for obj in session.new:
+        if isinstance(obj, (PriceObservation, planner.PriceObservationOccurrence)):
+            raise ApplyForbiddenWrite("forbidden_orm_new_fact", type(obj).__name__)
+    for obj in session.dirty:
+        if isinstance(obj, PriceObservation):
+            changed = {a.key for a in inspect(obj).attrs if a.history.has_changes()}
+            if not changed <= _ALLOWED_PO_UPDATE_COLS:
+                raise ApplyForbiddenWrite("forbidden_orm_update_columns",
+                                          ",".join(sorted(changed - _ALLOWED_PO_UPDATE_COLS)))
+        elif isinstance(obj, planner.PriceObservationOccurrence):
+            raise ApplyForbiddenWrite("forbidden_orm_update_occurrence", "")
 
 
 class _WriteGuard:
-    """Attach an interceptor that FAILS on any DML outside the whitelist for the duration."""
+    """Attach guards that FAIL on any write outside the whitelist, for the duration. The SQL
+    interceptor is bound to THIS connection only (never the global engine); an anomaly DELETE is
+    limited to an exact allowlist of ids (spec §8)."""
 
-    def __init__(self, db: Session, *, allow_anomaly_delete: bool = False) -> None:
+    def __init__(self, db: Session, *, allow_anomaly_delete: bool = False,
+                 allowed_anomaly_ids: frozenset[int] = frozenset()) -> None:
+        self._db = db
         self._conn = db.connection()
-        self._allow = allow_anomaly_delete
+        self._state = {"allow_anomaly_delete": allow_anomaly_delete,
+                       "allowed_anomaly_ids": allowed_anomaly_ids}
+        self._token: Any = None
 
     def __enter__(self) -> _WriteGuard:
-        _write_guard_state["allow_anomaly_delete"] = self._allow
+        self._token = _guard_state.set(self._state)
 
         def _before(conn, cursor, statement, params, context, executemany):
-            _forbid(statement)
+            _forbid(statement, params)
 
         self._listener = _before
-        event.listen(self._conn.engine, "before_cursor_execute", self._listener)
+        event.listen(self._conn, "before_cursor_execute", self._listener)
+        event.listen(self._db, "before_flush", _orm_flush_guard)
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        event.remove(self._conn.engine, "before_cursor_execute", self._listener)
-        _write_guard_state.pop("allow_anomaly_delete", None)
+        event.remove(self._conn, "before_cursor_execute", self._listener)
+        event.remove(self._db, "before_flush", _orm_flush_guard)
+        _guard_state.reset(self._token)
 
 
 # --------------------------------------------------------------------------- #
@@ -540,16 +776,21 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
     record("plan_hash_intact", _recompute_plan_hash(m) == m["plan_hash"])
     record("plan_not_expired", _plan_age_ok(m, ctx))
     record("supported_actions_only", _actions_supported(m))
-    wgate_ok, wgate_code = _writer_contract_gate()
-    record(wgate_code if wgate_ok else "writer_contract_v2", wgate_ok)
-    for code, ok in _provenance_gates(m, ctx):
+    wgate_ok, _wgate_code = _writer_contract_gate()
+    record("writer_contract_v2", wgate_ok)
+    prov = _provenance_gates(m, ctx)
+    for code, ok in prov:
         record(code, ok)
+    provenance_ok = dict(prov).get("immutable_build_provenance", False)
+    _present, _resolved, unresolved = _resolve_manifest_blockers(
+        m, writer_ok=wgate_ok, provenance_ok=provenance_ok)
+    record("manifest_blockers_resolved", not unresolved)  # §2: any unresolved blocker fails closed
     for code, ok in _environment_gates(db, settings, ctx):
         record(code, ok)
     for code, ok in _drift_gates(db, m):
         record(code, ok)
     if for_apply:
-        record("backup_verified", ctx.backup_verified and bool(ctx.backup_sha256))
+        record("backup_verified", _backup_gate(ctx)[0])
     return passed, blocking
 
 
@@ -566,13 +807,22 @@ def _plan_age_ok(m: dict[str, Any], ctx: ApplyContext) -> bool:
 
 
 def _actions_supported(m: dict[str, Any]) -> bool:
+    """Apply v1 (§11): every action is in the v1 set (mark_disputed is BLOCKED), and every side
+    effect is an allowlisted create_price_anomaly whose target row exists exactly once."""
     for lane in m["lanes"]:
+        row_hashes = [r["integrity"]["full_row_hash"] for r in lane["rows"]]
         for r in lane["rows"]:
-            if r["action"] not in _SUPPORTED_ACTIONS:
+            if r["action"] in _V1_BLOCKED_ACTIONS or r["action"] not in _SUPPORTED_ACTIONS:
                 return False
         for se in lane.get("proposed_side_effects", []):
             if se.get("type") != "create_price_anomaly":
                 return False
+            if se.get("anomaly_type") not in _ALLOWED_ANOMALY_TYPES:
+                return False
+            if se.get("severity") not in _ALLOWED_ANOMALY_SEVERITIES:
+                return False
+            if row_hashes.count(se.get("target_observation_ref")) != 1:
+                return False  # target must exist exactly once in the lane
     return True
 
 
@@ -581,14 +831,29 @@ def _actions_supported(m: dict[str, Any]) -> bool:
 # --------------------------------------------------------------------------- #
 def verify_only(db: Session, m: dict[str, Any], ctx: ApplyContext,
                 settings: Settings | None = None) -> dict[str, Any]:
-    """Read-only validation (spec §4A): validate manifest, hashes, DB, contracts. ZERO writes."""
+    """Public read-only validation (spec §4A/§10): pins a REPEATABLE READ, READ ONLY snapshot BEFORE
+    any query (no bypass), then runs every gate. ZERO writes."""
+    _require_postgres(db)
+    planner.readonly_preflight(db)
+    return _verify_report(db, m, ctx, settings)
+
+
+def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
+                   settings: Settings | None = None) -> dict[str, Any]:
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
     passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True)
-    sim = {"planned_changes": sum(
-        1 for r in _planned_rows(m) if r["action"] in _ACTION_WRITES)}
-    apply_ready = not blocking
+    wgate_ok, _ = _writer_contract_gate()
+    provenance_ok = dict(_provenance_gates(m, ctx)).get("immutable_build_provenance", False)
+    present, resolved, unresolved = _resolve_manifest_blockers(
+        m, writer_ok=wgate_ok, provenance_ok=provenance_ok)
+    apply_blockers: list[str] = []
+    if not provenance_ok:
+        apply_blockers.append("immutable_build_provenance_missing")
+    if not _backup_gate(ctx)[0]:
+        apply_blockers.append("verified_backup_missing")
+    apply_blockers.extend(f"unresolved_manifest_blocker:{b}" for b in unresolved)
     report = {
         "apply_tool_version": APPLY_TOOL_VERSION,
         "plan_found": True,
@@ -597,23 +862,33 @@ def verify_only(db: Session, m: dict[str, Any], ctx: ApplyContext,
         "planner_tool_version": m["tool_version"],
         "writer_contract": writer.writer_contract().get("version"),
         "declared_commit_sha": ctx.app_commit_sha,
-        "immutable_build_hash": ctx.immutable_build_hash,
+        "observed_provenance_document_hash": ctx.observed_provenance.document_hash,
         "lanes": len(m["lanes"]),
         "lanes_excluded": sum(1 for x in m["lanes"] if x.get("excluded")),
-        "planned_changes": sim["planned_changes"],
+        "planned_changes": sum(1 for r in _planned_rows(m) if r["action"] in _ACTION_WRITES),
+        "manifest_blockers_present": present,
+        "blockers_resolved": resolved,
+        "blockers_unresolved": unresolved,
         "gates_passed": sorted(passed),
         "gates_blocking": sorted(blocking),
-        "apply_ready": apply_ready,
+        "apply_ready": (not blocking) and not apply_blockers,
+        "apply_blockers": apply_blockers,
     }
-    if not ctx.immutable_build_hash:
-        report["apply_ready"] = False
-        report.setdefault("apply_blockers", []).append("immutable_build_provenance_missing")
     return report
 
 
 def simulate(db: Session, m: dict[str, Any], ctx: ApplyContext,
              settings: Settings | None = None) -> dict[str, Any]:
-    """In-memory transformation + invariant check (spec §4B). ZERO writes."""
+    """Public in-memory validation (spec §4B/§10): requires a clean session, pins the read-only
+    snapshot, forbids autoflush, and never writes."""
+    _require_postgres(db)
+    planner.readonly_preflight(db)
+    with db.no_autoflush:
+        return _simulate_report(db, m, ctx, settings)
+
+
+def _simulate_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
+                     settings: Settings | None = None) -> dict[str, Any]:
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
@@ -650,41 +925,108 @@ def _count_snapshot(db: Session) -> dict[str, int]:
     }
 
 
+def _require_clean_session(db: Session) -> None:
+    """Reject a session with pending ORM state BEFORE any SQL (spec §10) — typed, never assert."""
+    if db.new:
+        raise ApplySessionNotClean("session_new")
+    if db.dirty:
+        raise ApplySessionNotClean("session_dirty")
+    if db.deleted:
+        raise ApplySessionNotClean("session_deleted")
+
+
+def _lane_lock_key(lane_fp: str) -> int:
+    return ident.signed_bigint(hashlib.sha256(lane_fp.encode()).hexdigest())
+
+
+def _det_action_id(plan_hash: str, lane_fp: str, full_row_hash: str, action: str,
+                   side_effect_ref: str) -> str:
+    return hashlib.sha256(
+        "\x1f".join((plan_hash, lane_fp, full_row_hash, action, side_effect_ref)).encode()
+    ).hexdigest()
+
+
+def _anomaly_hash(an: PriceAnomaly) -> str:
+    return planner._value_hash({"price_observation_id": an.price_observation_id,
+                                "anomaly_type": an.anomaly_type, "severity": an.severity,
+                                "status": an.status})
+
+
+def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str) -> None:
+    """Durable failure audit in a SEPARATE transaction (§5) so a failed run survives the data
+    rollback and a retry can link to it via supersedes_run_id. Sanitized code only, no raw msg."""
+    from cestaplan_api.models import HistoryRemediationRun
+    s = SessionLocal()
+    try:
+        s.add(HistoryRemediationRun(
+            plan_hash=m["plan_hash"], manifest_schema_version=m.get("schema_version", 0),
+            planner_tool_version=m.get("tool_version", ""),
+            planner_source_hash=m.get("planner_source_hash", ""),
+            writer_contract_version=REQUIRED_WRITER_CONTRACT,
+            main_commit_sha=ctx.expected_main_sha or "",
+            alembic_revision=ctx.expected_alembic or "",
+            execution_mode="apply", status="failed", error_code=error_code,
+            started_at=ctx.now or datetime.now(UTC), completed_at=datetime.now(UTC),
+            operator_reference=ctx.operator_reference,
+            supersedes_run_id=None, observed_commit_sha=ctx.app_commit_sha))
+        s.commit()
+    finally:
+        s.close()
+
+
 def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool = False,
           confirmations: tuple[str, ...] = (), settings: Settings | None = None,
           lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Execute the sealed plan atomically (spec §4C/§7). BLOCKED by default: requires explicit
-    authorization + the exact confirmation tokens. Does not auto-commit; the caller controls the
-    single transaction so any failure rolls back the whole run."""
-    from cestaplan_api.models import HistoryRemediationRun
+    """Execute the sealed plan atomically (spec §4C/§5/§7). BLOCKED by default: requires explicit
+    authorization + confirmation tokens and a clean session. On a mid-run failure the whole data
+    transaction rolls back and a durable ``failed`` run is recorded in a separate audit txn."""
     _require_authorization(authorized, confirmations)
     _require_postgres(db)
+    _require_clean_session(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
+    try:
+        return _apply_locked(db, m, ctx, settings, lock_timeout_ms)
+    except ApplyAlreadyApplied:
+        raise
+    except ApplyError as exc:
+        db.rollback()
+        _record_failed_run(m, ctx, exc.code)
+        raise
 
+
+def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: Settings,
+                  lock_timeout_ms: int) -> dict[str, Any]:
+    from cestaplan_api.models import HistoryRemediationRun
     # 1) global remediation lock; 2) deterministic lane locks; 3) full revalidation under the locks.
     _acquire(db, _GLOBAL_LOCK_KEY, timeout_ms=lock_timeout_ms)
     if _completed_run(db, m["plan_hash"]) is not None:
         return {"status": "already_applied", "plan_hash": m["plan_hash"]}
     for lane in sorted(m["lanes"], key=lambda x: x["lane_fingerprint"]):
         if not lane.get("excluded"):
-            _acquire(db, ident.signed_bigint(hashlib.sha256(
-                lane["lane_fingerprint"].encode()).hexdigest()), timeout_ms=lock_timeout_ms)
+            _acquire(db, _lane_lock_key(lane["lane_fingerprint"]), timeout_ms=lock_timeout_ms)
     _passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True)
     if blocking:
         raise ApplyEnvironmentUnsafe("gates_blocking", ",".join(sorted(blocking)))
 
     run_ts = ctx.now or datetime.now(UTC)
     before = _count_snapshot(db)
+    o, e = ctx.observed_provenance, ctx.expected_provenance
     run = HistoryRemediationRun(
         plan_hash=m["plan_hash"], manifest_schema_version=m["schema_version"],
         planner_tool_version=m["tool_version"], planner_source_hash=m["planner_source_hash"],
         writer_contract_version=REQUIRED_WRITER_CONTRACT,
         main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha") or "",
-        deployed_api_sha=ctx.deployed_api_sha, deployed_worker_sha=ctx.deployed_worker_sha,
         alembic_revision=_alembic_revision(db) or "", execution_mode="apply", status="applied",
-        started_at=run_ts, operator_reference=ctx.operator_reference,
-        backup_sha256=ctx.backup_sha256, before_counts=before)
+        started_at=run_ts, operator_reference=ctx.operator_reference, before_counts=before,
+        observed_commit_sha=ctx.app_commit_sha, expected_commit_sha=e.commit_sha,
+        observed_source_hash=o.source_tree_hash, expected_source_hash=e.source_tree_hash,
+        observed_api_artifact_hash=o.api_artifact_hash,
+        expected_api_artifact_hash=e.api_artifact_hash,
+        observed_worker_artifact_hash=o.worker_artifact_hash,
+        expected_worker_artifact_hash=e.worker_artifact_hash,
+        provenance_document_hash=o.document_hash, backup_sha256=_backup_sha(ctx),
+        backup_size_bytes=_backup_int(ctx, "size_bytes"))
     db.add(run)
     try:
         db.flush()  # unique(plan_hash where status=applied) -> concurrent duplicate fails here
@@ -692,9 +1034,9 @@ def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool
         raise ApplyAlreadyApplied("plan_hash_already_applied", str(exc)[:80]) from exc
     run_ref = str(run.public_id)
 
-    changes: list[dict[str, Any]] = []
+    changes: list[HistoryRemediationChange] = []
     with _WriteGuard(db):
-        live = {o.id: o for o in db.execute(select(PriceObservation).where(
+        live = {o2.id: o2 for o2 in db.execute(select(PriceObservation).where(
             PriceObservation.id.in_([r["id"] for r in _planned_rows(m)])).with_for_update()
         ).scalars()}
         for lane in m["lanes"]:
@@ -702,15 +1044,18 @@ def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool
                 continue
             anomaly_by_target = _apply_side_effects(db, lane)
             for r in lane["rows"]:
-                changes.append(_apply_row(db, run, r, live[r["id"]], run_ts, anomaly_by_target))
+                changes.append(_apply_row(db, run, m, lane, r, live[r["id"]], run_ts,
+                                          anomaly_by_target))
         db.flush()
-        # 5) post-flush verification: every WRITTEN row now matches its bound expectation exactly.
+        # 5) post-flush verification: fill actual_after and require it EXACTLY matches expected.
         for ch in changes:
-            if ch["action_type"] not in _ACTION_WRITES:
-                continue
-            actual = _thash(_temporal_of(live[ch["price_observation_id"]]))
-            if actual != ch["expected_bound_hash"]:
-                raise ApplyPlanDrift("post_flush_mismatch", str(ch["price_observation_id"]))
+            actual = _temporal_of(live[ch.price_observation_id])
+            ch.actual_after_state = _json(actual)
+            ch.actual_after_hash = _thash(actual)
+            ch.status = "applied"
+            ch.error_code = None
+            if ch.action_type in _ACTION_WRITES and ch.actual_after_hash != ch.expected_bound_hash:
+                raise ApplyPlanDrift("post_flush_mismatch", str(ch.price_observation_id))
     after = _count_snapshot(db)
     run.after_counts = after
     run.completed_at = ctx.now or datetime.now(UTC)
@@ -722,17 +1067,24 @@ def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool
 
 
 def _apply_side_effects(db: Session, lane: dict[str, Any]) -> dict[str, PriceAnomaly]:
-    """Create ONLY the manifest-proposed anomalies, keyed by their target row full_row_hash."""
+    """Create ONLY the manifest-proposed anomalies (already allowlisted by _actions_supported),
+    refusing to duplicate an equivalent open anomaly (spec §11)."""
     out: dict[str, PriceAnomaly] = {}
     for se in lane.get("proposed_side_effects", []):
         if se.get("type") != "create_price_anomaly":
             raise ApplyUnsupportedAction("unsupported_side_effect", str(se.get("type")))
-        target = se["target_observation_ref"]
-        an = PriceAnomaly(price_observation_id=_obs_id_for_hash(lane, target),
-                          anomaly_type=se["anomaly_type"], severity=se["severity"], status="open")
+        obs_id = _obs_id_for_hash(lane, se["target_observation_ref"])
+        existing = db.execute(select(func.count()).select_from(PriceAnomaly).where(
+            PriceAnomaly.price_observation_id == obs_id,
+            PriceAnomaly.anomaly_type == se["anomaly_type"],
+            PriceAnomaly.status == "open")).scalar()
+        if existing:
+            raise ApplyUnsupportedAction("equivalent_anomaly_exists", str(obs_id))
+        an = PriceAnomaly(price_observation_id=obs_id, anomaly_type=se["anomaly_type"],
+                          severity=se["severity"], status="open")
         db.add(an)
         db.flush()
-        out[target] = an
+        out[se["target_observation_ref"]] = an
     return out
 
 
@@ -743,9 +1095,9 @@ def _obs_id_for_hash(lane: dict[str, Any], full_row_hash: str) -> int | None:
     return None
 
 
-def _apply_row(db: Session, run: HistoryRemediationRun, r: dict[str, Any],
-               live: PriceObservation, run_ts: datetime,
-               anomaly_by_target: dict[str, PriceAnomaly]) -> dict[str, Any]:
+def _apply_row(db: Session, run: HistoryRemediationRun, m: dict[str, Any], lane: dict[str, Any],
+               r: dict[str, Any], live: PriceObservation, run_ts: datetime,
+               anomaly_by_target: dict[str, PriceAnomaly]) -> HistoryRemediationChange:
     from cestaplan_api.models import HistoryRemediationChange
     action = r["action"]
     if action not in _SUPPORTED_ACTIONS:
@@ -760,24 +1112,36 @@ def _apply_row(db: Session, run: HistoryRemediationRun, r: dict[str, Any],
         bound = original
     anomaly = anomaly_by_target.get(r["integrity"]["full_row_hash"])
     ch = HistoryRemediationChange(
-        remediation_run_id=run.id, deterministic_action_id=r.get("fact_fingerprint", ""),
-        price_observation_id=r["id"], action_type=action,
+        remediation_run_id=run.id,
+        deterministic_action_id=_det_action_id(
+            m["plan_hash"], lane["lane_fingerprint"], r["integrity"]["full_row_hash"], action,
+            str(anomaly.id) if anomaly is not None else ""),
+        lane_fingerprint=lane["lane_fingerprint"], price_observation_id=r["id"], action_type=action,
         original_temporal_state=_json(original), expected_bound_state=_json(bound),
         original_hash=r["integrity"]["full_row_hash"], expected_bound_hash=_thash(bound),
-        created_anomaly_id=anomaly.id if anomaly is not None else None,
-        status="applied" if action in _ACTION_WRITES else "planned")
+        created_anomaly_original_id=anomaly.id if anomaly is not None else None,
+        created_anomaly_live_id=anomaly.id if anomaly is not None else None,
+        created_anomaly_hash=_anomaly_hash(anomaly) if anomaly is not None else None,
+        status="planned")
     db.add(ch)
-    return {"price_observation_id": r["id"], "action_type": action,
-            "expected_bound_hash": _thash(bound)}
+    return ch
+
+
+_RESTORE_ENV_GATES = ("production_disabled", "per_chain_flags_false", "price_provider_kill_switch",
+                      "crawl_run_not_running", "crawl_job_not_active")
 
 
 def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: bool = False,
-            confirmations: tuple[str, ...] = (), lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Exactly restore one apply run's original temporal state and delete only the anomalies it
-    created (spec §4D/§10). Facts and occurrences are never touched. Fails closed on any drift."""
+            confirmations: tuple[str, ...] = (), settings: Settings | None = None,
+            lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """Exactly restore one apply run (spec §4D/§6/§10): global + lane locks, full revalidation,
+    SELECT FOR UPDATE, post-flush verify, atomic. On drift, rollback and persist
+    manual_review_required in a SEPARATE audit transaction so the state is never lost."""
     from cestaplan_api.models import HistoryRemediationChange, HistoryRemediationRun
     _require_authorization(authorized, confirmations, restore=True)
     _require_postgres(db)
+    _require_clean_session(db)
+    settings = settings or Settings()
     _acquire(db, _GLOBAL_LOCK_KEY, timeout_ms=lock_timeout_ms)
     run = db.execute(select(HistoryRemediationRun).where(
         HistoryRemediationRun.public_id == run_public_id)).scalar_one_or_none()
@@ -789,7 +1153,28 @@ def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: b
         raise ApplyRestoreDrift("run_not_applied", run.status)
     changes = list(db.execute(select(HistoryRemediationChange).where(
         HistoryRemediationChange.remediation_run_id == run.id)).scalars())
-    with _WriteGuard(db, allow_anomaly_delete=True):
+    for lane_fp in sorted({c.lane_fingerprint for c in changes}):
+        _acquire(db, _lane_lock_key(lane_fp), timeout_ms=lock_timeout_ms)
+    # Pre-restore environment gates + provenance/contract (§6).
+    env = dict(_environment_gates(db, settings, ctx))
+    prov_ok = dict(_provenance_gates({"commit_provenance": {}}, ctx)).get(
+        "immutable_build_provenance", False)
+    if not all(env.get(g) for g in _RESTORE_ENV_GATES) or not _writer_contract_gate()[0] \
+            or not prov_ok:
+        raise ApplyEnvironmentUnsafe("restore_gates_blocking", "")
+    try:
+        return _restore_locked(db, run, changes)
+    except ApplyRestoreDrift as exc:
+        db.rollback()
+        _mark_manual_review(run_public_id, exc.code)
+        raise
+
+
+def _restore_locked(db: Session, run: HistoryRemediationRun,
+                    changes: list[HistoryRemediationChange]) -> dict[str, Any]:
+    allowed_ids = frozenset(c.created_anomaly_live_id for c in changes
+                            if c.created_anomaly_live_id is not None)
+    with _WriteGuard(db, allow_anomaly_delete=True, allowed_anomaly_ids=allowed_ids):
         rows = {o.id: o for o in db.execute(select(PriceObservation).where(
             PriceObservation.id.in_([c.price_observation_id for c in changes])
         ).with_for_update()).scalars()}
@@ -797,7 +1182,6 @@ def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: b
             row = rows[ch.price_observation_id]
             if ch.action_type in _ACTION_WRITES and \
                     _thash(_temporal_of(row)) != ch.expected_bound_hash:
-                run.restore_status = "manual_review_required"
                 raise ApplyRestoreDrift("row_changed_after_apply", str(ch.price_observation_id))
             for k in WHITELIST_FIELDS:
                 setattr(row, k, _parse_dt(ch.original_temporal_state.get(k))
@@ -805,26 +1189,59 @@ def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: b
                         else ch.original_temporal_state.get(k))
             ch.restore_state = _json(_temporal_of(row))
             ch.status = "restored"
-        # Delete ONLY the anomalies this run created; null the audit ref first so the FK holds, then
-        # delete. Facts and occurrences are never touched.
+        # Delete ONLY the exact allowlisted anomalies; keep the durable historical reference (§7).
         for ch in changes:
-            if ch.created_anomaly_id is None:
+            live_id = ch.created_anomaly_live_id
+            if live_id is None:
                 continue
-            an = db.get(PriceAnomaly, ch.created_anomaly_id)
-            ch.created_anomaly_id = None
+            an = db.get(PriceAnomaly, live_id)
+            ch.created_anomaly_live_id = None  # null the live FK; original id + hash are preserved
             db.flush()
             if an is not None:
                 db.delete(an)
+            ch.created_anomaly_deleted_at = datetime.now(UTC)
         db.flush()
+        # post-flush verify: each row now matches its restored (original) state.
+        for ch in changes:
+            if _thash(_temporal_of(rows[ch.price_observation_id])) != _thash(
+                    ch.original_temporal_state):
+                raise ApplyRestoreDrift("post_restore_mismatch", str(ch.price_observation_id))
     run.restore_status = "restored"
     run.status = "rolled_back"
     db.flush()
-    return {"status": "restored", "run_public_id": run_public_id, "restored_rows": len(changes)}
+    return {"status": "restored", "run_public_id": str(run.public_id),
+            "restored_rows": len(changes)}
+
+
+def _mark_manual_review(run_public_id: str, code: str) -> None:
+    """Persist manual_review_required in a SEPARATE transaction so the restore-drift rollback
+    does not erase it (spec §6)."""
+    from cestaplan_api.models import HistoryRemediationRun
+    s = SessionLocal()
+    try:
+        run = s.execute(select(HistoryRemediationRun).where(
+            HistoryRemediationRun.public_id == run_public_id)).scalar_one_or_none()
+        if run is not None:
+            run.restore_status = "manual_review_required"
+            run.error_code = code
+            s.commit()
+    finally:
+        s.close()
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _backup_sha(ctx: ApplyContext) -> str | None:
+    return ctx.backup.expected_sha256 if ctx.backup is not None else None
+
+
+def _backup_int(ctx: ApplyContext, key: str) -> int | None:
+    if ctx.backup is None:
+        return None
+    return ctx.backup.verify(ctx.now or datetime.now(UTC))[1].get(key)
+
+
 def _require_authorization(authorized: bool, confirmations: tuple[str, ...],
                            *, restore: bool = False) -> None:
     needed = ("I_UNDERSTAND_THIS_WRITES", "PLAN_REVIEWED", "BACKUP_VERIFIED")
@@ -846,9 +1263,9 @@ def _json(state: dict[str, Any]) -> dict[str, Any]:
     return _norm_state(state)
 
 
-def _value_execution_hash(plan_hash: str, changes: list[dict[str, Any]]) -> str:
+def _value_execution_hash(plan_hash: str, changes: list[HistoryRemediationChange]) -> str:
     return planner._value_hash({"plan_hash": plan_hash, "changes": sorted(
-        (c["price_observation_id"], c["action_type"], c["expected_bound_hash"]) for c in changes)})
+        (c.deterministic_action_id, c.action_type, c.expected_bound_hash) for c in changes)})
 
 
 def _assert_counts_preserved(before: dict[str, int], after: dict[str, int]) -> None:
@@ -872,16 +1289,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
     a = p.parse_args(argv)
     manifest = load_manifest(a.manifest_path)
     ctx = ApplyContext.from_environment(now=datetime.now(UTC))
+    cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
     if a.apply or a.restore:
         raise SystemExit(
             "ABORT: --apply/--restore are not authorized in this phase. Only --verify-only "
             "(read-only) may run against production.")
-    with SessionLocal() as db:
-        if a.verify_only:
-            db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-            out = verify_only(db, manifest, ctx)
-        else:
-            out = simulate(db, manifest, ctx)
+    if a.simulate and cloud:
+        raise SystemExit(
+            "ABORT: --simulate is not allowed in cloud/production; only --verify-only runs here.")
+    with SessionLocal() as db:  # verify_only/simulate pin the read-only snapshot themselves (§10)
+        out = verify_only(db, manifest, ctx) if a.verify_only else simulate(db, manifest, ctx)
         db.rollback()
     json.dump(out, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
