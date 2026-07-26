@@ -100,6 +100,10 @@ def writer_contract() -> dict[str, Any]:
         "lane_lock_required": True,
         "occurrence_lock_required": True,
         "active_exact_ambiguity_policy": "fail_closed",
+        "fresh_transient_candidate_required": True,
+        "candidate_primary_key_must_be_null": True,
+        "candidate_session_must_be_null": True,
+        "invalid_candidate_rejected_before_sql": True,
     }
 
 
@@ -256,17 +260,34 @@ class _FactLookup:
 
 
 def _validate_candidate_state(candidate: PriceObservation) -> None:
-    """Reject a candidate that must never be recorded (spec §3), BEFORE any lock or write.
+    """Require a FRESH, TRANSIENT candidate (spec §3), refusing anything else BEFORE any SQL.
 
-    A candidate that already carries ``rolled_back_at`` (recording it would resurrect a rolled-back
-    fact) or that is already persisted/associated with a database identity (recording it could
-    reactivate an existing row) is refused with a typed error. The field is never auto-cleared.
+    ``record_price_fact`` only accepts an object that is genuinely new — transient, never pending /
+    persistent / detached / deleted, with no session and no primary key — and not already rolled
+    back. Anything else could resurrect or reactivate an existing row, so it is rejected with a
+    STABLE, sanitized reason code (never the object's repr / id / retailer / price / URL). The id is
+    never cleared, and no ``expunge`` / ``merge`` silently converts the object to transient.
+
+    This runs before ``_set_lock_timeout``, the advisory locks, the lane read and any autoflush, so
+    an invalid candidate provokes ZERO SQL — pure in-memory ORM-state inspection.
     """
     if candidate.rolled_back_at is not None:
-        raise InvalidPriceFactCandidateState("candidate arrives with rolled_back_at set")
+        raise InvalidPriceFactCandidateState("candidate_rolled_back")
     state = sa_inspect(candidate)
-    if state.has_identity or state.deleted:
-        raise InvalidPriceFactCandidateState("candidate already maps to a persisted row")
+    if state.deleted:
+        raise InvalidPriceFactCandidateState("candidate_deleted")
+    if state.persistent:
+        raise InvalidPriceFactCandidateState("candidate_persistent")
+    if state.detached:
+        raise InvalidPriceFactCandidateState("candidate_detached")
+    if state.pending:
+        raise InvalidPriceFactCandidateState("candidate_pending")
+    if state.session is not None:
+        raise InvalidPriceFactCandidateState("candidate_session_associated")
+    if not state.transient:
+        raise InvalidPriceFactCandidateState("candidate_not_transient")
+    if candidate.id is not None:  # transient but with a hand-assigned primary key
+        raise InvalidPriceFactCandidateState("candidate_primary_key_set")
 
 
 def _find_existing_fact(

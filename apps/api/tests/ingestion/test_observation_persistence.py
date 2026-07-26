@@ -4,14 +4,24 @@ crawl/parser reporting the SAME fact is a new PriceObservationOccurrence, never 
 
 from __future__ import annotations
 
+import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import CrawlRun, PriceObservation, PriceObservationOccurrence
+from cestaplan_api.db import engine
+from cestaplan_api.models import (
+    CrawlRun,
+    ExternalProduct,
+    PriceObservation,
+    PriceObservationOccurrence,
+    ProductVariant,
+    Retailer,
+)
 from cestaplan_api.services import observation_persistence as op
 from cestaplan_api.services.observation_persistence import (
     RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION,
@@ -342,9 +352,10 @@ def test_candidate_rolled_back_state_rejected(db_session: Session) -> None:
     cand = _candidate(retailer.id, v.id, amount="1.19")
     cand.rolled_back_at = T0
     m = RecordMetrics()
-    with pytest.raises(InvalidPriceFactCandidateState):
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
         record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"),
                           imported_at=T0, metrics=m)
+    assert ei.value.reason == "candidate_rolled_back"
     assert _counts(db_session, retailer.id) == before  # nothing written
     assert m.invalid_candidate_state_blocked == 1
 
@@ -395,12 +406,181 @@ def test_behavioral_guard_rolled_back_never_reused(db_session: Session) -> None:
     assert _occ_obs_ids(db_session, retailer.id) == [res.observation.id]
 
 
-# §4 the versioned writer contract declares the active-only guarantees (evidence for future apply).
+# §4/§5 the versioned writer contract seals ALL declared guarantees (evidence for a future apply).
 def test_writer_contract_declares_active_only() -> None:
     c = writer_contract()
     assert RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION == "record-price-fact-v2-active-only"
-    assert c["version"] == RECORD_PRICE_FACT_WRITER_CONTRACT_VERSION
-    assert c["exact_fact_reuse_requires_rolled_back_at_null"] is True
-    assert c["rolled_back_fact_never_receives_new_occurrence"] is True
-    assert c["lane_lock_required"] is True and c["occurrence_lock_required"] is True
-    assert c["active_exact_ambiguity_policy"] == "fail_closed"
+    assert c == {
+        "version": "record-price-fact-v2-active-only",
+        "exact_fact_reuse_requires_rolled_back_at_null": True,
+        "rolled_back_fact_never_receives_new_occurrence": True,
+        "lane_lock_required": True,
+        "occurrence_lock_required": True,
+        "active_exact_ambiguity_policy": "fail_closed",
+        "fresh_transient_candidate_required": True,
+        "candidate_primary_key_must_be_null": True,
+        "candidate_session_must_be_null": True,
+        "invalid_candidate_rejected_before_sql": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Candidate must be a FRESH, TRANSIENT object; anything else is rejected BEFORE any SQL (§1-§5)
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _capture_sql(db: Session):
+    stmts: list[str] = []
+    conn = db.connection()
+
+    def _before(conn, cursor, statement, params, context, executemany):
+        stmts.append(statement)
+
+    event.listen(conn.engine, "before_cursor_execute", _before)
+    try:
+        yield stmts
+    finally:
+        event.remove(conn.engine, "before_cursor_execute", _before)
+
+
+def _persistent_obs_in(session: Session, *, rolled_back: bool = False) -> PriceObservation:
+    """A flushed (persistent) PriceObservation in ``session`` with its own committed-free lane."""
+    r = Retailer(slug=f"vs-{uuid.uuid4().hex[:8]}", name="VS", adapter_key="test",
+                 is_synthetic=True)
+    session.add(r)
+    session.flush()
+    ext = ExternalProduct(retailer_id=r.id, external_id="VS-1")
+    session.add(ext)
+    session.flush()
+    pv = ProductVariant(retailer_id=r.id, external_product_id=ext.id, display_name="V",
+                        product_id=None)
+    session.add(pv)
+    session.flush()
+    o = PriceObservation(
+        retailer_id=r.id, product_variant_id=pv.id, price_scope="national", price_type="regular",
+        amount=Decimal("1.19"), currency="EUR", requires_loyalty=False, observed_at=T0,
+        imported_at=T0, valid_from=T0, confidence_score=Decimal("1.0"), staging_only=True,
+        rolled_back_at=(T0 if rolled_back else None))
+    session.add(o)
+    session.flush()
+    return o
+
+
+# §3.1 pending in the same session -> typed reject with ZERO SQL (§2), zero writes, still pending.
+def test_reject_pending_same_session_zero_sql(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    before = _counts(db_session, retailer.id)
+    cand = _candidate(retailer.id, v.id, amount="1.19")
+    db_session.add(cand)  # pending, not flushed
+    m = RecordMetrics()
+    with _capture_sql(db_session) as stmts, pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"),
+                          imported_at=T0, metrics=m)
+    assert ei.value.reason in {"candidate_pending", "candidate_session_associated"}
+    joined = " ".join(stmts).lower()
+    for kw in ("insert", "update", "delete", "lock_timeout", "pg_advisory", "price_observation"):
+        assert kw not in joined  # no INSERT/UPDATE/DELETE, no lock, no lane SELECT
+    assert op.sa_inspect(cand).pending  # still pending until rollback/expunge
+    db_session.expunge(cand)
+    assert _counts(db_session, retailer.id) == before  # zero writes
+    assert m.invalid_candidate_state_blocked == 1
+
+
+# §3.2 pending in ANOTHER session -> typed reject before the target session is used; neither writes.
+def test_reject_pending_other_session(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    other = Session(bind=engine.connect())
+    try:
+        cand = _candidate(retailer.id, v.id, amount="1.19")
+        other.add(cand)  # pending in `other` (no flush -> no FK dependency)
+        with pytest.raises(InvalidPriceFactCandidateState) as ei:
+            record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"),
+                              imported_at=T0)
+        assert ei.value.reason == "candidate_pending"
+        assert _counts(db_session, retailer.id) == (0, 0)  # target session wrote nothing
+        other.expunge(cand)
+    finally:
+        other.rollback()
+        other.close()
+
+
+# §3.3 persistent in the same session -> typed reject.
+def test_reject_persistent_same_session(db_session: Session) -> None:
+    obj = _persistent_obs_in(db_session)
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, obj, OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert ei.value.reason == "candidate_persistent"
+
+
+# §3.4 persistent, associated with ANOTHER session -> typed reject (not a generic ORM error).
+def test_reject_persistent_other_session(db_session: Session) -> None:
+    other = Session(bind=engine.connect())
+    try:
+        obj = _persistent_obs_in(other)  # flushed (persistent) in `other`, uncommitted
+        with pytest.raises(InvalidPriceFactCandidateState) as ei:
+            record_price_fact(db_session, obj, OccurrenceProvenance(provider_code="x"),
+                              imported_at=T0)
+        assert ei.value.reason == "candidate_persistent"
+    finally:
+        other.rollback()  # discard the uncommitted flushed rows
+        other.close()
+
+
+# §3.5 detached (has identity, no session) -> typed reject.
+def test_reject_detached(db_session: Session) -> None:
+    obj = _persistent_obs_in(db_session)
+    db_session.expunge(obj)  # -> detached
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, obj, OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert ei.value.reason == "candidate_detached"
+
+
+# §3.6 deleted -> typed reject.
+def test_reject_deleted(db_session: Session) -> None:
+    obj = _persistent_obs_in(db_session)
+    db_session.delete(obj)
+    db_session.flush()  # the delete is flushed -> InstanceState.deleted is now True
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, obj, OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert ei.value.reason == "candidate_deleted"
+
+
+# §3.7 transient with a hand-assigned primary key -> typed reject, though has_identity is false.
+def test_reject_transient_with_manual_id(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    cand = _candidate(retailer.id, v.id, amount="1.19")
+    cand.id = 999_999_999  # transient but carrying a primary key
+    assert op.sa_inspect(cand).has_identity is False
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert ei.value.reason == "candidate_primary_key_set"
+
+
+# §3.8 a clean transient candidate still records normally.
+def test_clean_transient_candidate_still_works(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    res = record_price_fact(db_session, _candidate(retailer.id, v.id, amount="1.19"),
+                            OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert res.fact_created is True and res.observation.rolled_back_at is None
+
+
+# §3.9 transient but rolled-back -> still rejected.
+def test_reject_transient_rolled_back(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    cand = _candidate(retailer.id, v.id, amount="1.19")
+    cand.rolled_back_at = T0
+    with pytest.raises(InvalidPriceFactCandidateState) as ei:
+        record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"), imported_at=T0)
+    assert ei.value.reason == "candidate_rolled_back"
+
+
+# §3.10 the invalid-candidate metric increments exactly once per rejected call.
+def test_invalid_candidate_metric_increments_once(db_session: Session) -> None:
+    retailer, v = _fixture(db_session)
+    m = RecordMetrics()
+    for _ in range(3):
+        cand = _candidate(retailer.id, v.id, amount="1.19")
+        cand.rolled_back_at = T0
+        with pytest.raises(InvalidPriceFactCandidateState):
+            record_price_fact(db_session, cand, OccurrenceProvenance(provider_code="x"),
+                              imported_at=T0, metrics=m)
+    assert m.invalid_candidate_state_blocked == 3  # once per rejected call, never partial

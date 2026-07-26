@@ -211,6 +211,18 @@ The guarantees are declared, versioned and read-only via
 | `lane_lock_required` | `true` |
 | `occurrence_lock_required` | `true` |
 | `active_exact_ambiguity_policy` | `fail_closed` |
+| `fresh_transient_candidate_required` | `true` |
+| `candidate_primary_key_must_be_null` | `true` |
+| `candidate_session_must_be_null` | `true` |
+| `invalid_candidate_rejected_before_sql` | `true` |
+
+A candidate is accepted only when it is genuinely new: `state.transient` and **none** of
+`pending` / `persistent` / `detached` / `deleted`, with `session is None` and `id is None`. Any other
+ORM state is rejected up front — before `SET LOCAL lock_timeout`, the advisory locks, the lane read or
+any autoflush (**zero SQL**) — with a stable reason code (`candidate_rolled_back`,
+`candidate_primary_key_set`, `candidate_pending`, `candidate_persistent`, `candidate_detached`,
+`candidate_deleted`, `candidate_session_associated`, `candidate_not_transient`). The id is never
+cleared and no `expunge`/`merge` silently coerces the object to transient.
 
 This contract is **evidence for a future, separately-reviewed apply tool**. Declaring it does **not**
 make the plan-only history-lane remediation planner apply-ready; that planner stays plan-only and
