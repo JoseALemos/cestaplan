@@ -84,6 +84,58 @@ def test_distinct_lanes_are_independent() -> None:
     assert lane_invariants_hold(rows)  # one open row EACH, no violation
 
 
+def test_checker_detects_active_interval_crossing_disputed() -> None:
+    # An active OPEN row starting at T0 with a disputed barrier at T1 in between -> it crosses T1.
+    rows = [
+        _row(valid_from=T0, valid_until=None, amount="1.19"),  # active, open -> spans T1
+        _row(valid_from=T1, valid_until=T1, amount="1.29", status="disputed"),  # barrier
+    ]
+    r = lane_invariant_report(rows)
+    assert r["active_intervals_crossing_disputed"] == 1
+    assert r["lanes_active_interval_crosses_disputed"] == 1
+    assert r["lanes_with_unexpected_conflict_coverage"] == 1
+    assert not lane_invariants_hold(rows)
+
+
+def test_checker_barrier_ends_interval_is_allowed() -> None:
+    # An active interval that ENDS exactly at the disputed barrier is allowed (no crossing).
+    rows = [
+        _row(valid_from=T0, valid_until=T1, amount="1.19"),  # ends AT T1
+        _row(valid_from=T1, valid_until=T1, amount="1.29", status="disputed"),  # barrier
+        _row(valid_from=T2, valid_until=None, amount="1.39"),  # resumes after the gap
+    ]
+    r = lane_invariant_report(rows)
+    assert r["active_intervals_crossing_disputed"] == 0
+    assert r["blocked_gap_count"] == 1  # T1 is a correctly-blocked barrier
+    assert lane_invariants_hold(rows)
+
+
+def test_auditor_reports_crossing_disputed(db_session: Session) -> None:
+    retailer = seed_test_retailer(db_session, "carrefour")
+    _p, variant = seed_test_catalog_product(db_session, retailer, "AUD-2", name="Aud2", price=None)
+    # Seed a KNOWN crossing: an open active row and a disputed barrier strictly inside it.
+    db_session.add(
+        PriceObservation(
+            retailer_id=retailer.id, product_variant_id=variant.id, price_scope="national",
+            price_type="regular", currency="EUR", staging_only=True, amount=Decimal("1.19"),
+            observed_at=T0, imported_at=T0, valid_from=T0, valid_until=None,
+            confidence_score=Decimal("1.0"),
+        )
+    )
+    db_session.add(
+        PriceObservation(
+            retailer_id=retailer.id, product_variant_id=variant.id, price_scope="national",
+            price_type="regular", currency="EUR", staging_only=True, amount=Decimal("1.29"),
+            observed_at=T1, imported_at=T0, valid_from=T1, valid_until=T1,
+            confidence_score=Decimal("1.0"), verification_status="disputed",
+        )
+    )
+    db_session.flush()
+    report = auditor.audit(db_session, "carrefour", staging_only=True)
+    assert report["active_intervals_crossing_disputed"] >= 1
+    assert report["lanes_active_interval_crosses_disputed"] >= 1
+
+
 def test_auditor_is_read_only_and_counts(db_session: Session) -> None:
     retailer = seed_test_retailer(db_session, "carrefour")
     _p, variant = seed_test_catalog_product(db_session, retailer, "AUD-1", name="Aud", price=None)

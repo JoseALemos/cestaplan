@@ -19,6 +19,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import engine
+from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.models import (
     CrawlRun,
     ExternalProduct,
@@ -477,3 +478,147 @@ def test_temporal_lane_lock_timeout_no_partial_write(seeded) -> None:
         holder.rollback()
         holder.close()
     assert _counts(rid) == (0, 0)  # nothing written
+
+
+# --------------------------------------------------------------------------- #
+# Disputed timestamps are temporal BARRIERS (spec §1-§6): an active interval may end AT a barrier
+# but must never cross it, and a barrier leaves a blocked gap with no current price.
+# --------------------------------------------------------------------------- #
+T1_5 = datetime(2026, 7, 26, 20, 0, tzinfo=UTC)  # strictly between T1 and T2
+
+
+def _conflict(rid: int, vid: int, *, at: datetime, a1: str = "1.19", a2: str = "1.29") -> None:
+    """Create a same-timestamp conflict at ``at`` (two distinct facts -> both disputed)."""
+    _write(rid, vid, amount=a1, observed_at=at)
+    _write(rid, vid, amount=a2, observed_at=at)
+
+
+def _by_from(rid: int) -> dict:
+    return {r.valid_from: r for r in _active_rows(rid)}
+
+
+def _disputed(rid: int) -> list[PriceObservation]:
+    return [r for r in _all_rows(rid) if r.verification_status == "disputed"]
+
+
+def _staging_current(vid: int, when: datetime):
+    c = _session()
+    try:
+        return CurrentPriceService().current(c, vid, as_of=when, staging=True)
+    finally:
+        c.close()
+
+
+# 1. T0 valid -> conflict T1 -> T2 valid: T0 ends at T1, gap [T1,T2), T2 open (the reported bug).
+def test_barrier_valid_conflict_valid(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.00", observed_at=T0)
+    _conflict(rid, vid, at=T1)
+    _write(rid, vid, amount="1.50", observed_at=T2)
+    active = _by_from(rid)
+    assert active[T0].valid_until == T1  # NOT extended across the conflict
+    assert active[T2].valid_until is None
+    assert all(r.valid_from == r.valid_until == T1 for r in _disputed(rid))
+    assert lane_invariants_hold(_all_rows(rid))
+    assert _staging_current(vid, T1 + (T2 - T1) / 2) is None  # no current price inside the gap
+    assert _staging_current(vid, T2) is not None  # a valid price resumes at T2
+
+
+# 2. T0 valid -> conflict T2 -> late T1 valid: T0->T1->barrier T2, no valid price after T2.
+def test_barrier_late_arrival_before_conflict(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.00", observed_at=T0)
+    _conflict(rid, vid, at=T2)
+    _write(rid, vid, amount="1.20", observed_at=T1)  # arrives late, between T0 and the T2 conflict
+    active = _by_from(rid)
+    assert active[T0].valid_until == T1
+    assert active[T1].valid_until == T2  # ends AT the barrier, never crosses it
+    assert all(r.valid_from == r.valid_until == T2 for r in _disputed(rid))
+    assert lane_invariants_hold(_all_rows(rid))
+    assert _staging_current(vid, T2 + (T2 - T1)) is None  # blocked after the conflict
+
+
+# 3. Conflict T1 -> valid T1.5 -> valid T2: gap [T1,T1.5), then T1.5 -> T2 -> open.
+def test_barrier_conflict_then_two_valid(seeded) -> None:
+    rid, vid, _runs = seeded
+    _conflict(rid, vid, at=T1)
+    _write(rid, vid, amount="1.10", observed_at=T1_5)
+    _write(rid, vid, amount="1.20", observed_at=T2)
+    active = _by_from(rid)
+    assert active[T1_5].valid_until == T2
+    assert active[T2].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+    assert _staging_current(vid, T1 + (T1_5 - T1) / 2) is None  # inside the leading gap
+
+
+# 4. Valid T0 -> valid T1 -> conflict T2: coherent chain up to the barrier.
+def test_barrier_two_valid_then_conflict(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.00", observed_at=T0)
+    _write(rid, vid, amount="1.10", observed_at=T1)
+    _conflict(rid, vid, at=T2)
+    active = _by_from(rid)
+    assert active[T0].valid_until == T1
+    assert active[T1].valid_until == T2  # ends AT the barrier
+    assert all(r.valid_from == r.valid_until == T2 for r in _disputed(rid))
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 5. Conflict with THREE distinct facts at T1 -> all three disputed, empty [T1,T1].
+def test_barrier_three_way_conflict(seeded) -> None:
+    rid, vid, _runs = seeded
+    for amount in ("1.19", "1.29", "1.39"):
+        _write(rid, vid, amount=amount, observed_at=T1)
+    disputed = _disputed(rid)
+    assert len(disputed) == 3
+    assert all(r.valid_from == r.valid_until == T1 for r in disputed)
+    assert _counts(rid) == (3, 3)
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 6. Concurrent insertion on BOTH sides of an existing barrier.
+def test_barrier_concurrent_both_sides(seeded) -> None:
+    rid, vid, _runs = seeded
+    _conflict(rid, vid, at=T1)
+    _run_concurrently([
+        _mk(rid, vid, amount="1.00", observed_at=T0),
+        _mk(rid, vid, amount="1.50", observed_at=T2),
+    ])
+    active = _by_from(rid)
+    assert active[T0].valid_until == T1  # ends at the barrier
+    assert active[T2].valid_until is None
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 7. Ten writers distributed on both sides of a conflict -> exactly 2 valid facts + the barrier.
+def test_barrier_ten_writers_both_sides(seeded) -> None:
+    rid, vid, _runs = seeded
+    _conflict(rid, vid, at=T1)
+    fns = [
+        _mk(rid, vid, amount="1.00", observed_at=T0)
+        if i % 2 == 0
+        else _mk(rid, vid, amount="1.50", observed_at=T2)
+        for i in range(10)
+    ]
+    _run_concurrently(fns)
+    active = _by_from(rid)
+    assert set(active) == {T0, T2}  # exactly the two distinct valid facts
+    assert active[T0].valid_until == T1 and active[T2].valid_until is None
+    assert len(_disputed(rid)) == 2
+    assert lane_invariants_hold(_all_rows(rid))
+
+
+# 8. Rollback DURING barrier creation leaves the first fact intact and NOT disputed.
+def test_barrier_rollback_during_creation(seeded) -> None:
+    rid, vid, _runs = seeded
+    _write(rid, vid, amount="1.19", observed_at=T1)  # first fact, committed, open
+    b = _session()
+    try:
+        _rpf(b, _candidate(rid, vid, amount="1.29", observed_at=T1))  # would form the conflict
+        b.rollback()  # abandon it
+    finally:
+        b.close()
+    rows = _all_rows(rid)
+    assert len(rows) == 1  # only the first fact survives
+    assert rows[0].verification_status != "disputed" and rows[0].valid_until is None
+    assert lane_invariants_hold(rows)
