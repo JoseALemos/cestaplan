@@ -72,6 +72,7 @@ class RecordMetrics:
     occurrences_reused_after_lock: int = 0
     out_of_order_inserts: int = 0
     same_timestamp_conflicts: int = 0
+    blocked_gaps: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -84,6 +85,7 @@ class RecordMetrics:
             "occurrences_reused_after_lock": self.occurrences_reused_after_lock,
             "out_of_order_inserts": self.out_of_order_inserts,
             "same_timestamp_conflicts": self.same_timestamp_conflicts,
+            "blocked_gaps": self.blocked_gaps,
         }
 
 
@@ -122,6 +124,7 @@ class LockDiagnostics:
     temporal_successor_found: bool = False
     out_of_order_insert: bool = False
     same_timestamp_conflict: bool = False
+    blocked_gap_before: bool = False
 
 
 @dataclass(slots=True)
@@ -177,14 +180,13 @@ def _lane_conditions(candidate: PriceObservation) -> list:
     return [_eq(getattr(PriceObservation, f), getattr(candidate, f)) for f in ident.LANE_FIELDS]
 
 
-def _active_lane_rows(db: Session, candidate: PriceObservation) -> list[PriceObservation]:
-    """Lane interval-chain rows: same lane, not rolled back, not disputed."""
+def _lane_rows(db: Session, candidate: PriceObservation) -> list[PriceObservation]:
+    """ALL non-rolled-back rows of the lane (active AND disputed). Disputed rows are temporal
+    ANCHORS/barriers even though they never enter the active price chain, so placement must see
+    them."""
     conds = _lane_conditions(candidate)
     conds.append(PriceObservation.rolled_back_at.is_(None))
-    conds.append(PriceObservation.verification_status != _DISPUTED)
-    return list(
-        db.execute(select(PriceObservation).where(and_(*conds))).scalars()
-    )
+    return list(db.execute(select(PriceObservation).where(and_(*conds))).scalars())
 
 
 def _add_conflict_anomaly(db: Session, observation_id: int) -> None:
@@ -210,20 +212,18 @@ def _place_in_temporal_sequence(
     Same-timestamp conflict (§7, policy B): if a DIFFERENT fact already sits at exactly ``T`` in
     this lane, every same-``T`` fact — the newcomer and any still-active sibling — is marked
     ``disputed`` with an empty ``[T, T]`` interval (never a "current" price) and flagged with an
-    anomaly. The lane then has no current price at/after ``T`` until review — honest, and
-    independent of arrival order: no row is silently chosen by id or by who arrived first.
+    anomaly.
+
+    ANCHOR placement (§1/§2): a disputed timestamp is a temporal BARRIER. Placement uses the nearest
+    ANCHORS (any non-rolled-back row's timestamp, active or disputed), never merely the nearest
+    active row, so a new fact never extends a prior interval across a conflict and never spans a
+    barrier: ``valid_until`` is the next anchor, the predecessor is closed only when the immediate
+    previous anchor is a NON-disputed active row, and a disputed previous anchor leaves a gap.
     """
     t = candidate.observed_at
     candidate.valid_from = t
-    at_t = db.execute(
-        select(PriceObservation).where(
-            and_(
-                *_lane_conditions(candidate),
-                PriceObservation.valid_from == t,
-                PriceObservation.rolled_back_at.is_(None),
-            )
-        )
-    ).scalars().all()
+    rows = _lane_rows(db, candidate)  # active + disputed anchors
+    at_t = [r for r in rows if r.valid_from == t]
     if at_t:  # candidate is a NEW distinct fact (an identical one would have been reused)
         candidate.valid_until = t  # empty interval -> never current
         candidate.verification_status = _DISPUTED
@@ -235,20 +235,25 @@ def _place_in_temporal_sequence(
         diag.same_timestamp_conflict = True
         return
 
-    active = _active_lane_rows(db, candidate)
-    predecessor = max(
-        (r for r in active if r.valid_from < t), key=lambda r: r.valid_from, default=None
-    )
-    successor = min(
-        (r for r in active if r.valid_from > t), key=lambda r: r.valid_from, default=None
-    )
-    candidate.valid_until = successor.valid_from if successor is not None else None
-    if predecessor is not None:
-        predecessor.valid_until = t
-        predecessor.closed_by_run_id = closed_by_run_id
-    diag.temporal_predecessor_found = predecessor is not None
-    diag.temporal_successor_found = successor is not None
-    diag.out_of_order_insert = successor is not None
+    disputed_ts = {r.valid_from for r in rows if r.verification_status == _DISPUTED}
+    before = [r.valid_from for r in rows if r.valid_from < t]
+    after = [r.valid_from for r in rows if r.valid_from > t]
+    previous_anchor = max(before) if before else None
+    next_anchor = min(after) if after else None
+
+    # Never cross the next anchor (if it is a disputed barrier, end exactly ON it).
+    candidate.valid_until = next_anchor
+    # Extend the predecessor ONLY when the immediate previous anchor is a non-disputed active row.
+    # A disputed previous anchor is a barrier: leave the interval before it closed, gap after it.
+    if previous_anchor is not None and previous_anchor not in disputed_ts:
+        for r in rows:
+            if r.valid_from == previous_anchor and r.verification_status != _DISPUTED:
+                r.valid_until = t
+                r.closed_by_run_id = closed_by_run_id
+        diag.temporal_predecessor_found = True
+    diag.temporal_successor_found = next_anchor is not None
+    diag.out_of_order_insert = next_anchor is not None
+    diag.blocked_gap_before = previous_anchor is not None and previous_anchor in disputed_ts
 
 
 def _find_existing_occurrence(
@@ -334,6 +339,8 @@ def record_price_fact(
             metrics.same_timestamp_conflicts += 1
         if diag.out_of_order_insert:
             metrics.out_of_order_inserts += 1
+        if diag.blocked_gap_before:
+            metrics.blocked_gaps += 1
         fact = candidate
         fact_created = True
         metrics.observations_created += 1
@@ -381,7 +388,7 @@ def record_price_fact(
     # Sanitized diagnostics only (lock keys are non-reversible hashes; no payloads/URLs/secrets).
     _LOG.debug(
         "record_price_fact lane_lock=%s occ_lock=%s wait_ms=%d fact_reused=%s occ_reused=%s "
-        "pred=%s succ=%s ooo=%s same_ts_conflict=%s",
+        "pred=%s succ=%s ooo=%s same_ts_conflict=%s blocked_gap=%s",
         diag.lane_lock_acquired,
         diag.occurrence_lock_acquired,
         diag.lock_wait_ms,
@@ -391,6 +398,7 @@ def record_price_fact(
         diag.temporal_successor_found,
         diag.out_of_order_insert,
         diag.same_timestamp_conflict,
+        diag.blocked_gap_before,
     )
     return RecordResult(
         observation=fact,
