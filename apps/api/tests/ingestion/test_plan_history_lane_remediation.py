@@ -390,7 +390,7 @@ def test_excluded_null_timestamp(db_session: Session, monkeypatch) -> None:
         lanes, occ, sfk, ufk, rid, disc = real_load(db, provider)
         for rows in lanes.values():
             db.expunge(rows[0])  # detach so mutating it does not autoflush a NULL to the DB
-            rows[0].observed_at = None  # a null anchor forces exclusion
+            rows[0].observed_at = None  # type: ignore[assignment]  # null anchor forces exclusion
         return lanes, occ, sfk, ufk, rid, disc
 
     monkeypatch.setattr(planner, "_load", patched)
