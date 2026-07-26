@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
@@ -112,7 +112,7 @@ class CurrentPriceService:
         cost a production plan.
         """
         obs = self._latest_valid(
-            db, product_variant_id, store_id=store_id, scope=scope, staging=staging
+            db, product_variant_id, store_id=store_id, scope=scope, staging=staging, as_of=as_of
         )
         if obs is None:
             return None
@@ -210,11 +210,18 @@ class CurrentPriceService:
         store_id: int | None = None,
         scope: str | None = None,
         staging: bool = False,
+        as_of: datetime | None = None,
     ) -> PriceObservation | None:
         stmt = (
             select(PriceObservation)
             .where(
                 PriceObservation.product_variant_id == product_variant_id,
+                # A rolled-back observation is ignored by current-price selection by MODEL CONTRACT
+                # (§T) — this filter applies to BOTH staging and production, and never depends on
+                # valid_until/verification_status alone.
+                PriceObservation.rolled_back_at.is_(None),
+                # A disputed row (same-timestamp conflict, §7) is NEVER a current price — the filter
+                # is on the status, not merely on valid_until.
                 PriceObservation.verification_status != "disputed",
                 # Production view excludes staging imports (§P); staging view reads only them.
                 PriceObservation.staging_only.is_(staging),
@@ -230,6 +237,18 @@ class CurrentPriceService:
             stmt = stmt.where(PriceObservation.store_id == store_id)
         if scope is not None:
             stmt = stmt.where(PriceObservation.price_scope == scope)
+        # New-model (staging) selection is interval-aware: the current price is the row whose
+        # validity CONTAINS as_of, so a conflict barrier's blocked gap correctly has NO current
+        # price (rather than falling back to the prior, already-closed row). Production append-only
+        # selection is left unchanged (it always keeps a single open row per line).
+        if staging and as_of is not None:
+            stmt = stmt.where(
+                PriceObservation.valid_from <= as_of,
+                or_(
+                    PriceObservation.valid_until.is_(None),
+                    PriceObservation.valid_until > as_of,
+                ),
+            )
         return db.execute(stmt).scalars().first()
 
     def _to_current(self, obs: PriceObservation, *, as_of: datetime) -> CurrentPrice:

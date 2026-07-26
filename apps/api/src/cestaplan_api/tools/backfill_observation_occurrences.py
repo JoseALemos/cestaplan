@@ -32,19 +32,12 @@ from cestaplan_api.models import (
     PriceObservationOccurrence,
     Retailer,
 )
+from cestaplan_api.services import observation_identity as ident
 
 _TOOL_VERSION = "1.0.0"
 
-# The occurrence-identity fields used for the idempotent skip (must match observation_persistence).
-_OCC_IDENTITY = (
-    "price_observation_id",
-    "provider_code",
-    "source_id",
-    "crawl_run_id",
-    "raw_capture_id",
-    "connector_version",
-    "parser_version",
-)
+# The occurrence-identity fields for the idempotent skip come from the SHARED definition.
+_OCC_IDENTITY = ident.OCCURRENCE_IDENTITY_FIELDS
 
 
 def _retailer_id(db: Session, provider_code: str) -> int | None:

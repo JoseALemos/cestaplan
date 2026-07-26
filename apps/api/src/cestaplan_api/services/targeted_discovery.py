@@ -44,6 +44,10 @@ from cestaplan_api.services.ingredient_dictionary import (
     normalize_provider_category,
     specs,
 )
+from cestaplan_api.services.observation_persistence import (
+    OccurrenceProvenance,
+    record_price_fact,
+)
 
 _LOCAL = Path("/root/cestaplan/.local/provider-targeted-coverage")
 
@@ -133,23 +137,28 @@ def _persist_product(
     variant.unit_price = p.unit_price
     variant.unit_price_unit = p.unit_price_unit
     db.flush()
-    # A staging observation (never production).
-    db.add(
-        PriceObservation(
-            retailer_id=retailer_id,
-            product_variant_id=variant.id,
-            price_scope=p.price_scope.value,
-            price_type="regular",
-            amount=p.regular_price,
-            currency=p.currency,
-            observed_at=p.observed_at,
-            imported_at=now,
-            valid_from=now,
-            confidence_score=Decimal("1.0"),
-            staging_only=True,
-        )
+    # A staging observation (never production), routed through the shared serialized persistence so
+    # it is idempotent and race-free — never a bare db.add (spec §1/§2). Discovery carries no
+    # crawl/capture, so its provenance is provider-only (recorded as such, never invented).
+    candidate = PriceObservation(
+        retailer_id=retailer_id,
+        product_variant_id=variant.id,
+        price_scope=p.price_scope.value,
+        price_type="regular",
+        amount=p.regular_price,
+        currency=p.currency,
+        observed_at=p.observed_at,
+        imported_at=now,
+        valid_from=now,
+        confidence_score=Decimal("1.0"),
+        staging_only=True,
     )
-    db.flush()
+    record_price_fact(
+        db,
+        candidate,
+        OccurrenceProvenance(provider_code=p.provider, confidence_score=Decimal("1.0")),
+        imported_at=now,
+    )
     return product.id, variant.id
 
 

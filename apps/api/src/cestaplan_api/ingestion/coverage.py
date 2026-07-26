@@ -160,6 +160,8 @@ class PriceCoverageService:
             select(PriceObservation)
             .where(
                 PriceObservation.product_variant_id == product_variant_id,
+                # Rolled-back and disputed rows are never a current/latest price (model contract).
+                PriceObservation.rolled_back_at.is_(None),
                 PriceObservation.verification_status != "disputed",
             )
             .order_by(

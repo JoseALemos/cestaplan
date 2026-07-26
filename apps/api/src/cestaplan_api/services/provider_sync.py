@@ -40,6 +40,7 @@ from cestaplan_api.models import (
 )
 from cestaplan_api.services.observation_persistence import (
     OccurrenceProvenance,
+    PreexistingHistoryLaneAnomaly,
     RecordMetrics,
     record_price_fact,
 )
@@ -63,6 +64,8 @@ class SyncReport:
     observations_reused: int = 0
     occurrences_created: int = 0
     occurrences_reused: int = 0
+    # Products refused because their history lane arrived already corrupt (spec §2/§3).
+    blocked_lane_anomalies: int = 0
     quality_status: str = "insufficient"
     quarantined: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -79,6 +82,7 @@ class SyncReport:
             "observations_reused": self.observations_reused,
             "occurrences_created": self.occurrences_created,
             "occurrences_reused": self.occurrences_reused,
+            "blocked_lane_anomalies": self.blocked_lane_anomalies,
             "quality_status": self.quality_status,
             "quarantined": self.quarantined,
             "reasons": list(self.reasons),
@@ -134,7 +138,14 @@ def run_provider_sync(
     metrics = RecordMetrics()
     for product in products:
         variant = _upsert_variant(db, retailer.id, product)
-        _append_observation(db, retailer.id, variant, product, run.id, staging, as_of, metrics)
+        try:
+            _append_observation(db, retailer.id, variant, product, run.id, staging, as_of, metrics)
+        except PreexistingHistoryLaneAnomaly:
+            # The target lane arrived already corrupt (§2): the write is refused, never
+            # auto-repaired. Surface it as a QUALITY rejection (not an empty catalogue).
+            report.blocked_lane_anomalies += 1
+    if report.blocked_lane_anomalies:
+        report.reasons.append(f"lane_anomaly_blocked_{report.blocked_lane_anomalies}")
     # A "persisted observation" is a NEW economic fact; a re-confirmed fact is a reused occurrence.
     report.persisted_observations = metrics.observations_created
     report.observations_created = metrics.observations_created

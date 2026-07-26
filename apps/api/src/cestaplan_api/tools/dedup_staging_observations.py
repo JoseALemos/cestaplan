@@ -64,19 +64,9 @@ _REFERENCING = (
     ("price_anomaly", PriceAnomaly, PriceAnomaly.price_observation_id),
 )
 
-# The provenance tuple of an occurrence (its identity minus price_observation_id): two occurrences
-# with the same tuple are the SAME evidence, so relinking one onto a canonical that already has it
-# is a de-duplication, not a loss.
-_OCC_PROVENANCE = (
-    "provider_code",
-    "source_id",
-    "crawl_run_id",
-    "raw_capture_id",
-    "connector_version",
-    "parser_version",
-)
-
-
+# Occurrence provenance identity is the SHARED definition in observation_identity: two occurrences
+# with the same provenance tuple are the SAME evidence, so relinking one onto a canonical that
+# already has it is a de-duplication, not a loss.
 def _occurrences(db: Session, observation_id: int) -> list[PriceObservationOccurrence]:
     return list(
         db.execute(
@@ -88,7 +78,7 @@ def _occurrences(db: Session, observation_id: int) -> list[PriceObservationOccur
 
 
 def _provenance_tuple(occ: PriceObservationOccurrence) -> tuple:
-    return tuple(getattr(occ, f) for f in _OCC_PROVENANCE)
+    return ident.occurrence_provenance_tuple(occ)
 
 
 def _occurrence_values(occ: PriceObservationOccurrence) -> dict[str, Any]:
