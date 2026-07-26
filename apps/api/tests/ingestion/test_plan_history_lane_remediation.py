@@ -51,7 +51,7 @@ def _obs(db, rid, vid, *, amount, observed_at, valid_until=None, imp=None, statu
     return o
 
 
-def _occ(db, obs_id, *, crawl=None, source=None, provider="p"):
+def _occ(db, obs_id, *, crawl=None, source=None, provider: str | None = "p"):
     db.add(PriceObservationOccurrence(
         price_observation_id=obs_id, provider_code=provider, crawl_run_id=crawl, source_id=source,
         imported_at=T0))
