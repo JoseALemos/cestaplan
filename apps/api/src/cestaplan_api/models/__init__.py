@@ -61,6 +61,11 @@ from cestaplan_api.models.plan import (
     PlannedMeal,
 )
 from cestaplan_api.models.recipe import Recipe, RecipeIngredient, RecipeStep
+from cestaplan_api.models.remediation import (
+    HistoryRemediationChange,
+    HistoryRemediationPlanConsumption,
+    HistoryRemediationRun,
+)
 from cestaplan_api.models.usage import UsageLedger
 
 __all__ = [
@@ -86,6 +91,10 @@ __all__ = [
     "GenerationJob",
     "GroceryList",
     "GroceryListItem",
+    # history-lane remediation audit
+    "HistoryRemediationChange",
+    "HistoryRemediationPlanConsumption",
+    "HistoryRemediationRun",
     # household
     "Household",
     "HouseholdInvitation",
