@@ -26,7 +26,16 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
 from cestaplan_api.db import engine
-from cestaplan_api.models import PriceObservation, ProductPrice, ProviderIngredientMapping
+from cestaplan_api.models import (
+    HistoryRemediationChange,
+    HistoryRemediationPlanConsumption,
+    HistoryRemediationRun,
+    PriceAnomaly,
+    PriceObservation,
+    PriceObservationOccurrence,
+    ProductPrice,
+    ProviderIngredientMapping,
+)
 from cestaplan_api.provenance import generator as g
 from cestaplan_api.tools import apply_history_lane_remediation as apply_tool
 from cestaplan_api.tools import plan_history_lane_remediation as planner
@@ -284,12 +293,22 @@ def test_context_reveals_no_paths(db_session: Session, tmp_path, monkeypatch):
         assert paths[key] not in r, key
 
 
-def test_verify_ceremony_zero_writes(db_session: Session, tmp_path, monkeypatch):
+_ZERO_WRITE_TABLES = (
+    HistoryRemediationRun, HistoryRemediationChange, HistoryRemediationPlanConsumption,
+    PriceAnomaly, PriceObservationOccurrence, ProductPrice, ProviderIngredientMapping,
+    PriceObservation)
+
+
+def _all_counts(db) -> dict[str, int]:
+    return {t.__name__: int(db.scalar(select(func.count()).select_from(t)) or 0)
+            for t in _ZERO_WRITE_TABLES}
+
+
+def test_verify_ceremony_zero_writes_all_tables(db_session: Session, tmp_path, monkeypatch):
     m, ctx, _ = _build(db_session, tmp_path, monkeypatch)
-    before = int(db_session.scalar(select(func.count()).select_from(PriceObservation)) or 0)
+    before = _all_counts(db_session)
     _report(db_session, m, ctx)
-    after = int(db_session.scalar(select(func.count()).select_from(PriceObservation)) or 0)
-    assert before == after
+    assert _all_counts(db_session) == before  # every table unchanged
 
 
 # --------------------------------------------------------------------------- #
@@ -325,12 +344,11 @@ def test_prepare_request_deterministic(db_session: Session, tmp_path, monkeypatc
     assert _canon(a) == _canon(b)
 
 
-def test_prepare_request_zero_writes(db_session: Session, tmp_path, monkeypatch):
+def test_prepare_request_zero_writes_all_tables(db_session: Session, tmp_path, monkeypatch):
     m, ctx, _ = _build(db_session, tmp_path, monkeypatch, with_package=False)
-    before = int(db_session.scalar(select(func.count()).select_from(PriceObservation)) or 0)
+    before = _all_counts(db_session)
     _prepare(db_session, m, ctx)
-    after = int(db_session.scalar(select(func.count()).select_from(PriceObservation)) or 0)
-    assert before == after
+    assert _all_counts(db_session) == before  # every table unchanged
 
 
 def test_prepare_request_blocks_on_backup_mismatch(db_session: Session, tmp_path, monkeypatch):
@@ -382,3 +400,205 @@ def test_cli_has_no_apply_writer_in_ceremony_modes():
     for banned in ("_apply_locked(", "_restore_locked(", "execute_apply", "execute_restore",
                    "Ed25519PrivateKey", ".sign("):
         assert banned not in prepare_and_verify, banned
+
+
+# --------------------------------------------------------------------------- #
+# §2v2: BackupEvidence.verify over a single securely-opened descriptor
+# --------------------------------------------------------------------------- #
+import shutil  # noqa: E402
+
+from cestaplan_api.provenance import operational_evidence as oe  # noqa: E402
+
+
+def _copy_dump(tmp_path, *, mode: int = 0o600) -> str:
+    dst = tmp_path / "copy.dump"
+    shutil.copy(_BACKUP["path"], dst)
+    os.chmod(dst, mode)
+    return str(dst)
+
+
+def _be(path, *, sha=None, ref=_BACKUP_REF, created=None):
+    return apply_tool.BackupEvidence(
+        path=path, expected_sha256=sha or hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        created_at=created or datetime.now(UTC),
+        expected_postgres_version=str(_BACKUP["pg_major"]), storage_reference=ref)
+
+
+def _verify(be):
+    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]))
+
+
+def _verify_race(be, mutate, monkeypatch):
+    real = oe.os.read
+    state = {"n": 0}
+
+    def racing(fd, n):
+        d = real(fd, n)
+        if d and state["n"] == 0:
+            state["n"] = 1
+            mutate()
+        return d
+
+    monkeypatch.setattr(oe.os, "read", racing)
+    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]))
+
+
+def test_backup_valid_dump(tmp_path):
+    ok, ev = _verify(_be(_copy_dump(tmp_path)))
+    assert ok is True
+    assert ev["identity_stable"] is True
+    assert ev["pg_restore_list_verified"] is True  # pg_restore read the SAME descriptor
+
+
+def test_backup_final_symlink_blocks(tmp_path):
+    real = _copy_dump(tmp_path)
+    link = tmp_path / "link.dump"
+    os.symlink(real, link)
+    ok, _ev = _verify(_be(str(link)))
+    assert ok is False
+
+
+def test_backup_parent_symlink_blocks(tmp_path):
+    d = tmp_path / "real"
+    d.mkdir()
+    dump = _copy_dump(d)
+    linkdir = tmp_path / "linkdir"
+    os.symlink(d, linkdir, target_is_directory=True)
+    ok, _ev = _verify(_be(str(Path(linkdir) / Path(dump).name)))
+    assert ok is False
+
+
+def test_backup_substitution_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    other = tmp_path / "other.dump"
+    shutil.copy(_BACKUP["path"], other)
+    with open(other, "ab") as f:  # make it a different inode with different content
+        f.write(b"\x00extra")
+    ok, ev = _verify_race(_be(dump), lambda: os.replace(str(other), dump), monkeypatch)
+    assert ok is False and ev["identity_stable"] is False
+
+
+def test_backup_inplace_same_size_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    size = os.path.getsize(dump)
+
+    def mutate():
+        with open(dump, "r+b") as f:  # flip a middle byte -> same size, different content
+            f.seek(size // 2)
+            cur = f.read(1)
+            f.seek(size // 2)
+            f.write(bytes([cur[0] ^ 0xFF]))
+        st = os.stat(dump)  # bump mtime past any 1s filesystem granularity
+        os.utime(dump, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    ok, ev = _verify_race(_be(dump), mutate, monkeypatch)
+    assert ok is False and ev["identity_stable"] is False
+
+
+def test_backup_truncation_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    ok, ev = _verify_race(_be(dump), lambda: os.truncate(dump, 10), monkeypatch)
+    assert ok is False and ev["identity_stable"] is False
+
+
+def test_backup_substitution_before_pg_restore_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    other = tmp_path / "other.dump"
+    shutil.copy(_BACKUP["path"], other)
+    with open(other, "ab") as f:
+        f.write(b"\x00x")
+    real_run = apply_tool.subprocess.run
+    state = {"done": False}
+
+    def racing_run(cmd, *a, **k):
+        if not state["done"] and "--list" in cmd:
+            state["done"] = True
+            os.replace(str(other), dump)  # swap the path right before pg_restore
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(apply_tool.subprocess, "run", racing_run)
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["identity_stable"] is False
+
+
+def test_backup_open_perms_blocks(tmp_path):
+    ok, _ev = _verify(_be(_copy_dump(tmp_path, mode=0o644)))
+    assert ok is False
+
+
+def test_backup_proc_fd_unavailable_fails_closed(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(apply_tool.os.path, "isdir",
+                        lambda p: False if p == oe.PROC_SELF_FD else real_isdir(p))
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["pg_restore_list_verified"] is False
+
+
+def test_backup_path_never_in_report_or_repr(tmp_path):
+    dump = _copy_dump(tmp_path)
+    be = _be(dump)
+    _ok, ev = _verify(be)
+    assert dump not in json.dumps(ev, default=str)
+    assert dump not in repr(be)
+
+
+def test_backup_original_never_modified(tmp_path):
+    dump = _copy_dump(tmp_path)
+    before = Path(dump).read_bytes()
+    _verify(_be(dump, sha="e" * 64))  # sha mismatch -> blocks, but must not touch the file
+    assert Path(dump).read_bytes() == before
+
+
+def test_backup_relative_path_blocks(tmp_path):
+    ok, _ev = _verify(_be("relative/backup.dump", sha="e" * 64))  # explicit sha; file not read here
+    assert ok is False
+
+
+# --------------------------------------------------------------------------- #
+# §5v2: ceremony CLI exit codes (sanitized; no path/secret)
+# --------------------------------------------------------------------------- #
+def _bad_evidence(tmp_path) -> str:
+    p = tmp_path / "bad_evidence.json"
+    p.write_text('{"schema_version":1}\n', encoding="utf-8")  # missing required fields
+    os.chmod(p, 0o600)
+    return str(p)
+
+
+def test_cli_prepare_invalid_evidence_returns_3_no_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "self_hosted")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"plan_hash": "d" * 64}))
+    out = tmp_path / "request.json"
+    rc = apply_tool.main([
+        "--manifest-path", str(manifest), "--prepare-authorization-request",
+        "--operational-evidence-path", _bad_evidence(tmp_path),
+        "--operator-reference", "ops/ticket-1", "--output-path", str(out)])
+    assert rc == apply_tool.EXIT_INVALID_INPUT
+    assert not out.exists()  # blocked -> never creates the output
+
+
+def test_cli_verify_ceremony_invalid_evidence_returns_3(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "self_hosted")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"plan_hash": "d" * 64}))
+    pkg = tmp_path / "pkg.json"
+    pkg.write_text("{}")
+    sig = tmp_path / "pkg.sig"
+    sig.write_text("00")
+    rc = apply_tool.main([
+        "--manifest-path", str(manifest), "--verify-authorization-ceremony",
+        "--operational-evidence-path", _bad_evidence(tmp_path),
+        "--authorization-package-path", str(pkg), "--authorization-signature-path", str(sig)])
+    assert rc == apply_tool.EXIT_INVALID_INPUT
+    captured = capsys.readouterr()
+    # a JSON report is available and contains no path/secret
+    report = json.loads(captured.out)
+    assert report["apply_ready"] is False
+    for leak in (str(tmp_path), "private", "password", "BEGIN"):
+        assert leak not in captured.out and leak not in captured.err
+
+
+def test_exit_codes_are_stable():
+    assert (apply_tool.EXIT_OK, apply_tool.EXIT_GATES_BLOCKING,
+            apply_tool.EXIT_INVALID_INPUT, apply_tool.EXIT_UNEXPECTED) == (0, 2, 3, 4)
