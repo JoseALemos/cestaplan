@@ -1,9 +1,14 @@
 """Deterministic, fail-closed file manifests for build provenance.
 
 A manifest is a canonical description of a set of runtime files: a POSIX relative path, the SHA-256
-of the content, the byte size, and the git-tracked executable bit. It contains NO mtimes, owners,
-absolute paths or any other non-reproducible metadata, so the same source tree always yields the
-same manifest and the same hash — byte-for-byte, on any machine.
+of the content, and the byte size. It contains NO mtimes, owners, absolute paths or executable bit
+(the executable bit is deliberately OMITTED — it is not reproducible across git checkout vs image
+copy without a git-mode source, so the contract does not depend on it), so the same source tree
+always yields the same manifest and the same hash — byte-for-byte, on any machine.
+
+Hashing is race-safe: each file is read through a single file descriptor, with an ``fstat`` before
+and after the read plus a follow ``stat`` of the path, so a same-size in-place mutation, an atomic
+replacement, a type change or a truncation during the scan all fail closed.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import stat as statmod
 from pathlib import Path
 from typing import Any
 
@@ -55,41 +61,45 @@ def file_excluded(name: str) -> bool:
     return any(p.match(name) for p in _EXCLUDED_NAME_PATTERNS)
 
 
-def _hash_and_size(path: Path) -> tuple[str, int]:
-    h = hashlib.sha256()
-    n = 0
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(_CHUNK), b""):
-            h.update(chunk)
-            n += len(chunk)
-    return h.hexdigest(), n
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    """The identity fields that must not change while a file is hashed."""
+    return (st.st_size, st.st_ino, st.st_mode, st.st_mtime_ns, st.st_ctime_ns)
 
 
 def _add_file(base: Path, path: Path, entries: dict[str, dict[str, Any]]) -> None:
-    # Symlinks escaping the tree are rejected; an in-tree symlink is hashed by its target.
-    if path.is_symlink():
-        resolved = path.resolve()
-        try:
-            resolved.relative_to(base)
-        except ValueError as exc:
-            raise ProvenanceError("symlink_escapes_tree",
-                                  path.name) from exc  # sanitized: name only
-    try:
-        rel = path.resolve().relative_to(base).as_posix()
-    except ValueError as exc:
-        raise ProvenanceError("path_escapes_tree", path.name) from exc
+    # rel is the WALK-relative path (not resolved), so an in-tree symlink keeps its own name.
+    rel = path.relative_to(base).as_posix()
     if _CONTROL_RE.search(rel):
         raise ProvenanceError("control_char_in_path", "")
     if rel in entries:
         raise ProvenanceError("duplicate_path", rel)
-    size_before = path.stat().st_size
-    digest, size = _hash_and_size(path)
-    if size != size_before or size != path.stat().st_size:
+    # A symlink whose target escapes the tree is rejected; an in-tree symlink is hashed by target.
+    if path.is_symlink():
+        try:
+            path.resolve().relative_to(base)
+        except ValueError as exc:
+            raise ProvenanceError("symlink_escapes_tree", path.name) from exc  # name only
+    fd = os.open(path, os.O_RDONLY)  # follows an in-tree symlink to its target
+    try:
+        st0 = os.fstat(fd)
+        if not statmod.S_ISREG(st0.st_mode):
+            raise ProvenanceError("irregular_file", rel)
+        h = hashlib.sha256()
+        size = 0
+        while chunk := os.read(fd, _CHUNK):
+            h.update(chunk)
+            size += len(chunk)
+        st1 = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        after = os.stat(path)  # follow: detects an atomic replacement of the target
+    except OSError as exc:
+        raise ProvenanceError("file_changed_during_scan", rel) from exc
+    if (_stat_key(st0) != _stat_key(st1) or size != st1.st_size
+            or after.st_ino != st0.st_ino or not statmod.S_ISREG(after.st_mode)):
         raise ProvenanceError("file_changed_during_scan", rel)
-    entries[rel] = {
-        "path": rel, "sha256": digest, "size": size,
-        "executable": bool(path.stat().st_mode & 0o100),  # git-tracked user-exec bit only
-    }
+    entries[rel] = {"path": rel, "sha256": h.hexdigest(), "size": size}
 
 
 def build_manifest(base: str | os.PathLike[str], includes: list[str]) -> list[dict[str, Any]]:

@@ -9,11 +9,13 @@
 #   migrate -> alembic upgrade head   (Railway pre-deploy command / compose)
 
 # ---------- Builder: resolve and install dependencies with uv ----------
-FROM python:3.12-slim AS builder
+# Toolchain pinned by tag + digest (feat immutable-build-provenance v2). These digests MUST match
+# the constants in cestaplan_api/provenance/generator.py exactly (CI asserts equality and forbids a
+# floating tag or a digest-less FROM). Never float the base image or uv version.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS builder
 
-# uv provides fast, reproducible, lockfile-driven installs.
-# Pin to a specific uv release in production, e.g. ghcr.io/astral-sh/uv:0.5.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# uv provides fast, reproducible, lockfile-driven installs — pinned to a version + digest.
+COPY --from=ghcr.io/astral-sh/uv:0.9.8@sha256:08f409e1d53e77dfb5b65c788491f8ca70fe1d2d459f41c89afa2fcbef998abe /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -26,27 +28,32 @@ WORKDIR /app
 COPY apps/api/pyproject.toml apps/api/uv.lock apps/api/README.md ./
 RUN uv sync --frozen --no-install-project --no-dev
 
-# 2) Project layer: source, migrations and Alembic config.
+# 2) Project layer: source, migrations, Alembic config, Dockerfile + trust-root (hashed by every
+#    provenance scope, so /app is base-relative-identical to the repo apps/api).
 COPY apps/api/src ./src
 COPY apps/api/migrations ./migrations
 COPY apps/api/alembic.ini ./alembic.ini
+COPY apps/api/Dockerfile ./Dockerfile
+COPY apps/api/authorization-trust-root.json ./authorization-trust-root.json
 RUN uv sync --frozen --no-dev
 
-# 3) Immutable build provenance (feat immutable-build-provenance): a canonical, reproducible
-#    document over the runtime bundle (/app == repo apps/api, base-relative-identical). The commit
-#    MUST be supplied as a build arg; the build fails closed if valid evidence cannot be produced.
-#    NOTE: `railway up` does not set RAILWAY_GIT_COMMIT_SHA, so the deploy MUST pass
-#    `--build-arg BUILD_COMMIT_SHA=<full 40-hex commit>` (GitHub-integrated builds may instead
-#    provide RAILWAY_GIT_COMMIT_SHA). The document is baked into the image; no runtime var replaces it.
+# 3) Immutable build provenance: a canonical, reproducible document over the runtime bundle.
+#    The commit is resolved from BUILD_COMMIT_SHA > RAILWAY_GIT_COMMIT_SHA > APP_COMMIT_SHA; every
+#    present value must be 40-hex and two different present values FAIL the build. `railway up` has
+#    no `--build-arg` flag but Railway exposes SERVICE variables to the build ONLY when the Dockerfile
+#    declares the matching ARG — hence the three ARGs below. The build fails closed without a valid
+#    commit; the document is baked into the image and no runtime var can replace it.
 ARG BUILD_COMMIT_SHA=""
 ARG RAILWAY_GIT_COMMIT_SHA=""
-RUN COMMIT="${BUILD_COMMIT_SHA:-$RAILWAY_GIT_COMMIT_SHA}" \
-    && /app/.venv/bin/python -m cestaplan_api.provenance.generate \
-        --base /app --commit-sha "$COMMIT" \
-        --out /app/build-provenance.json --print-sha256
+ARG APP_COMMIT_SHA=""
+RUN BUILD_COMMIT_SHA="$BUILD_COMMIT_SHA" \
+    RAILWAY_GIT_COMMIT_SHA="$RAILWAY_GIT_COMMIT_SHA" \
+    APP_COMMIT_SHA="$APP_COMMIT_SHA" \
+    /app/.venv/bin/python -m cestaplan_api.provenance.generate \
+        --base /app --out /app/build-provenance.json --print-sha256
 
 # ---------- Runtime: slim, non-root ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 # Create an unprivileged user to run the app.
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app
@@ -61,7 +68,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
-    BUILD_PROVENANCE_PATH=/app/build-provenance.json
+    BUILD_PROVENANCE_PATH=/app/build-provenance.json \
+    BUILD_AUTHORIZATION_TRUST_ROOT_PATH=/app/authorization-trust-root.json
 
 USER app
 

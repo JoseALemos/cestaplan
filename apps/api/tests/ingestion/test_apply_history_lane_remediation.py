@@ -51,10 +51,31 @@ T1 = datetime(2026, 7, 26, 8, 0, tzinfo=UTC)
 T2 = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 _COMMIT = "4e43bad142b344274d7998cc80d54a708e118613"  # 40-hex
 _SRC, _API, _WRK, _DOC = "a" * 64, "b" * 64, "c" * 64, "d" * 64  # 64-hex
+_GENVER = "build-provenance-v1"
+_BACKUP_REF = "s3://cestaplan-backups/history-remediation.dump"
+_BACKUP_REF_HASH = hashlib.sha256(_BACKUP_REF.encode()).hexdigest()
+# The baked trust-root ships EMPTY in this PR (no real key); its hash binds the build identity.
+_TRUST_ROOT_PATH = str(Path(__file__).resolve().parents[2] / "authorization-trust-root.json")
+_TRUST_HASH = hashlib.sha256(Path(_TRUST_ROOT_PATH).read_bytes()).hexdigest()
 CONFIRM = ("I_UNDERSTAND_THIS_WRITES", "PLAN_REVIEWED", "BACKUP_VERIFIED")
 RESTORE_CONFIRM = ("I_UNDERSTAND_THIS_RESTORES", "RUN_REVIEWED")
 
 _BACKUP: dict[str, Any] = {}
+
+
+@pytest.fixture(autouse=True)
+def _bake_trust_root():
+    """Point the executor at the baked (empty) trust-root file for the whole module. Uses os.environ
+    directly (not monkeypatch) so a test's own monkeypatch.undo() cannot clear it."""
+    prev = os.environ.get("BUILD_AUTHORIZATION_TRUST_ROOT_PATH")
+    os.environ["BUILD_AUTHORIZATION_TRUST_ROOT_PATH"] = _TRUST_ROOT_PATH
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("BUILD_AUTHORIZATION_TRUST_ROOT_PATH", None)
+        else:
+            os.environ["BUILD_AUTHORIZATION_TRUST_ROOT_PATH"] = prev
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -85,11 +106,6 @@ def _backup_evidence(now: datetime) -> Any:
         path=_BACKUP["path"], expected_sha256=_BACKUP["sha256"], created_at=now,
         expected_postgres_version=_BACKUP["pg_major"],
         storage_reference="s3://cestaplan-backups/history-remediation.dump")
-
-
-def _prov():
-    return (apply_tool.BuildProvenance(_COMMIT, _SRC, _API, _WRK, _DOC),
-            apply_tool.ExpectedProvenance(_COMMIT, _SRC, _API, _WRK, _DOC))
 
 
 def _fixture(db: Session):
@@ -135,14 +151,23 @@ def _live_counts(db: Session) -> tuple[int, int]:
 
 def _ctx(db: Session, *, backup: Any = "default", **over):
     pp, mp = _live_counts(db)
-    obs, exp = _prov()
     now = datetime.now(UTC)
+    live_alembic = _alembic(db)
+    _exp = apply_tool.ExpectedProvenance(_COMMIT, _SRC, _API, _WRK, _DOC)
+    # A FULL observed document (alembic + generator + trust-root) so the build-identity gates pass.
+    obs = apply_tool.BuildProvenance(
+        _COMMIT, _SRC, _API, _WRK, _DOC, alembic_revision=live_alembic,
+        generator_version=_GENVER, authorization_trust_root_hash=_TRUST_HASH)
     be = _backup_evidence(now) if backup == "default" else backup
     base = {
         "app_commit_sha": _COMMIT, "deployed_api_sha": _COMMIT, "deployed_worker_sha": _COMMIT,
-        "expected_main_sha": _COMMIT, "expected_alembic": _alembic(db),
-        "observed_provenance": obs, "expected_provenance": exp,
+        "expected_main_sha": _COMMIT, "expected_alembic": live_alembic,
+        "observed_provenance": obs, "expected_provenance": _exp,
         "expected_product_price": pp, "expected_active_mappings": mp, "backup": be,
+        # Backup binding — as if fed by a signed package (the internal explicit API; §1v2).
+        "expected_backup_sha256": _BACKUP["sha256"],
+        "expected_backup_storage_reference": _BACKUP_REF,
+        "expected_backup_storage_reference_hash": _BACKUP_REF_HASH,
         "operator_reference": "ticket-OPS-1", "now": now}
     base.update(over)
     return apply_tool.ApplyContext(**base)
@@ -541,9 +566,14 @@ def test_bad_backup_sha_blocks(db_session: Session) -> None:  # §9
 # §1 provenance — 7 exact-comparison cases
 # --------------------------------------------------------------------------- #
 def _prov_blocking(db, m, *, observed=None, expected=None):
-    o, e = _prov()
-    return _blocking(db, m, _ctx(db, observed_provenance=observed or o,
-                                 expected_provenance=expected or e))
+    # Only override observed/expected when a test supplies one; otherwise use the FULL default ctx
+    # (so the build-identity gates pass and provenance_exact yields no blockers).
+    over: dict[str, Any] = {}
+    if observed is not None:
+        over["observed_provenance"] = observed
+    if expected is not None:
+        over["expected_provenance"] = expected
+    return _blocking(db, m, _ctx(db, **over))
 
 
 def test_provenance_absent_blocks(db_session: Session) -> None:  # §1.1
@@ -1976,6 +2006,136 @@ def test_sanitize_storage_reference_keeps_valid() -> None:  # §4v5
     for ref in ("backup-20260727-abc123", "s3://bucket/history/backup.dump",
                 "gs://bucket/history/backup.dump"):
         assert apply_tool.sanitize_storage_reference(ref) == ref, ref
+
+
+# =========================================================================== #
+# provenance v2 — §1 backup bound to the signed package, §3 full build identity,
+# and the operational override guard.
+# =========================================================================== #
+def _obsprov(commit=_COMMIT, alembic=None, trust=None):
+    return apply_tool.BuildProvenance(
+        commit, _SRC, _API, _WRK, _DOC, alembic_revision=alembic,
+        generator_version=_GENVER, authorization_trust_root_hash=trust or _TRUST_HASH)
+
+
+def test_backup_gate_passes_when_bound_to_package(db_session: Session) -> None:  # §1.1
+    _r, _v = _fixture(db_session)
+    _dup_lane(db_session, _r.id, _v.id)
+    assert apply_tool._backup_gate(db_session, _ctx(db_session))[0] is True
+
+
+def test_backup_gate_blocks_on_wrong_expected_sha(db_session: Session) -> None:  # §1.2
+    _r, m = _dup_manifest(db_session)
+    assert "backup_verified" in _blocking(
+        db_session, m, _ctx(db_session, expected_backup_sha256="e" * 64))
+
+
+def test_backup_gate_blocks_on_wrong_reference(db_session: Session) -> None:  # §1.3
+    _r, m = _dup_manifest(db_session)
+    b = _blocking(db_session, m, _ctx(
+        db_session, expected_backup_storage_reference="s3://other-bucket/x.dump",
+        expected_backup_storage_reference_hash=hashlib.sha256(b"s3://other-bucket/x.dump").hexdigest()))
+    assert "backup_verified" in b
+
+
+def test_backup_gate_blocks_on_noncanonical_reference(db_session: Session) -> None:  # §1.4
+    _r, m = _dup_manifest(db_session)
+    variant = _BACKUP_REF.replace("s3://", "S3://")  # equivalent target, non-canonical form
+    b = _blocking(db_session, m, _ctx(
+        db_session, expected_backup_storage_reference=variant,
+        expected_backup_storage_reference_hash=hashlib.sha256(variant.encode()).hexdigest()))
+    assert "backup_verified" in b
+
+
+def test_backup_gate_blocks_without_package_binding(db_session: Session) -> None:  # §1.5
+    _r, m = _dup_manifest(db_session)
+    b = _blocking(db_session, m, _ctx(
+        db_session, expected_backup_sha256=None, expected_backup_storage_reference=None,
+        expected_backup_storage_reference_hash=None))
+    assert "backup_verified" in b
+
+
+def test_authorization_identity_persisted_and_sealed(db_session: Session) -> None:  # §1.6
+    r, v = _fixture(db_session)
+    _dup_lane(db_session, r.id, v.id)
+    m = _make_manifest(db_session)
+    gen = datetime(2026, 7, 27, 11, 0, tzinfo=UTC)
+    exp = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+    ctx = _ctx(db_session, authorization_id="auth-xyz", authorization_package_hash="a" * 64,
+               authorization_key_fingerprint="deadbeefdeadbeef", authorization_generated_at=gen,
+               authorization_expires_at=exp)
+    res = _apply(db_session, m, ctx)
+    run = db_session.execute(select(HistoryRemediationRun).where(
+        HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
+    assert run.authorization_id == "auth-xyz" and run.authorization_package_hash == "a" * 64
+    assert run.expected_backup_sha256 == _BACKUP["sha256"]
+    assert run.execution_hash == apply_tool._run_execution_hash(run, list(db_session.execute(
+        select(HistoryRemediationChange).where(
+            HistoryRemediationChange.remediation_run_id == run.id)).scalars()))
+    # tampering the sealed authorization id must break the restore seal
+    db_session.execute(text("UPDATE history_remediation_run SET authorization_id='tampered' "
+                            "WHERE id=:i"), {"i": run.id})
+    db_session.flush()
+    db_session.expire_all()  # force the restore to re-read the tampered row
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "run_execution_hash_mismatch"
+
+
+def test_identity_blocks_when_doc_commit_differs_from_app(db_session: Session) -> None:  # §3.1
+    _r, m = _dup_manifest(db_session)
+    assert "build_doc_commit_matches_app" in _blocking(
+        db_session, m, _ctx(db_session, observed_provenance=_obsprov(commit="b" * 40,
+                                                                 alembic=_alembic(db_session))))
+
+
+def test_identity_blocks_when_package_main_ne_expected(db_session: Session) -> None:  # §3.2
+    _r, m = _dup_manifest(db_session)
+    assert "package_main_matches_expected" in _blocking(
+        db_session, m, _ctx(db_session, expected_provenance=apply_tool.ExpectedProvenance(
+            "b" * 40, _SRC, _API, _WRK, _DOC)))
+
+
+def test_identity_blocks_when_doc_alembic_differs_from_package(db_session: Session) -> None:  # §3.3
+    _r, m = _dup_manifest(db_session)
+    assert "build_doc_alembic_matches_package" in _blocking(
+        db_session, m, _ctx(db_session, observed_provenance=_obsprov(alembic="deadbeef")))
+
+
+def test_identity_blocks_when_doc_alembic_differs_from_live_db(db_session: Session) -> None:  # §3.4
+    _r, m = _dup_manifest(db_session)
+    # observed==expected==a valid-but-not-live revision -> matches_package ok, matches_live fails
+    b = _blocking(db_session, m, _ctx(
+        db_session, observed_provenance=_obsprov(alembic="oldrevision"),
+        expected_alembic="oldrevision"))
+    assert "build_doc_alembic_matches_live" in b
+    assert "build_doc_alembic_matches_package" not in b
+
+
+def test_identity_blocks_when_trust_root_differs(db_session: Session) -> None:  # §3.5
+    _r, m = _dup_manifest(db_session)
+    assert "trust_root_matches_document" in _blocking(
+        db_session, m, _ctx(db_session, observed_provenance=_obsprov(alembic=_alembic(db_session),
+                                                                 trust="f" * 64)))
+
+
+def test_identity_passes_with_exact_full_identity(db_session: Session) -> None:  # §3.6
+    _r, v = _fixture(db_session)
+    _dup_lane(db_session, _r.id, v.id)
+    m = _make_manifest(db_session)
+    blocking = _blocking(db_session, m, _ctx(db_session))
+    for g in ("build_doc_commit_matches_app", "package_main_matches_expected",
+              "build_doc_alembic_matches_package", "build_doc_alembic_matches_live",
+              "trust_root_matches_document"):
+        assert g not in blocking, g
+
+
+def test_from_environment_forbids_expected_overrides(monkeypatch) -> None:  # §1 operational guard
+    monkeypatch.setenv("APP_COMMIT_SHA", _COMMIT)
+    with pytest.raises(apply_tool.ApplyNotAuthorized) as ei:
+        apply_tool.ApplyContext.from_environment(plan_hash="d" * 64,
+                                                 expected_backup_sha256="e" * 64)
+    assert ei.value.code == "override_forbidden_operational_path"
 
 
 # uses timedelta to keep the import meaningful for future window tests

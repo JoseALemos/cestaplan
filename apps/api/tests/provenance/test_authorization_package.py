@@ -58,11 +58,16 @@ def _base_package(**over) -> dict:
     return pkg
 
 
+def _canonical_bytes(pkg: dict) -> bytes:
+    """The one valid encoding: canonical JSON (with self-hash) + trailing newline."""
+    return (_canonical(pkg) + "\n").encode()
+
+
 def _seal(pkg: dict, *, recompute_hash: bool = True) -> bytes:
+    pkg = dict(pkg)
     if recompute_hash:
-        pkg = dict(pkg)
         pkg["authorization_package_hash"] = hashlib.sha256(_canonical(pkg).encode()).hexdigest()
-    return json.dumps(pkg).encode()
+    return _canonical_bytes(pkg)
 
 
 def _sign(package_bytes: bytes, sk: Ed25519PrivateKey) -> str:
@@ -125,7 +130,7 @@ def test_altered_package_with_stale_self_hash_is_rejected() -> None:
     pkg = _base_package()
     pkg["authorization_package_hash"] = hashlib.sha256(_canonical(pkg).encode()).hexdigest()
     pkg["expected_product_price"] = 99  # mutate AFTER computing the self-hash
-    body = json.dumps(pkg).encode()
+    body = _canonical_bytes(pkg)  # canonical bytes of the mutated package (stale self-hash)
     sig = _sign(body, sk)  # re-sign so the signature is valid over the altered bytes
     with pytest.raises(AuthorizationError) as ei:
         load_authorization_package(body, sig, authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
@@ -188,12 +193,118 @@ def test_missing_field_is_rejected() -> None:
     pkg = _base_package()
     del pkg["expected_source_hash"]
     pkg["authorization_package_hash"] = hashlib.sha256(_canonical(pkg).encode()).hexdigest()
-    body = json.dumps(pkg).encode()
+    body = _canonical_bytes(pkg)
     with pytest.raises(AuthorizationError) as ei:
         load_authorization_package(body, _sign(body, sk),
                                    authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
                                    expected_plan_hash=_PLAN)
     assert ei.value.code == "package_fields_mismatch"
+
+
+# ---- v2: strictly-canonical package, RFC3339/tz, race-safe file loading ----
+def test_non_canonical_bytes_rejected() -> None:  # §4
+    sk = Ed25519PrivateKey.generate()
+    pkg = _base_package()
+    pkg["authorization_package_hash"] = hashlib.sha256(_canonical(pkg).encode()).hexdigest()
+    body = (json.dumps(pkg, indent=2) + "\n").encode()  # valid JSON but NOT canonical (whitespace)
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, _sign(body, sk),
+                                   authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "package_not_canonical"
+
+
+def test_missing_trailing_newline_rejected() -> None:  # §4
+    sk = Ed25519PrivateKey.generate()
+    body = _seal(_base_package()).rstrip(b"\n")  # drop the required trailing newline
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, _sign(body, sk),
+                                   authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "package_not_canonical"
+
+
+def test_duplicate_json_key_rejected() -> None:  # §4
+    sk = Ed25519PrivateKey.generate()
+    body = _seal(_base_package())
+    injected = body.replace(b'{', b'{"schema_version":1,', 1)  # a duplicate schema_version key
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(injected, _sign(injected, sk),
+                                   authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "duplicate_json_key"
+
+
+def test_uppercase_signature_rejected() -> None:  # §4
+    body, sig, pk = _make()
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, sig.upper(), authorized_public_keys=[pk], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "signature_malformed"
+
+
+def test_naive_now_rejected() -> None:  # §4
+    body, sig, pk = _make()
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, sig, authorized_public_keys=[pk],
+                                   now=datetime(2026, 7, 27, 12, 0), expected_plan_hash=_PLAN)
+    assert ei.value.code == "now_not_tz_aware"
+
+
+def test_non_rfc3339_timestamp_rejected() -> None:  # §4
+    body, sig, pk = _make(generated_at="2026-07-27 11:55:00+00:00")  # space, not 'T'
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, sig, authorized_public_keys=[pk], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "generated_at_invalid"
+
+
+def test_non_utc_timestamp_rejected() -> None:  # §4
+    body, sig, pk = _make(generated_at="2026-07-27T13:55:00+02:00")  # not UTC
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, sig, authorized_public_keys=[pk], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "generated_at_invalid"
+
+
+def test_generated_too_long_ago_rejected() -> None:  # §4
+    body, sig, pk = _make(generated_at=(_NOW - timedelta(hours=2)).isoformat(),
+                          expires_at=(_NOW + timedelta(hours=2)).isoformat())  # unexpired but stale
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package(body, sig, authorized_public_keys=[pk], now=_NOW,
+                                   expected_plan_hash=_PLAN)
+    assert ei.value.code == "package_generated_too_long_ago"
+
+
+def test_z_suffix_timestamp_accepted() -> None:  # §4 — RFC3339 'Z' is canonical UTC
+    body, sig, pk = _make(generated_at="2026-07-27T11:55:00Z", expires_at="2026-07-27T12:30:00Z")
+    pkg = load_authorization_package(body, sig, authorized_public_keys=[pk], now=_NOW,
+                                     expected_plan_hash=_PLAN)
+    assert pkg.generated_at.tzinfo is not None
+
+
+def test_file_loader_bad_utf8_rejected(tmp_path) -> None:  # §4
+    from cestaplan_api.provenance import load_authorization_package_from_files
+    sk = Ed25519PrivateKey.generate()
+    body = b"\xff\xfe not valid utf-8"
+    pkg_path = tmp_path / "pkg.json"
+    sig_path = tmp_path / "pkg.sig"
+    pkg_path.write_bytes(body)
+    sig_path.write_text(sk.sign(body).hex())  # valid signature over the (bad-utf8) bytes
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package_from_files(pkg_path, sig_path,
+                                              authorized_public_keys=[_pubkey_hex(sk)], now=_NOW,
+                                              expected_plan_hash=_PLAN)
+    assert ei.value.code == "package_not_utf8"
+
+
+def test_file_loader_missing_file_sanitized(tmp_path) -> None:  # §4 — no path/traceback leak
+    from cestaplan_api.provenance import load_authorization_package_from_files
+    with pytest.raises(AuthorizationError) as ei:
+        load_authorization_package_from_files(tmp_path / "nope.json", tmp_path / "nope.sig",
+                                              authorized_public_keys=[], now=_NOW,
+                                              expected_plan_hash=_PLAN)
+    assert ei.value.code == "package_unreadable" and str(tmp_path) not in str(ei.value)
 
 
 def test_sensitive_data_is_rejected() -> None:

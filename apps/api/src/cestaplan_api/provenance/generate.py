@@ -19,6 +19,7 @@ from cestaplan_api.provenance.generator import (
     detect_alembic_head,
     generate_provenance_document,
     render_document,
+    resolve_commit_sha,
 )
 from cestaplan_api.provenance.manifest import ProvenanceError
 
@@ -27,8 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base", default=os.environ.get("PROVENANCE_BASE", "."),
                    help="bundle root: src/, migrations/, alembic.ini, pyproject.toml, uv.lock")
-    p.add_argument("--commit-sha", default=os.environ.get("APP_COMMIT_SHA")
-                   or os.environ.get("RAILWAY_GIT_COMMIT_SHA"))
+    p.add_argument("--commit-sha", default=None,
+                   help="explicit override; else resolved from the build env vars")
     p.add_argument("--alembic-revision", default=None,
                    help="override; otherwise resolved from the migration scripts")
     p.add_argument("--out", default=None, help="write the document here (else stdout)")
@@ -36,9 +37,15 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
 
     base = Path(a.base)
-    commit = a.commit_sha
-    if not commit:
-        raise SystemExit("FAIL: commit sha missing (set APP_COMMIT_SHA or --commit-sha)")
+    try:
+        # Priority BUILD_COMMIT_SHA > RAILWAY_GIT_COMMIT_SHA > APP_COMMIT_SHA; conflicting values
+        # (two present and different) fail the build (§5).
+        commit = a.commit_sha.strip() if a.commit_sha else resolve_commit_sha({
+            "BUILD_COMMIT_SHA": os.environ.get("BUILD_COMMIT_SHA"),
+            "RAILWAY_GIT_COMMIT_SHA": os.environ.get("RAILWAY_GIT_COMMIT_SHA"),
+            "APP_COMMIT_SHA": os.environ.get("APP_COMMIT_SHA")})
+    except ProvenanceError as exc:
+        raise SystemExit(f"FAIL: commit resolution failed: {exc.code}") from exc
     revision = a.alembic_revision or detect_alembic_head(base / "migrations")
     try:
         doc = generate_provenance_document(base, commit, revision)

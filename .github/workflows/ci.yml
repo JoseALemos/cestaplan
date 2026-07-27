@@ -191,6 +191,27 @@ jobs:
         working-directory: apps/api
         run: uv sync --frozen
 
+      - name: Toolchain pinning matches the Dockerfile (no :latest, every FROM has a digest)
+        working-directory: apps/api
+        run: |
+          uv run python - <<'PY'
+          import re
+          from pathlib import Path
+          from cestaplan_api.provenance import generator as g
+          lines = [ln for ln in Path("Dockerfile").read_text().splitlines()
+                   if not ln.lstrip().startswith("#")]
+          df = "\n".join(lines)
+          assert ":latest" not in df, "FAIL: a floating tag (:latest) is forbidden"
+          refs = re.findall(r"^FROM\s+(\S+)", df, re.M) + re.findall(r"COPY --from=(\S+)", df)
+          # image refs contain a registry/tag separator; bare words (builder/runtime) are stages.
+          images = [r for r in refs if ("/" in r or ":" in r)]
+          for img in images:
+              assert "@sha256:" in img, f"FAIL: digest-less image reference: {img}"
+          assert g.PYTHON_BASE_IMAGE_DIGEST in df, "FAIL: python base digest != generator constant"
+          assert g.UV_IMAGE_DIGEST in df, "FAIL: uv image digest != generator constant"
+          print("toolchain pinning OK")
+          PY
+
       - name: Generate twice and require byte-for-byte equality
         working-directory: apps/api
         run: |
@@ -229,12 +250,23 @@ jobs:
       - name: Require image document == repo-reproduced document
         run: cmp /tmp/build-provenance.json /tmp/image-provenance.json
 
+      - name: Publish the trust-root (public keys + its hash only)
+        working-directory: apps/api
+        run: |
+          cp authorization-trust-root.json /tmp/authorization-trust-root.json
+          sha256sum authorization-trust-root.json | cut -d' ' -f1 \
+            > /tmp/authorization-trust-root.sha256
+
       - name: Upload provenance artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-provenance
+          # Only the document, its hash, sanitized manifests and the PUBLIC trust-root — never a
+          # package, signature or private key.
           path: |
             /tmp/build-provenance.json
             /tmp/build-provenance.json.sha256
             /tmp/manifest-api.json
             /tmp/manifest-worker.json
+            /tmp/authorization-trust-root.json
+            /tmp/authorization-trust-root.sha256

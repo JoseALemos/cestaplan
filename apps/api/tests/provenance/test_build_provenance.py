@@ -41,6 +41,9 @@ def _bundle(root: Path) -> Path:
     (root / "alembic.ini").write_text("[alembic]\nscript_location = migrations\n")
     (root / "pyproject.toml").write_text("[project]\nname='x'\n")
     (root / "uv.lock").write_text("version = 1\n")
+    (root / "Dockerfile").write_text("FROM python:3.12-slim@sha256:" + "0" * 64 + "\n")
+    (root / "authorization-trust-root.json").write_text(
+        '{"authorized_ed25519_public_keys":[],"schema_version":1}\n')
     return root
 
 
@@ -58,8 +61,114 @@ def test_all_three_scope_hashes_are_valid_and_distinct(tmp_path: Path) -> None:
     hashes = {doc["source_tree_hash"], doc["api_artifact_hash"], doc["worker_artifact_hash"]}
     assert len(hashes) == 3
     assert all(len(h) == 64 and all(c in "0123456789abcdef" for c in h) for h in hashes)
-    assert doc["schema_version"] == 1 and doc["generator_version"] == "build-provenance-v1"
+    assert doc["schema_version"] == 2 and doc["generator_version"] == "build-provenance-v1"
     assert doc["commit_sha"] == _COMMIT and doc["alembic_revision"] == "360a55cb6abb"
+    assert doc["toolchain_contract_version"] == g.TOOLCHAIN_CONTRACT_VERSION
+    assert doc["python_base_image_digest"] == g.PYTHON_BASE_IMAGE_DIGEST
+    assert doc["uv_image_digest"] == g.UV_IMAGE_DIGEST
+    assert len(doc["authorization_trust_root_hash"]) == 64
+
+
+def test_manifest_has_no_executable_field(tmp_path: Path) -> None:
+    manifest = build_manifest(_bundle(tmp_path), ["pyproject.toml"])
+    assert manifest and set(manifest[0]) == {"path", "sha256", "size"}
+
+
+def test_dockerfile_change_moves_all_three_hashes(tmp_path: Path) -> None:  # §6
+    base = _bundle(tmp_path)
+    before = _doc(base)
+    (base / "Dockerfile").write_text("FROM python:3.12-slim@sha256:" + "1" * 64 + "\n")
+    after = _doc(base)
+    for k in ("source_tree_hash", "api_artifact_hash", "worker_artifact_hash"):
+        assert after[k] != before[k], k
+
+
+def test_trust_root_change_moves_all_three_hashes(tmp_path: Path) -> None:  # §2/§6
+    base = _bundle(tmp_path)
+    before = _doc(base)
+    (base / "authorization-trust-root.json").write_text(
+        '{"authorized_ed25519_public_keys":["' + "aa" * 32 + '"],"schema_version":1}\n')
+    after = _doc(base)
+    for k in ("source_tree_hash", "api_artifact_hash", "worker_artifact_hash"):
+        assert after[k] != before[k], k
+    assert after["authorization_trust_root_hash"] != before["authorization_trust_root_hash"]
+
+
+def test_commit_resolver_priority_and_conflict() -> None:  # §5
+    r = g.resolve_commit_sha
+    assert r({"BUILD_COMMIT_SHA": _COMMIT, "RAILWAY_GIT_COMMIT_SHA": None,
+              "APP_COMMIT_SHA": None}) == _COMMIT
+    assert r({"BUILD_COMMIT_SHA": None, "RAILWAY_GIT_COMMIT_SHA": _COMMIT,
+              "APP_COMMIT_SHA": None}) == _COMMIT
+    assert r({"APP_COMMIT_SHA": _COMMIT}) == _COMMIT
+    assert r({"BUILD_COMMIT_SHA": _COMMIT, "APP_COMMIT_SHA": _COMMIT}) == _COMMIT  # two equal ok
+    # priority: BUILD wins over the others when all present and equal is required — but conflict:
+    for bad in ({"BUILD_COMMIT_SHA": _COMMIT, "APP_COMMIT_SHA": "b" * 40},
+                {"RAILWAY_GIT_COMMIT_SHA": _COMMIT, "APP_COMMIT_SHA": "b" * 40}):
+        with pytest.raises(ProvenanceError) as ei:
+            r(bad)
+        assert ei.value.code == "commit_sha_conflict"
+    with pytest.raises(ProvenanceError) as ei:
+        r({})
+    assert ei.value.code == "commit_sha_missing"
+
+
+def test_same_size_mutation_during_hash_blocks(tmp_path: Path, monkeypatch) -> None:  # §7
+    base = _bundle(tmp_path)
+    from cestaplan_api.provenance import manifest as mani
+    real_read = os.read
+    state = {"done": False}
+
+    def racing_read(fd, n):
+        data = real_read(fd, n)
+        if data and not state["done"]:
+            state["done"] = True
+            st = os.fstat(fd)
+            os.utime(fd, ns=(st.st_mtime_ns + 10 ** 9, st.st_mtime_ns + 10 ** 9))  # new mtime
+        return data
+
+    monkeypatch.setattr(mani.os, "read", racing_read)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["pyproject.toml"])
+    assert ei.value.code == "file_changed_during_scan"
+
+
+def test_atomic_replacement_during_scan_blocks(tmp_path: Path, monkeypatch) -> None:  # §7
+    base = _bundle(tmp_path)
+    target = base / "pyproject.toml"
+    replacement = base / "pyproject.toml.new"
+    replacement.write_text("[project]\nname='replaced'\n")
+    from cestaplan_api.provenance import manifest as mani
+    real_read = os.read
+    state = {"done": False}
+
+    def racing_read(fd, n):
+        data = real_read(fd, n)
+        if data and not state["done"]:
+            state["done"] = True
+            os.replace(replacement, target)  # new inode over the same path
+        return data
+
+    monkeypatch.setattr(mani.os, "read", racing_read)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["pyproject.toml"])
+    assert ei.value.code == "file_changed_during_scan"
+
+
+def test_internal_symlink_is_hashed_not_rejected(tmp_path: Path) -> None:  # §7
+    base = _bundle(tmp_path)
+    os.symlink(base / "src/cestaplan_api/__init__.py", base / "src/cestaplan_api/alias.py")
+    manifest = build_manifest(base, ["src/cestaplan_api"])
+    paths = {e["path"] for e in manifest}
+    assert "src/cestaplan_api/alias.py" in paths  # in-tree symlink is included by its own name
+
+
+def test_repo_and_copied_bundle_produce_identical_document(tmp_path: Path) -> None:  # §7
+    base = _bundle(tmp_path)
+    import shutil
+    copy = tmp_path / "copy"
+    shutil.copytree(base, copy, symlinks=False)
+    assert g.render_document(_doc(base)) == g.render_document(_doc(copy))
 
 
 def test_api_only_change_moves_only_api_hash(tmp_path: Path) -> None:  # §4.4
@@ -157,7 +266,7 @@ def test_cli_writes_document_and_is_reproducible(tmp_path: Path) -> None:
     assert main(["--base", str(base), "--commit-sha", _COMMIT, "--out", str(out2)]) == 0
     assert out1.read_bytes() == out2.read_bytes()
     doc = json.loads(out1.read_text())
-    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 1
+    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 2
 
 
 def test_generation_holds_under_optimize(tmp_path: Path) -> None:

@@ -103,6 +103,15 @@ class HistoryRemediationRun(BaseModel):
     backup_storage_reference_hash: Mapped[str | None] = mapped_column(Text)
     backup_evidence_hash: Mapped[str | None] = mapped_column(Text)
 
+    # --- Sealed authorization identity + expected backup, from the signed package (§1v2) ----------
+    authorization_id: Mapped[str | None] = mapped_column(Text)
+    authorization_package_hash: Mapped[str | None] = mapped_column(Text)
+    authorization_key_fingerprint: Mapped[str | None] = mapped_column(Text)  # sanitized fingerprint
+    authorization_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorization_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expected_backup_sha256: Mapped[str | None] = mapped_column(Text)
+    expected_backup_storage_reference_hash: Mapped[str | None] = mapped_column(Text)
+
     # --- Post-apply evidence for a same-controls restore (§4), sanitized ---
     post_apply_occurrence_hashes: Mapped[dict | None] = mapped_column(JSONB)
     post_apply_supported_fk_hashes: Mapped[dict | None] = mapped_column(JSONB)

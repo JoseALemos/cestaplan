@@ -24,22 +24,59 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from cestaplan_api.provenance.manifest import ProvenanceError, build_manifest, manifest_hash
 
-EVIDENCE_DOCUMENT_SCHEMA_VERSION = 1
+# schema_version 2 adds the toolchain digests + trust-root hash so the document cannot stay the same
+# when the base image, uv version or authorization trust-root change (v2).
+EVIDENCE_DOCUMENT_SCHEMA_VERSION = 2
 GENERATOR_VERSION = "build-provenance-v1"
 
-SOURCE_TREE_INCLUDES = ["src", "migrations", "alembic.ini", "pyproject.toml", "uv.lock"]
+# --- Pinned toolchain (MUST match apps/api/Dockerfile exactly; CI asserts equality) ---------------
+TOOLCHAIN_CONTRACT_VERSION = "toolchain-v1"
+PYTHON_BASE_IMAGE = "python:3.12-slim"
+PYTHON_BASE_IMAGE_DIGEST = \
+    "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+UV_IMAGE = "ghcr.io/astral-sh/uv:0.9.8"
+UV_IMAGE_DIGEST = "sha256:08f409e1d53e77dfb5b65c788491f8ca70fe1d2d459f41c89afa2fcbef998abe"
+
+TRUST_ROOT_FILENAME = "authorization-trust-root.json"
+# Fixed, baked path — never substituted by a runtime env var in production.
+BUILD_AUTHORIZATION_TRUST_ROOT_PATH = "/app/authorization-trust-root.json"
+
+# Build-affecting, runtime-relevant files hashed in EVERY scope (Dockerfile + trust-root move all
+# three hashes, so a toolchain or trust-root change can never leave the hashes unchanged).
+_BUILD_FILES = ["Dockerfile", TRUST_ROOT_FILENAME]
+SOURCE_TREE_INCLUDES = ["src", "migrations", "alembic.ini", "pyproject.toml", "uv.lock",
+                        *_BUILD_FILES]
 API_ARTIFACT_INCLUDES = ["src/cestaplan_api", "src/cestaplan_engine", "migrations", "alembic.ini",
-                         "pyproject.toml", "uv.lock"]
+                         "pyproject.toml", "uv.lock", *_BUILD_FILES]
 WORKER_ARTIFACT_INCLUDES = ["src/cestaplan_api", "src/cestaplan_engine", "src/cestaplan_worker",
-                            "pyproject.toml", "uv.lock"]
+                            "pyproject.toml", "uv.lock", *_BUILD_FILES]
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _REVISION_RE = re.compile(r"^[0-9a-z_]{6,64}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def resolve_commit_sha(sources: Mapping[str, str | None]) -> str:
+    """Resolve the build commit from BUILD_COMMIT_SHA / RAILWAY_GIT_COMMIT_SHA / APP_COMMIT_SHA in
+    that priority order (v2/§5). Every present value must be 40-hex; if two are present and DIFFER
+    the build fails — a silent pick between contradictory values is never allowed."""
+    present = {name: v.strip() for name, v in sources.items() if isinstance(v, str) and v.strip()}
+    for name, v in present.items():
+        if not _COMMIT_RE.match(v):
+            raise ProvenanceError("commit_sha_invalid", name)
+    distinct = set(present.values())
+    if len(distinct) > 1:
+        raise ProvenanceError("commit_sha_conflict", ",".join(sorted(present)))
+    for name in ("BUILD_COMMIT_SHA", "RAILWAY_GIT_COMMIT_SHA", "APP_COMMIT_SHA"):
+        if name in present:
+            return present[name]
+    raise ProvenanceError("commit_sha_missing", "")
 
 
 def canonical_json(obj: Any) -> str:
@@ -72,11 +109,17 @@ def detect_alembic_head(migrations_dir: str | Path) -> str:
 def generate_provenance_document(base: str | Path, commit_sha: str,
                                  alembic_revision: str) -> dict[str, Any]:
     """Build the canonical provenance document. Fail-closed on a missing/invalid commit or revision.
-    Contains NO timestamps or non-reproducible metadata."""
+    Contains NO timestamps or non-reproducible metadata; the toolchain digests come from reviewed
+    constants that must match the Dockerfile (CI asserts equality)."""
     if not isinstance(commit_sha, str) or not _COMMIT_RE.match(commit_sha):
         raise ProvenanceError("commit_sha_invalid", "")
     if not isinstance(alembic_revision, str) or not _REVISION_RE.match(alembic_revision):
         raise ProvenanceError("alembic_revision_invalid", "")
+    for digest in (PYTHON_BASE_IMAGE_DIGEST, UV_IMAGE_DIGEST):
+        if not _DIGEST_RE.match(digest):
+            raise ProvenanceError("toolchain_digest_invalid", "")
+    from cestaplan_api.provenance.trust_root import trust_root_hash
+    trust_hash = trust_root_hash(Path(base) / TRUST_ROOT_FILENAME)
     src = manifest_hash(build_manifest(base, SOURCE_TREE_INCLUDES))
     api = manifest_hash(build_manifest(base, API_ARTIFACT_INCLUDES))
     worker = manifest_hash(build_manifest(base, WORKER_ARTIFACT_INCLUDES))
@@ -88,6 +131,10 @@ def generate_provenance_document(base: str | Path, commit_sha: str,
         "worker_artifact_hash": worker,
         "alembic_revision": alembic_revision,
         "generator_version": GENERATOR_VERSION,
+        "toolchain_contract_version": TOOLCHAIN_CONTRACT_VERSION,
+        "python_base_image_digest": PYTHON_BASE_IMAGE_DIGEST,
+        "uv_image_digest": UV_IMAGE_DIGEST,
+        "authorization_trust_root_hash": trust_hash,
     }
 
 

@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 APPLY_TOOL_VERSION = "0.1.0-apply"
 REQUIRED_SCHEMA_VERSION = 4
 # Version of the canonical apply/run evidence seal (spec §1v5/§2v5). Bump only on a contract change.
-EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2  # v2 adds sealed authorization identity + expected backup to the seal
 REQUIRED_PLANNER_TOOL_VERSION = "0.4.0-plan-only"
 REQUIRED_WRITER_CONTRACT = "record-price-fact-v2-active-only"
 # The deployed writer must declare exactly these guarantees before any apply may execute (spec §1).
@@ -184,6 +184,9 @@ class BuildProvenance:
     api_artifact_hash: str | None = None
     worker_artifact_hash: str | None = None
     document_hash: str | None = None  # sha256 of the provenance document file itself
+    alembic_revision: str | None = None
+    generator_version: str | None = None
+    authorization_trust_root_hash: str | None = None  # trust-root hash recorded in the document
 
 
 @dataclass(slots=True)
@@ -212,17 +215,36 @@ def load_build_provenance(path: str | None = None) -> BuildProvenance:
         doc = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return BuildProvenance()
-    if not isinstance(doc, dict):
+    from cestaplan_api.provenance.generator import (
+        EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+        GENERATOR_VERSION,
+        render_document,
+    )
+    # STRICT (§3v2): exact fields, exact schema/generator, valid commit/hashes/revision, and file
+    # bytes must equal render_document(doc). Any deviation fails closed (empty BuildProvenance).
+    required = {"schema_version", "commit_sha", "source_tree_hash", "api_artifact_hash",
+                "worker_artifact_hash", "alembic_revision", "generator_version",
+                "toolchain_contract_version", "python_base_image_digest", "uv_image_digest",
+                "authorization_trust_root_hash"}
+    if not isinstance(doc, dict) or set(doc) != required:
         return BuildProvenance()
-    # Only a document from the known generator schema is accepted; anything else fails closed.
-    from cestaplan_api.provenance.generator import EVIDENCE_DOCUMENT_SCHEMA_VERSION
-    if doc.get("schema_version") != EVIDENCE_DOCUMENT_SCHEMA_VERSION:
+    if (doc["schema_version"] != EVIDENCE_DOCUMENT_SCHEMA_VERSION
+            or doc["generator_version"] != GENERATOR_VERSION
+            or not _valid_commit(doc["commit_sha"])
+            or not all(_valid_sha256(doc[k]) for k in (
+                "source_tree_hash", "api_artifact_hash", "worker_artifact_hash",
+                "authorization_trust_root_hash"))
+            or not (isinstance(doc["alembic_revision"], str)
+                    and bool(re.match(r"^[0-9a-z_]{6,64}$", doc["alembic_revision"])))
+            or render_document(doc) != raw):
         return BuildProvenance()
     return BuildProvenance(
-        commit_sha=doc.get("commit_sha"), source_tree_hash=doc.get("source_tree_hash"),
-        api_artifact_hash=doc.get("api_artifact_hash"),
-        worker_artifact_hash=doc.get("worker_artifact_hash"),
-        document_hash=hashlib.sha256(raw).hexdigest())
+        commit_sha=doc["commit_sha"], source_tree_hash=doc["source_tree_hash"],
+        api_artifact_hash=doc["api_artifact_hash"],
+        worker_artifact_hash=doc["worker_artifact_hash"],
+        document_hash=hashlib.sha256(raw).hexdigest(),
+        alembic_revision=doc["alembic_revision"], generator_version=doc["generator_version"],
+        authorization_trust_root_hash=doc["authorization_trust_root_hash"])
 
 
 def _valid_sha256(v: str | None) -> bool:
@@ -395,17 +417,39 @@ class ApplyContext:
     # Sanitized status of the sealed authorization package (set by from_environment); EXPECTED
     # come from that package, never from the same runtime env that supplies the OBSERVED values.
     authorization: dict[str, Any] | None = None
+    # --- Authorization identity + expected backup, filled ONLY from the signed package (§1v2) ---
+    authorization_id: str | None = None
+    authorization_package_hash: str | None = None
+    authorization_key_fingerprint: str | None = None
+    authorization_generated_at: datetime | None = None
+    authorization_expires_at: datetime | None = None
+    expected_backup_sha256: str | None = None
+    expected_backup_storage_reference: str | None = None
+    expected_backup_storage_reference_hash: str | None = None
+
+    # These are OWNED by the signed package on the operational path — a caller may not override them
+    # via from_environment (tests inject them by building ApplyContext(...) directly).
+    _PACKAGE_OWNED = frozenset({
+        "expected_provenance", "expected_main_sha", "expected_alembic", "expected_product_price",
+        "expected_active_mappings", "operator_reference", "authorization_id",
+        "authorization_package_hash", "authorization_key_fingerprint", "authorization_generated_at",
+        "authorization_expires_at", "expected_backup_sha256", "expected_backup_storage_reference",
+        "expected_backup_storage_reference_hash"})
 
     @classmethod
     def from_environment(cls, *, plan_hash: str | None = None, **overrides: Any) -> ApplyContext:
+        forbidden = set(overrides) & cls._PACKAGE_OWNED
+        if forbidden:
+            raise ApplyNotAuthorized(
+                "override_forbidden_operational_path", ",".join(sorted(forbidden)))
         base = cls(
             app_commit_sha=os.environ.get("APP_COMMIT_SHA"),
             deployed_api_sha=os.environ.get("DEPLOYED_API_SHA") or os.environ.get("APP_COMMIT_SHA"),
             deployed_worker_sha=os.environ.get("DEPLOYED_WORKER_SHA"),
-            expected_main_sha=os.environ.get("EXPECTED_MAIN_SHA"),
-            expected_alembic=os.environ.get("EXPECTED_ALEMBIC_REVISION"),
             observed_provenance=load_build_provenance())
-        # Load the sealed authorization package if present; it (and ONLY it) supplies expected.
+        for k, v in overrides.items():
+            setattr(base, k, v)
+        # The sealed package (verified against the BAKED trust-root) is the ONLY source of expected.
         status, pkg = _load_authorization(plan_hash, base.now or datetime.now(UTC))
         base.authorization = status
         if pkg is not None:
@@ -415,27 +459,50 @@ class ApplyContext:
             base.expected_product_price = pkg.expected_product_price
             base.expected_active_mappings = pkg.expected_active_mappings
             base.operator_reference = pkg.operator_reference
-        for k, v in overrides.items():
-            setattr(base, k, v)
+            base.authorization_id = pkg.authorization_id
+            base.authorization_package_hash = pkg.authorization_package_hash
+            base.authorization_key_fingerprint = pkg.public_key_fingerprint
+            base.authorization_generated_at = pkg.generated_at
+            base.authorization_expires_at = pkg.expires_at
+            base.expected_backup_sha256 = pkg.backup_expected_sha256
+            base.expected_backup_storage_reference = pkg.backup_storage_reference
+            base.expected_backup_storage_reference_hash = pkg.backup_storage_reference_hash
         return base
 
 
-def _load_authorization(plan_hash: str | None, now: datetime) -> tuple[dict[str, Any], Any]:
-    """Load + verify the sealed authorization package from env-pointed files (feat provenance). No
-    package (or no plan_hash to bind) -> (absent status, None). Any failure -> sanitized status +
-    None; expected provenance therefore stays empty and apply_ready stays false."""
+def _load_authorization(plan_hash: str | None, now: datetime, *,
+                        trust_root_keys: list[str] | None = None) -> tuple[dict[str, Any], Any]:
+    """Load + verify the sealed authorization package (feat provenance v2). The authorized keys come
+    ONLY from the BAKED trust-root file (never a runtime env var); ``trust_root_keys`` is a test
+    test-injection hook, unused on the operational path. No package/plan_hash -> absent. Any failure
+    -> sanitized status + None, so expected provenance stays empty and apply_ready stays false."""
+    from cestaplan_api.provenance import (
+        AuthorizationError,
+        TrustRootError,
+        load_authorization_package_from_files,
+        load_trust_root,
+    )
     pkg_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
     sig_path = os.environ.get("AUTHORIZATION_SIGNATURE_PATH")
     if not pkg_path or not sig_path or plan_hash is None:
         return {"package_present": False}, None
+    if trust_root_keys is not None:
+        keys = trust_root_keys
+    else:
+        trust_path = os.environ.get("BUILD_AUTHORIZATION_TRUST_ROOT_PATH")
+        if not trust_path or not Path(trust_path).is_file():
+            return {"package_present": True, "signature_valid": False,
+                    "error_code": "trust_root_missing"}, None
+        try:
+            keys = load_trust_root(trust_path)
+        except TrustRootError as exc:
+            return {"package_present": True, "signature_valid": False,
+                    "error_code": exc.code}, None
     if not Path(pkg_path).is_file() or not Path(sig_path).is_file():
         return {"package_present": False, "error_code": "package_files_missing"}, None
-    keys = [k for k in re.split(r"[,\s]+", os.environ.get("AUTHORIZATION_PUBLIC_KEYS", "")) if k]
-    from cestaplan_api.provenance import AuthorizationError, load_authorization_package
     try:
-        pkg = load_authorization_package(
-            Path(pkg_path).read_bytes(), Path(sig_path).read_text().strip(),
-            authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
+        pkg = load_authorization_package_from_files(
+            pkg_path, sig_path, authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
     except AuthorizationError as exc:
         sig_codes = {"signature_not_authorized", "signature_malformed", "no_authorized_public_keys"}
         return {"package_present": True, "signature_valid": exc.code not in sig_codes,
@@ -626,6 +693,36 @@ def _provenance_gates(m: dict[str, Any], ctx: ApplyContext) -> list[tuple[str, b
     ]
 
 
+def _observed_trust_root_hash() -> str | None:
+    """SHA-256 of the baked trust-root file (fixed path, never a mutable substitute) or None."""
+    path = os.environ.get("BUILD_AUTHORIZATION_TRUST_ROOT_PATH")
+    if not path or not Path(path).is_file():
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _build_identity_gates(db: Session, ctx: ApplyContext) -> list[tuple[str, bool]]:
+    """Bind the full build identity (spec §3v2): the observed document commit, APP_COMMIT_SHA, the
+    package commit/main, the live + document Alembic revision and the trust-root must all agree — no
+    separately-coherent-but-contradictory chains. Needs a valid package (empty expected=False)."""
+    o, e = ctx.observed_provenance, ctx.expected_provenance
+    app = ctx.app_commit_sha
+    live_trust = _observed_trust_root_hash()
+    return [
+        ("build_doc_commit_matches_app", _eq_commit(o.commit_sha, app)),
+        ("package_main_matches_expected", _eq_commit(ctx.expected_main_sha, e.commit_sha)),
+        ("build_doc_alembic_matches_package",
+         o.alembic_revision is not None and o.alembic_revision == ctx.expected_alembic),
+        ("build_doc_alembic_matches_live",
+         o.alembic_revision is not None and o.alembic_revision == _alembic_revision(db)),
+        ("trust_root_matches_document",
+         _valid_sha256(live_trust) and live_trust == o.authorization_trust_root_hash),
+    ]
+
+
 def _server_version(db: Session) -> str | None:
     try:
         return db.execute(text("SHOW server_version")).scalar()
@@ -636,7 +733,18 @@ def _server_version(db: Session) -> str | None:
 def _backup_gate(db: Session, ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
     if ctx.backup is None:
         return False, {"backup_present": False}
-    return ctx.backup.verify(ctx.now or datetime.now(UTC), server_version=_server_version(db))
+    ok, ev = ctx.backup.verify(ctx.now or datetime.now(UTC), server_version=_server_version(db))
+    # §1v2: the backup must be the one the SIGNED package authorized — same expected SHA (and the
+    # observed file SHA equals it), same sanitized storage reference and same reference hash.
+    bound = (
+        _valid_sha256(ctx.expected_backup_sha256)
+        and ctx.backup.expected_sha256 == ctx.expected_backup_sha256
+        and ev.get("observed_sha256") == ctx.expected_backup_sha256
+        and ctx.expected_backup_storage_reference is not None
+        and ev.get("storage_reference_sanitized") == ctx.expected_backup_storage_reference
+        and ev.get("storage_reference_hash") == ctx.expected_backup_storage_reference_hash)
+    ev["authorization_backup_bound"] = bound
+    return (ok and bound), ev
 
 
 # --------------------------------------------------------------------------- #
@@ -964,6 +1072,8 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
     record("writer_contract_v2", wgate_ok)
     prov = _provenance_gates(m, ctx)
     for code, ok in prov:
+        record(code, ok)
+    for code, ok in _build_identity_gates(db, ctx):  # §3v2: bind the full build identity
         record(code, ok)
     full_prov = all(ok for _, ok in prov)
     _present, _resolved, unresolved = _resolve_manifest_blockers(
@@ -1371,6 +1481,13 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
         expected_worker_artifact_hash=e.worker_artifact_hash,
         expected_provenance_document_hash=e.document_hash,
         observed_provenance_document_hash=o.document_hash,
+        authorization_id=ctx.authorization_id,
+        authorization_package_hash=ctx.authorization_package_hash,
+        authorization_key_fingerprint=ctx.authorization_key_fingerprint,
+        authorization_generated_at=ctx.authorization_generated_at,
+        authorization_expires_at=ctx.authorization_expires_at,
+        expected_backup_sha256=ctx.expected_backup_sha256,
+        expected_backup_storage_reference_hash=ctx.expected_backup_storage_reference_hash,
         **_backup_run_fields(ctx, bev))
     db.add(run)
     try:
@@ -1797,6 +1914,11 @@ def _json(state: dict[str, Any]) -> dict[str, Any]:
     return _norm_state(state)
 
 
+def _iso_utc(dt: datetime | None) -> str | None:
+    """A stable UTC isoformat for sealing (survives the DB timestamptz round-trip)."""
+    return dt.astimezone(UTC).isoformat() if dt is not None else None
+
+
 def _canonical_sha256(payload: Any) -> str:
     """SHA-256 over a canonical JSON serialization: keys sorted, stable nulls, no whitespace, stable
     unicode. Stored temporal states are already UTC-normalized dicts (spec §1v5)."""
@@ -1852,6 +1974,14 @@ def _run_execution_hash(run: HistoryRemediationRun,
         "expected_provenance_document_hash": run.expected_provenance_document_hash,
         "observed_provenance_document_hash": run.observed_provenance_document_hash,
         "backup_evidence_hash": run.backup_evidence_hash,
+        # Sealed authorization identity + expected backup (§1v2).
+        "authorization_id": run.authorization_id,
+        "authorization_package_hash": run.authorization_package_hash,
+        "authorization_key_fingerprint": run.authorization_key_fingerprint,
+        "authorization_generated_at": _iso_utc(run.authorization_generated_at),
+        "authorization_expires_at": _iso_utc(run.authorization_expires_at),
+        "expected_backup_sha256": run.expected_backup_sha256,
+        "expected_backup_storage_reference_hash": run.expected_backup_storage_reference_hash,
     })
 
 
