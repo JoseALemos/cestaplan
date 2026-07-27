@@ -2537,6 +2537,7 @@ def test_ctx_now_future_does_not_alter_rolled_back_at(db_session: Session) -> No
         PriceObservation.rolled_back_at.is_not(None))).scalars().all()
     assert rolled  # a duplicate was logically rolled back
     for o in rolled:
+        assert o.rolled_back_at is not None
         assert o.rolled_back_at == run.started_at  # the one operation clock, NOT ctx.now
         assert o.rolled_back_at < future
 
