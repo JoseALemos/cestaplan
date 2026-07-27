@@ -1,5 +1,6 @@
 """Immutable authorization trust-root tests (feat immutable-build-provenance v2). The shipped
-trust-root is EMPTY (no real key); these validate the loader and its fail-closed behaviour."""
+trust-root holds EXACTLY the one enrolled remediation public key; these validate the loader, its
+fail-closed behaviour, and the enrolled key's fingerprint."""
 
 from __future__ import annotations
 
@@ -12,11 +13,18 @@ from cestaplan_api.provenance import trust_root as tr
 
 _REPO_TRUST_ROOT = Path(__file__).resolve().parents[2] / "authorization-trust-root.json"
 _KEY = "aa" * 32  # a well-formed 32-byte hex public key (not a real key)
+# The enrolled remediation authorization public key (PUBLIC material only) + its fingerprint,
+# computed by the project algorithm sha256(pubkey_bytes)[:16]. No private key exists in this repo.
+_ENROLLED_KEY = "4f08561609a89d7abae0f037bfc726d94e65e92f3396451c17a231783030f0f9"
+_ENROLLED_FINGERPRINT = "e757d17a1d055212"
 
 
-def test_shipped_trust_root_is_empty_and_canonical() -> None:
+def test_shipped_trust_root_holds_exactly_the_enrolled_key() -> None:
     keys = tr.load_trust_root(_REPO_TRUST_ROOT)
-    assert keys == []  # no real key in this PR -> authorization is fail-closed
+    assert keys == [_ENROLLED_KEY]  # exactly one authorized key
+    raw = bytes.fromhex(keys[0])
+    assert len(raw) == 32  # a 32-byte Ed25519 public key
+    assert hashlib.sha256(raw).hexdigest()[:16] == _ENROLLED_FINGERPRINT
 
 
 def _doc(keys: list[str]) -> bytes:
