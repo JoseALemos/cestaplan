@@ -173,6 +173,9 @@ class HistoryRemediationChange(BaseModel):
     original_hash: Mapped[str] = mapped_column(Text, nullable=False)
     expected_bound_hash: Mapped[str] = mapped_column(Text, nullable=False)
     actual_after_hash: Mapped[str | None] = mapped_column(Text)
+    # Canonical seal over the change's full post-apply evidence (§1v5), computed after post-flush. A
+    # restore recomputes and compares it before any write; a tampered target/state fails closed.
+    apply_evidence_hash: Mapped[str] = mapped_column(Text, nullable=False)
     restore_state: Mapped[dict | None] = mapped_column(JSONB)
     # Durable anomaly reference (§7): the original id is immutable; the live FK is nulled on delete,
     # but the historical evidence (original id + content hash + deletion time) is preserved.

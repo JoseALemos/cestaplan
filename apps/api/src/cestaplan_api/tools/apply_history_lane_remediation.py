@@ -59,6 +59,8 @@ if TYPE_CHECKING:
 
 APPLY_TOOL_VERSION = "0.1.0-apply"
 REQUIRED_SCHEMA_VERSION = 4
+# Version of the canonical apply/run evidence seal (spec §1v5/§2v5). Bump only on a contract change.
+EVIDENCE_SCHEMA_VERSION = 1
 REQUIRED_PLANNER_TOOL_VERSION = "0.4.0-plan-only"
 REQUIRED_WRITER_CONTRACT = "record-price-fact-v2-active-only"
 # The deployed writer must declare exactly these guarantees before any apply may execute (spec §1).
@@ -260,7 +262,9 @@ def _dump_db_version(restore_list: str | None) -> str | None:
 # carry a credential, token or signed-URL parameter is rejected outright (spec §4v4).
 _STORAGE_REF_MAX_LEN = 200
 _STORAGE_REF_SCHEMES = frozenset({"s3", "gs", "gcs", "b2"})
-_STORAGE_OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-/]{0,199}$")
+# Opaque ids admit NO path separators or colons (spec §4v5): a hierarchy MUST use an allowlisted
+# URI, so a disguised local/UNC/drive path (C:/…, C:\…, backups/…, ./…, \\host\…) can never pass.
+_STORAGE_OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _STORAGE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 _STORAGE_SENSITIVE_RE = re.compile(
     r"(?i)(token|secret|signature|sig=|credential|password|passwd|x-amz-|access[_-]?key|api[_-]?key)")
@@ -1317,7 +1321,8 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
                 changes.append(_apply_row(db, run, m, lane, r, live[r["id"]], run_ts,
                                           anomaly_by_target))
         db.flush()
-        # 5) post-flush verification: fill actual_after and require it EXACTLY matches expected.
+        # 5) post-flush verification: fill actual_after, require it EXACTLY matches expected, and
+        # SEAL each change's full evidence (§1v5).
         for ch in changes:
             actual = _temporal_of(live[ch.price_observation_id])
             ch.actual_after_state = _json(actual)
@@ -1326,11 +1331,13 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
             ch.error_code = None
             if ch.action_type in _ACTION_WRITES and ch.actual_after_hash != ch.expected_bound_hash:
                 raise ApplyPlanDrift("post_flush_mismatch", str(ch.price_observation_id))
+            ch.apply_evidence_hash = _apply_evidence_hash(ch, m["plan_hash"])
     after = _count_snapshot(db)
     run.after_counts = after
     run.completed_at = ctx.now or datetime.now(UTC)
-    run.execution_hash = _value_execution_hash(m["plan_hash"], changes)
     _capture_post_apply_evidence(db, m, run)  # §4: evidence a restore can re-verify against
+    # §2v5: seal the whole run AFTER its post-apply evidence is set; the consumption row copies it.
+    run.execution_hash = _run_execution_hash(run, changes)
     _assert_counts_preserved(before, after)
     # §1: durably mark this plan_hash consumed; NEVER deleted, not even by a restore.
     db.add(HistoryRemediationPlanConsumption(
@@ -1409,6 +1416,7 @@ def _apply_row(db: Session, run: HistoryRemediationRun, m: dict[str, Any], lane:
         created_anomaly_original_id=anomaly.id if anomaly is not None else None,
         created_anomaly_live_id=anomaly.id if anomaly is not None else None,
         created_anomaly_hash=_anomaly_hash(anomaly) if anomaly is not None else None,
+        apply_evidence_hash="pending",  # sealed after post-flush once actual_after is known
         status="planned")
     db.add(ch)
     return ch
@@ -1616,6 +1624,25 @@ def _validate_all_changes(db: Session, run: HistoryRemediationRun,
             raise ApplyRestoreDrift("deterministic_action_id_invalid", ch.deterministic_action_id)
 
 
+def _verify_sealed_evidence(db: Session, run: HistoryRemediationRun,
+                            changes: list[HistoryRemediationChange]) -> None:
+    """Before ANY restore write, prove the sealed evidence is intact (spec §2v5): recompute every
+    change's apply_evidence_hash and the run's execution_hash, and confirm the immutable
+    plan-consumption row carries the SAME execution_hash and points at this run. Fails closed."""
+    from cestaplan_api.models import HistoryRemediationPlanConsumption
+    for ch in changes:
+        if _apply_evidence_hash(ch, run.plan_hash) != ch.apply_evidence_hash:
+            raise ApplyRestoreDrift("apply_evidence_hash_mismatch", str(ch.price_observation_id))
+    if _run_execution_hash(run, changes) != run.execution_hash:
+        raise ApplyRestoreDrift("run_execution_hash_mismatch")
+    cons = db.execute(select(HistoryRemediationPlanConsumption).where(
+        HistoryRemediationPlanConsumption.plan_hash == run.plan_hash)).scalar_one_or_none()
+    if cons is None or cons.execution_hash != run.execution_hash:
+        raise ApplyRestoreDrift("consumption_execution_hash_mismatch")
+    if cons.first_run_id != run.id:
+        raise ApplyRestoreDrift("consumption_first_run_mismatch")
+
+
 def _restore_locked(db: Session, run: HistoryRemediationRun,
                     changes: list[HistoryRemediationChange]) -> dict[str, Any]:
     allowed_ids = frozenset(c.created_anomaly_live_id for c in changes
@@ -1624,6 +1651,8 @@ def _restore_locked(db: Session, run: HistoryRemediationRun,
         rows = {o.id: o for o in db.execute(select(PriceObservation).where(
             PriceObservation.id.in_([c.price_observation_id for c in changes])
         ).with_for_update()).scalars()}
+        # The sealed evidence must be intact before anything else (§2v5).
+        _verify_sealed_evidence(db, run, changes)
         # Verify each anomaly BEFORE any write; a mismatch aborts the whole restore (§5).
         anomalies = {ch.created_anomaly_live_id: _verify_anomaly_before_delete(db, ch)
                      for ch in changes if ch.created_anomaly_live_id is not None}
@@ -1697,9 +1726,62 @@ def _json(state: dict[str, Any]) -> dict[str, Any]:
     return _norm_state(state)
 
 
-def _value_execution_hash(plan_hash: str, changes: list[HistoryRemediationChange]) -> str:
-    return planner._value_hash({"plan_hash": plan_hash, "changes": sorted(
-        (c.deterministic_action_id, c.action_type, c.expected_bound_hash) for c in changes)})
+def _canonical_sha256(payload: Any) -> str:
+    """SHA-256 over a canonical JSON serialization: keys sorted, stable nulls, no whitespace, stable
+    unicode. Stored temporal states are already UTC-normalized dicts (spec §1v5)."""
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        default=str).encode()).hexdigest()
+
+
+def _apply_evidence_hash(ch: HistoryRemediationChange, plan_hash: str) -> str:
+    """Canonical seal over a change's FULL apply evidence (spec §1v5). Excludes fields that change
+    legitimately during restore (restore_state, created_anomaly_deleted_at, post-restore status/
+    error_code). Computed after post-flush; recomputed and compared before any restore write."""
+    return _canonical_sha256({
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "plan_hash": plan_hash,
+        "deterministic_action_id": ch.deterministic_action_id,
+        "lane_fingerprint": ch.lane_fingerprint,
+        "price_observation_id": ch.price_observation_id,
+        "action_type": ch.action_type,
+        "original_temporal_state": ch.original_temporal_state,
+        "expected_bound_state": ch.expected_bound_state,
+        "actual_after_state": ch.actual_after_state,
+        "original_hash": ch.original_hash,
+        "expected_bound_hash": ch.expected_bound_hash,
+        "actual_after_hash": ch.actual_after_hash,
+        "created_anomaly_original_id": ch.created_anomaly_original_id,
+        "created_anomaly_hash": ch.created_anomaly_hash,
+        "created_anomaly_live_id": ch.created_anomaly_live_id,
+    })
+
+
+def _run_execution_hash(run: HistoryRemediationRun,
+                        changes: list[HistoryRemediationChange]) -> str:
+    """Canonical seal over the WHOLE run (spec §2v5): the ordered per-change seals plus the run's
+    post-apply evidence, provenance pair and backup evidence hash. Stored on both the run and the
+    (immutable) plan-consumption row so a restore can prove nothing was altered."""
+    return _canonical_sha256({
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "plan_hash": run.plan_hash,
+        "apply_evidence_hashes": sorted(c.apply_evidence_hash for c in changes),
+        "post_apply_occurrence_hashes": run.post_apply_occurrence_hashes,
+        "post_apply_supported_fk_hashes": run.post_apply_supported_fk_hashes,
+        "discovered_fk_fingerprint": run.discovered_fk_fingerprint,
+        "expected_unknown_fk_count": run.expected_unknown_fk_count,
+        "expected_commit_sha": run.expected_commit_sha,
+        "observed_commit_sha": run.observed_commit_sha,
+        "expected_source_hash": run.expected_source_hash,
+        "observed_source_hash": run.observed_source_hash,
+        "expected_api_artifact_hash": run.expected_api_artifact_hash,
+        "observed_api_artifact_hash": run.observed_api_artifact_hash,
+        "expected_worker_artifact_hash": run.expected_worker_artifact_hash,
+        "observed_worker_artifact_hash": run.observed_worker_artifact_hash,
+        "expected_provenance_document_hash": run.expected_provenance_document_hash,
+        "observed_provenance_document_hash": run.observed_provenance_document_hash,
+        "backup_evidence_hash": run.backup_evidence_hash,
+    })
 
 
 def _assert_counts_preserved(before: dict[str, int], after: dict[str, int]) -> None:

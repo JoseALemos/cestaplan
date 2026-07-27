@@ -105,6 +105,7 @@ def upgrade() -> None:
     sa.Column('original_hash', sa.Text(), nullable=False),
     sa.Column('expected_bound_hash', sa.Text(), nullable=False),
     sa.Column('actual_after_hash', sa.Text(), nullable=True),
+    sa.Column('apply_evidence_hash', sa.Text(), nullable=False),
     sa.Column('restore_state', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('created_anomaly_original_id', sa.BigInteger(), nullable=True),
     sa.Column('created_anomaly_hash', sa.Text(), nullable=True),

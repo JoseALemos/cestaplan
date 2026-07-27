@@ -1536,6 +1536,7 @@ def test_restore_blocks_on_deleted_observation(db_session: Session) -> None:  # 
 
 
 def test_restore_blocks_on_null_actual_after_hash(db_session: Session) -> None:  # §2v4
+    # v5: a persisted-column tamper is caught by the evidence seal BEFORE the all-rows gate.
     _r, _a, _b, _m, res, run = _apply_dup(db_session)
     db_session.execute(text(
         "UPDATE history_remediation_change SET actual_after_hash = NULL "
@@ -1544,7 +1545,7 @@ def test_restore_blocks_on_null_actual_after_hash(db_session: Session) -> None: 
     db_session.expire_all()
     with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
         _restore(db_session, res["run_public_id"], _ctx(db_session))
-    assert ei.value.code == "actual_after_missing"
+    assert ei.value.code == "apply_evidence_hash_mismatch"
 
 
 def test_restore_blocks_on_altered_deterministic_id(db_session: Session) -> None:  # §2v4
@@ -1552,30 +1553,57 @@ def test_restore_blocks_on_altered_deterministic_id(db_session: Session) -> None
     ch = db_session.execute(select(HistoryRemediationChange).where(
         HistoryRemediationChange.remediation_run_id == run.id)).scalars().first()
     assert ch is not None
-    ch.deterministic_action_id = "f" * 64  # tampered audit -> recompute mismatch
+    ch.deterministic_action_id = "f" * 64  # tampered audit -> seal recompute mismatch
     db_session.flush()
     with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
         _restore(db_session, res["run_public_id"], _ctx(db_session))
-    assert ei.value.code == "deterministic_action_id_invalid"
+    assert ei.value.code == "apply_evidence_hash_mismatch"
 
 
-def test_restore_blocks_on_duplicate_change(db_session: Session) -> None:  # §2v4
-    _r, _a, _b, _m, res, run = _apply_dup(db_session)
-    ch = db_session.execute(select(HistoryRemediationChange).where(
-        HistoryRemediationChange.remediation_run_id == run.id)).scalars().first()
-    assert ch is not None
-    dup = HistoryRemediationChange(
-        remediation_run_id=run.id, deterministic_action_id="a" * 64,  # distinct id, same obs+action
-        lane_fingerprint=ch.lane_fingerprint, price_observation_id=ch.price_observation_id,
-        action_type=ch.action_type, original_temporal_state=ch.original_temporal_state,
-        expected_bound_state=ch.expected_bound_state, actual_after_state=ch.actual_after_state,
-        original_hash=ch.original_hash, expected_bound_hash=ch.expected_bound_hash,
-        actual_after_hash=ch.actual_after_hash, status="applied")
-    db_session.add(dup)
-    db_session.flush()
+def _ns_change(**over):
+    base = {"price_observation_id": 1, "action_type": "keep", "deterministic_action_id": "d" * 64,
+            "actual_after_hash": "h", "actual_after_state": {"x": 1}, "original_hash": "r" * 64,
+            "lane_fingerprint": "lf", "created_anomaly_live_id": None}
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_all_rows_gate_blocks_duplicate_change(db_session: Session) -> None:  # §2v4
+    # Two changes for the same (observation, action) — a real duplicate always carries a distinct
+    # deterministic_action_id (unique index), so the structural pass reports it as a duplicate.
+    r, v = _fixture(db_session)
+    a = _obs(db_session, r.id, v.id, amount="1.19", observed_at=T0)
+    c1 = _ns_change(price_observation_id=a.id, deterministic_action_id="1" * 64)
+    c2 = _ns_change(price_observation_id=a.id, deterministic_action_id="2" * 64)
     with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
-        _restore(db_session, res["run_public_id"], _ctx(db_session))
+        apply_tool._validate_all_changes(
+            db_session, SimpleNamespace(plan_hash="p"), [c1, c2],  # type: ignore[arg-type,list-item]
+            {a.id: a}, {})
     assert ei.value.code == "duplicate_change_for_observation"
+
+
+def test_all_rows_gate_blocks_null_actual_after(db_session: Session) -> None:  # §2v4
+    r, v = _fixture(db_session)
+    a = _obs(db_session, r.id, v.id, amount="1.19", observed_at=T0)
+    ch = _ns_change(price_observation_id=a.id, actual_after_hash=None)
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        apply_tool._validate_all_changes(
+            db_session, SimpleNamespace(plan_hash="p"), [ch],  # type: ignore[arg-type,list-item]
+            {a.id: a}, {})
+    assert ei.value.code == "actual_after_missing"
+
+
+def test_all_rows_gate_blocks_invalid_deterministic_id(db_session: Session) -> None:  # §2v4
+    r, v = _fixture(db_session)
+    a = _obs(db_session, r.id, v.id, amount="1.19", observed_at=T0)
+    ch = _ns_change(price_observation_id=a.id,
+                    actual_after_hash=apply_tool._thash(apply_tool._temporal_of(a)),
+                    actual_after_state=apply_tool._json(apply_tool._temporal_of(a)))
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        apply_tool._validate_all_changes(
+            db_session, SimpleNamespace(plan_hash="p"), [ch],  # type: ignore[arg-type,list-item]
+            {a.id: a}, {})
+    assert ei.value.code == "deterministic_action_id_invalid"
 
 
 def test_all_rows_gate_covers_excluded_no_action(db_session: Session) -> None:  # §2v4
@@ -1720,6 +1748,234 @@ def test_run_persists_only_sanitized_reference_and_hash(db_session: Session) -> 
     assert run.backup_storage_reference_hash == hashlib.sha256(ref.encode()).hexdigest()
     # a local path is NEVER persisted as the reference
     assert run.backup_storage_reference != _BACKUP["path"]
+
+
+# =========================================================================== #
+# v5 FINAL — §1 per-change evidence seal, §2 whole-run seal + pre-restore verify,
+# tamper tests, §4 storage reference no disguised paths.
+# =========================================================================== #
+def _seal_apply(m: dict):
+    probe = _isession()
+    ctx = _ctx(probe)
+    probe.close()
+    return apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
+
+
+def _keep_change_info(plan_hash: str) -> dict:
+    s = _isession()
+    try:
+        run_id = s.execute(select(HistoryRemediationRun.id).where(
+            HistoryRemediationRun.plan_hash == plan_hash,
+            HistoryRemediationRun.status == "applied")).scalar_one()
+        ch = s.execute(select(HistoryRemediationChange).where(
+            HistoryRemediationChange.remediation_run_id == run_id,
+            HistoryRemediationChange.action_type == "keep")).scalars().first()
+        assert ch is not None
+        return {"run_id": run_id, "change_id": ch.id, "lane_fingerprint": ch.lane_fingerprint,
+                "original_hash": ch.original_hash, "action_type": ch.action_type}
+    finally:
+        s.close()
+
+
+def _sql_tamper(sql: str, params: dict) -> None:
+    s = _isession()
+    try:
+        s.execute(text(sql), params)
+        s.commit()
+    finally:
+        s.close()
+
+
+def _assert_restore_blocked_and_manual_review(res, m, rid, *, rolled=1) -> None:
+    probe = _isession()
+    rctx = _ctx(probe)
+    probe.close()
+    with pytest.raises(apply_tool.ApplyRestoreDrift):
+        apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
+                                   confirmations=RESTORE_CONFIRM)
+    run = _run_row(m["plan_hash"], status="applied")  # still applied, not rolled back
+    assert run is not None and run["restore_status"] == "manual_review_required"
+    assert _rolled_back_count(rid) == rolled  # zero rows restored, zero anomalies deleted
+
+
+def test_tamper_original_temporal_state_blocks(committed_dup_lane) -> None:  # §3v5.1
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        _sql_tamper("UPDATE history_remediation_change SET original_temporal_state = "
+                "'{\"valid_from\": \"tampered\"}'::jsonb WHERE id = :i", {"i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_expected_bound_state_blocks(committed_dup_lane) -> None:  # §3v5.2
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        _sql_tamper("UPDATE history_remediation_change SET expected_bound_state = "
+                "'{\"valid_from\": \"tampered\"}'::jsonb WHERE id = :i", {"i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_actual_after_coherent_blocks(committed_dup_lane) -> None:  # §3v5.3
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        state = {"valid_from": "2020-01-01T00:00:00+00:00", "valid_until": None,
+                 "verification_status": "unverified", "rolled_back_at": None,
+                 "rolled_back_by": None, "closed_by_run_id": None}
+        coherent_hash = apply_tool._thash(state)  # state and hash mutually consistent
+        _sql_tamper("UPDATE history_remediation_change SET actual_after_state = CAST(:s AS jsonb), "
+                    "actual_after_hash = :h WHERE id = :i",
+                    {"s": json.dumps(state), "h": coherent_hash, "i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_original_hash_and_det_id_coherent_blocks(committed_dup_lane) -> None:  # §3v5.4
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        new_hash = "9" * 64
+        det = apply_tool._det_action_id(m["plan_hash"], info["lane_fingerprint"], new_hash,
+                                        info["action_type"], "")  # keep the det-id gate satisfied
+        _sql_tamper("UPDATE history_remediation_change SET original_hash = :o, "
+                "deterministic_action_id = :d WHERE id = :i",
+                {"o": new_hash, "d": det, "i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_lane_fingerprint_and_det_id_coherent_blocks(committed_dup_lane) -> None:  # §3v5.5
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        new_lane = "e" * 64
+        det = apply_tool._det_action_id(m["plan_hash"], new_lane, info["original_hash"],
+                                        info["action_type"], "")
+        _sql_tamper("UPDATE history_remediation_change SET lane_fingerprint = :l, "
+                "deterministic_action_id = :d WHERE id = :i",
+                {"l": new_lane, "d": det, "i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_apply_evidence_hash_blocks(committed_dup_lane) -> None:  # §3v5.6
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        info = _keep_change_info(m["plan_hash"])
+        _sql_tamper("UPDATE history_remediation_change SET apply_evidence_hash = :h WHERE id = :i",
+                {"h": "0" * 64, "i": info["change_id"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_run_execution_hash_blocks(committed_dup_lane) -> None:  # §3v5.7
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        _sql_tamper("UPDATE history_remediation_run SET execution_hash = :h WHERE plan_hash = :p "
+                "AND status = 'applied'", {"h": "0" * 64, "p": m["plan_hash"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_consumption_execution_hash_blocks(committed_dup_lane) -> None:  # §3v5.8
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        _sql_tamper("UPDATE history_remediation_plan_consumption SET execution_hash = :h "
+                "WHERE plan_hash = :p", {"h": "0" * 64, "p": m["plan_hash"]})
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_tamper_consumption_first_run_id_blocks(committed_dup_lane) -> None:  # §3v5.9
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)
+    try:
+        # Point consumption at a DIFFERENT (real, FK-valid) run while keeping execution_hash intact.
+        s = _isession()
+        try:
+            sib = HistoryRemediationRun(
+                plan_hash=m["plan_hash"], manifest_schema_version=4, planner_tool_version="t",
+                planner_source_hash="s", writer_contract_version="w", main_commit_sha="c",
+                alembic_revision="a", execution_mode="apply", status="failed")
+            s.add(sib)
+            s.flush()
+            s.execute(text("UPDATE history_remediation_plan_consumption SET first_run_id = :f "
+                           "WHERE plan_hash = :p"), {"f": sib.id, "p": m["plan_hash"]})
+            s.commit()
+        finally:
+            s.close()
+        _assert_restore_blocked_and_manual_review(res, m, rid)
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_seal_positive_restore_roundtrip(committed_dup_lane) -> None:  # §3v5 positive
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    res = _seal_apply(m)  # session fully closed by execute_apply
+    probe = _isession()
+    rctx = _ctx(probe)
+    probe.close()
+    rest = apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
+                                      confirmations=RESTORE_CONFIRM)
+    assert rest["status"] == "restored"
+    chk = _isession()
+    try:
+        run = chk.execute(select(HistoryRemediationRun).where(
+            HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
+        assert run.status == "rolled_back" and run.restore_status == "restored"
+        cons = chk.execute(select(HistoryRemediationPlanConsumption).where(
+            HistoryRemediationPlanConsumption.plan_hash == m["plan_hash"])).scalar_one()
+        # run + consumption hashes valid (equal) and consumption still present after restore
+        assert cons.execution_hash == run.execution_hash and run.execution_hash is not None
+    finally:
+        chk.close()
+    assert _rolled_back_count(rid) == 0  # original state restored exactly
+    _delete_runs(m["plan_hash"])
+
+
+# --------------------------------------------------------------------------- #
+# §4v5 storage reference: opaque ids admit no disguised paths
+# --------------------------------------------------------------------------- #
+def test_sanitize_storage_reference_rejects_disguised_paths() -> None:  # §4v5
+    for ref in ("C:/backup.dump", "C:\\backup.dump", "backups/history.dump", "./backup.dump",
+                "../backup.dump", "file:///backup.dump", "\\\\host\\share\\backup.dump",
+                "s3:backups", "bucket:history"):
+        assert apply_tool.sanitize_storage_reference(ref) is None, ref
+
+
+def test_sanitize_storage_reference_keeps_valid() -> None:  # §4v5
+    for ref in ("backup-20260727-abc123", "s3://bucket/history/backup.dump",
+                "gs://bucket/history/backup.dump"):
+        assert apply_tool.sanitize_storage_reference(ref) == ref, ref
 
 
 # uses timedelta to keep the import meaningful for future window tests
