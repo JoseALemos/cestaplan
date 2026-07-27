@@ -42,6 +42,7 @@ def _bundle(root: Path) -> Path:
     (root / "pyproject.toml").write_text("[project]\nname='x'\n")
     (root / "uv.lock").write_text("version = 1\n")
     (root / "Dockerfile").write_text("FROM python:3.12-slim@sha256:" + "0" * 64 + "\n")
+    (root / "README.md").write_text("# CestaPlan API\n")  # §4v4: a build input in every scope
     (root / "authorization-trust-root.json").write_text(
         '{"authorized_ed25519_public_keys":[],"schema_version":1}\n')
     return root
@@ -253,6 +254,107 @@ def test_external_symlink_is_rejected(tmp_path: Path) -> None:  # §8
     with pytest.raises(ProvenanceError) as ei:
         build_manifest(base, ["src"])
     assert ei.value.code == "symlink_rejected"
+
+
+# ---- §3v4: reject ALL symlinks, including directories ----
+def test_include_root_symlink_to_directory_is_rejected(tmp_path: Path) -> None:  # §3v4.1
+    base = _bundle(tmp_path)
+    (base / "realdir").mkdir()
+    (base / "realdir/x.py").write_text("# x\n")
+    os.symlink(base / "realdir", base / "linkdir", target_is_directory=True)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["linkdir"])
+    assert ei.value.code == "symlink_rejected"
+
+
+def test_include_root_symlink_to_file_is_rejected(tmp_path: Path) -> None:  # §3v4.4
+    base = _bundle(tmp_path)
+    os.symlink(base / "pyproject.toml", base / "linkfile.toml")
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["linkfile.toml"])
+    assert ei.value.code == "symlink_rejected"
+
+
+def test_nested_directory_symlink_internal_is_rejected(tmp_path: Path) -> None:  # §3v4.2
+    base = _bundle(tmp_path)
+    os.symlink(base / "src/cestaplan_engine", base / "src/cestaplan_api/enginelink",
+               target_is_directory=True)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["src"])
+    assert ei.value.code == "symlink_rejected"  # a directory symlink is NEVER silently skipped
+
+
+def test_nested_directory_symlink_external_is_rejected(tmp_path: Path) -> None:  # §3v4.3
+    base = _bundle(tmp_path)
+    outside = tmp_path.parent / "outside_dir"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.py").write_text("# secret\n")
+    os.symlink(outside, base / "src/cestaplan_api/extlink", target_is_directory=True)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["src"])
+    assert ei.value.code == "symlink_rejected"
+
+
+def test_directory_symlink_swap_during_traversal_is_rejected(tmp_path, monkeypatch):  # §3v4.5
+    base = _bundle(tmp_path)
+    (base / "src/cestaplan_api/sub").mkdir()
+    (base / "src/cestaplan_api/sub/y.py").write_text("# y\n")
+    outside = tmp_path.parent / "swapdir"
+    outside.mkdir(exist_ok=True)
+    from cestaplan_api.provenance import manifest as mani
+    real_lstat = os.lstat
+    state = {"done": False}
+
+    def racing_lstat(path, *a, **k):
+        # swap the real nested dir for a symlink just before the manifest's own lstat check
+        if not state["done"] and str(path).replace("\\", "/").endswith("cestaplan_api/sub"):
+            state["done"] = True
+            import shutil
+            shutil.rmtree(base / "src/cestaplan_api/sub")
+            os.symlink(outside, base / "src/cestaplan_api/sub", target_is_directory=True)
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(mani.os, "lstat", racing_lstat)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["src"])
+    assert ei.value.code == "symlink_rejected"
+
+
+def test_o_nofollow_unavailable_fails_closed(tmp_path: Path, monkeypatch) -> None:  # §3v4.6
+    base = _bundle(tmp_path)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)  # simulate a platform without it
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["pyproject.toml"])
+    assert ei.value.code == "o_nofollow_unavailable"  # never fall back to a symlink-following open
+
+
+# ---- §4v4: full coverage of build inputs (README + every Dockerfile COPY) ----
+def test_readme_change_moves_all_three_hashes(tmp_path: Path) -> None:  # §4v4
+    base = _bundle(tmp_path)
+    before = _doc(base)
+    (base / "README.md").write_text("# CestaPlan API CHANGED\n")
+    after = _doc(base)
+    for k in ("source_tree_hash", "api_artifact_hash", "worker_artifact_hash"):
+        assert after[k] != before[k], k
+
+
+def test_dockerfile_copies_are_covered() -> None:  # §4v4
+    """Every repo file COPYed into /app before the provenance step must be measured by some scope
+    (or an explicit, documented allowlist). No uv-affecting input may go unmeasured."""
+    dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
+    measured = {inc.split("/")[0] for inc in
+                (*g.SOURCE_TREE_INCLUDES, *g.API_ARTIFACT_INCLUDES, *g.WORKER_ARTIFACT_INCLUDES)}
+    allowlist: set[str] = set()  # (empty) documented files copied to /app that don't affect it
+    copied: list[str] = []
+    for line in dockerfile.splitlines():
+        s = line.strip()
+        if not s.startswith("COPY ") or "--from=" in s:  # skip stage/base-image copies
+            continue
+        srcs = s[len("COPY "):].split()[:-1]  # last token is the destination
+        copied.extend(src.split("/")[-1] for src in srcs)
+    assert copied  # sanity: we actually parsed COPY lines
+    for name in copied:
+        assert name in measured or name in allowlist, f"{name} copied to /app but not measured"
 
 
 def test_malformed_commit_is_blocked(tmp_path: Path) -> None:

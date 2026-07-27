@@ -475,6 +475,11 @@ class ApplyContext:
         if forbidden:
             raise ApplyNotAuthorized(
                 "override_forbidden_operational_path", ",".join(sorted(forbidden)))
+        # §1v4: in cloud/production NO caller may inject the clock — the only operational time
+        # source is _now_utc(), captured under the global lock. A "now" override is a test-only
+        # affordance (self_hosted) and is rejected outright in cloud.
+        if "now" in overrides and _is_cloud():
+            raise ApplyNotAuthorized("override_forbidden_operational_clock", "now")
         bp_path, _tr_path = _runtime_provenance_paths()  # fixed paths in cloud/production (§2v3)
         base = cls(
             app_commit_sha=os.environ.get("APP_COMMIT_SHA"),
@@ -483,7 +488,9 @@ class ApplyContext:
             observed_provenance=load_build_provenance(bp_path))
         for k, v in overrides.items():
             setattr(base, k, v)
-        now = base.now or datetime.now(UTC)
+        # Pre-check load clock only (self_hosted tests may inject base.now); the OPERATIONAL
+        # temporal decision is re-made under the lock with operation_now. Cloud always _now_utc().
+        now = base.now or _now_utc()
         # The sealed package (verified against the FIXED baked trust-root) is the ONLY source of
         # expected values + the authorization identity (§3v3).
         status, pkg = _load_authorization(plan_hash, now)
@@ -813,10 +820,14 @@ def _server_version(db: Session) -> str | None:
         return None
 
 
-def _backup_gate(db: Session, ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
+def _backup_gate(
+    db: Session, ctx: ApplyContext, operation_now: datetime
+) -> tuple[bool, dict[str, Any]]:
+    # §1v4: the single operational clock captured under the global lock is the only temporal
+    # source for the backup-age decision — never ctx.now.
     if ctx.backup is None:
         return False, {"backup_present": False}
-    ok, ev = ctx.backup.verify(ctx.now or datetime.now(UTC), server_version=_server_version(db))
+    ok, ev = ctx.backup.verify(operation_now, server_version=_server_version(db))
     # §1v2: the backup must be the one the SIGNED package authorized — same expected SHA (and the
     # observed file SHA equals it), same sanitized storage reference and same reference hash.
     bound = (
@@ -1156,20 +1167,54 @@ _AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
-def _authorization_not_substituted(ctx: ApplyContext) -> bool:
-    """Re-read the package file and require its self-hash still equals the load-time one, so a
-    package swapped AFTER ctx was built is rejected (spec §3v3)."""
-    if not _valid_sha256(ctx.authorization_package_hash):
-        return False
-    pkg_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
-    if not pkg_path or not Path(pkg_path).is_file():
+def _authorization_revalidated(ctx: ApplyContext, operation_now: datetime) -> bool:
+    """§2v4: FULLY re-validate the sealed authorization UNDER the global lock, using operation_now.
+
+    It is not enough to re-read the JSON and compare one field. Here we re-read package + signature
+    race-safe from the configured paths, reload the trust-root from the FIXED baked path, and re-run
+    the entire loader (exact canonical encoding, self-hash recompute, Ed25519 verification, plan
+    binding, generated/expires/freshness against operation_now, fingerprint derivation). Then the
+    freshly reloaded package must match the ApplyContext EXACTLY on every operational field. Any
+    difference — a swapped or re-signed package, a changed signature file, a rotated trust-root, an
+    expiry that has since passed — fails closed. We NEVER trust ctx.authorization_valid or the
+    cached ctx.authorization["signature_valid"]: informational load-time state, not current proof.
+    """
+    if ctx.authorization_plan_hash is None or ctx.expected_provenance is None:
         return False
     try:
-        doc = json.loads(Path(pkg_path).read_bytes())
-    except (OSError, json.JSONDecodeError, ValueError):
+        status, pkg = _load_authorization(ctx.authorization_plan_hash, operation_now)
+    except Exception:  # fail-closed on any loader/IO error
         return False
-    return isinstance(doc, dict) and doc.get("authorization_package_hash") == \
-        ctx.authorization_package_hash
+    if pkg is None or not status.get("signature_valid"):
+        return False
+    try:
+        expected_prov = {
+            "commit_sha": ctx.expected_provenance.commit_sha,
+            "source_tree_hash": ctx.expected_provenance.source_tree_hash,
+            "api_artifact_hash": ctx.expected_provenance.api_artifact_hash,
+            "worker_artifact_hash": ctx.expected_provenance.worker_artifact_hash,
+            "document_hash": ctx.expected_provenance.document_hash,
+        }
+        pairs: list[tuple[Any, Any]] = [
+            (ctx.authorization_id, pkg.authorization_id),
+            (ctx.authorization_package_hash, pkg.authorization_package_hash),
+            (ctx.authorization_key_fingerprint, pkg.public_key_fingerprint),
+            (ctx.authorization_plan_hash, pkg.plan_hash),
+            (ctx.expected_main_sha, pkg.main_commit_sha),
+            (ctx.expected_alembic, pkg.alembic_revision),
+            (expected_prov, pkg.expected_provenance_fields()),
+            (ctx.expected_product_price, pkg.expected_product_price),
+            (ctx.expected_active_mappings, pkg.expected_active_mappings),
+            (ctx.authorization_generated_at, pkg.generated_at),
+            (ctx.authorization_expires_at, pkg.expires_at),
+            (ctx.expected_backup_sha256, pkg.backup_expected_sha256),
+            (ctx.expected_backup_storage_reference, pkg.backup_storage_reference),
+            (ctx.expected_backup_storage_reference_hash, pkg.backup_storage_reference_hash),
+            (ctx.operator_reference, pkg.operator_reference),
+        ]
+    except AttributeError:
+        return False
+    return all(a == b for a, b in pairs)
 
 
 def _authorization_gates(m: dict[str, Any], ctx: ApplyContext,
@@ -1198,13 +1243,15 @@ def _authorization_gates(m: dict[str, Any], ctx: ApplyContext,
         ("authz_not_expired", exp is not None and now <= exp),
         ("authz_generation_fresh",
          gen is not None and 0 <= (now - gen).total_seconds() <= MAX_GENERATION_AGE_SECONDS),
-        ("authz_not_substituted", _authorization_not_substituted(ctx)),
+        # §2v4: full re-validation of the sealed package under the lock (not a one-field re-read).
+        ("authz_revalidated_under_lock", _authorization_revalidated(ctx, now)),
     ]
 
 
 def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: Settings,
-                   *, for_apply: bool, now: datetime | None = None) -> tuple[list[str], list[str]]:
-    now = now or ctx.now or _now_utc()
+                   *, for_apply: bool, operation_now: datetime) -> tuple[list[str], list[str]]:
+    # §1v4: ``operation_now`` is the single non-injectable operational clock, captured ONCE by the
+    # caller (under the global lock for apply/restore, a fresh read for verify). ctx.now is ignored.
     passed: list[str] = []
     blocking: list[str] = []
 
@@ -1212,13 +1259,13 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
         (passed if ok else blocking).append(code)
 
     record("plan_hash_intact", _recompute_plan_hash(m) == m["plan_hash"])
-    record("plan_not_expired", _plan_age_ok(m, ctx))
+    record("plan_not_expired", _plan_age_ok(m, operation_now))
     record("supported_actions_only", _actions_supported(m))
     wgate_ok, _wgate_code = _writer_contract_gate()
     record("writer_contract_v2", wgate_ok)
     prov = _provenance_gates(m, ctx)
     ident = _build_identity_gates(db, ctx)  # §3v2: bind the full build identity
-    authz = _authorization_gates(m, ctx, now)  # §3v3: explicit, plan-bound, fresh-clock authz
+    authz = _authorization_gates(m, ctx, operation_now)  # §3v3/§2v4: plan-bound, re-verified authz
     for code, ok in (*prov, *ident, *authz):
         record(code, ok)
     # §4v3: manifest blockers resolve ONLY under the full conjunction (prov + identity + authz).
@@ -1231,17 +1278,17 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
     for code, ok in _drift_gates(db, m):
         record(code, ok)
     if for_apply:
-        record("backup_verified", _backup_gate(db, ctx)[0])
+        record("backup_verified", _backup_gate(db, ctx, operation_now)[0])
     return passed, blocking
 
 
-def _plan_age_ok(m: dict[str, Any], ctx: ApplyContext) -> bool:
+def _plan_age_ok(m: dict[str, Any], operation_now: datetime) -> bool:
+    # §1v4: plan age is measured against the single operational clock, never ctx.now.
     gen = m.get("generated_at")
     if not gen:
         return False
-    now = ctx.now or datetime.now(UTC)
     try:
-        age = (now - _parse_dt(gen)).total_seconds()
+        age = (operation_now - _parse_dt(gen)).total_seconds()
     except (ValueError, TypeError):
         return False
     return 0 <= age <= _MAX_PLAN_AGE_SECONDS
@@ -1284,16 +1331,19 @@ def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
-    now = ctx.now or _now_utc()
-    passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True, now=now)
+    # §1v4: verify-only is read-only; it takes a single FRESH operational clock at the start of its
+    # snapshot and threads it through every temporal gate. ctx.now is never consulted.
+    operation_now = _now_utc()
+    passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=True, operation_now=operation_now)
     wgate_ok, _ = _writer_contract_gate()
-    full_prov = _full_provenance_ok(db, m, ctx, now=now)
+    full_prov = _full_provenance_ok(db, m, ctx, now=operation_now)
     present, resolved, unresolved = _resolve_manifest_blockers(
         m, writer_ok=wgate_ok, full_provenance_ok=full_prov)
     apply_blockers: list[str] = []
     if not full_prov:
         apply_blockers.append("immutable_build_provenance_missing")
-    if not _backup_gate(db, ctx)[0]:
+    if not _backup_gate(db, ctx, operation_now)[0]:
         apply_blockers.append("verified_backup_missing")
     apply_blockers.extend(f"unresolved_manifest_blocker:{b}" for b in unresolved)
     report = {
@@ -1337,7 +1387,9 @@ def _simulate_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
-    passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=False)
+    # §1v4: simulate is in-memory/read-only — a single fresh operational clock, ctx.now ignored.
+    passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=False, operation_now=_now_utc())
     sim = _simulate_plan(m)
     return {
         "apply_tool_version": APPLY_TOOL_VERSION,
@@ -1503,15 +1555,23 @@ def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str,
     s = SessionLocal()
     try:
         o, e = ctx.observed_provenance, ctx.expected_provenance
+        # §5v4: NEVER fabricate empty-string evidence. main_commit_sha is the REAL observed commit
+        # (APP_COMMIT_SHA, else the baked document's commit); alembic_revision is read LIVE from the
+        # database during THIS audit transaction. When neither yields a real value -> NULL (the
+        # columns are nullable), never "".
+        observed_main = ctx.app_commit_sha or (o.commit_sha if o is not None else None) or None
+        audit_alembic = _alembic_revision(s) or None
+        # §1v4: the failure audit uses the single non-injectable clock (_now_utc), never ctx.now.
+        audit_now = _now_utc()
         run = HistoryRemediationRun(
             plan_hash=m["plan_hash"], manifest_schema_version=m.get("schema_version", 0),
             planner_tool_version=m.get("tool_version", ""),
             planner_source_hash=m.get("planner_source_hash", ""),
             writer_contract_version=REQUIRED_WRITER_CONTRACT,
-            main_commit_sha=ctx.expected_main_sha or "",
-            alembic_revision=ctx.expected_alembic or "",
+            main_commit_sha=observed_main,
+            alembic_revision=audit_alembic,
             execution_mode="apply", status="failed", error_code=error_code,
-            started_at=ctx.now or datetime.now(UTC), completed_at=datetime.now(UTC),
+            started_at=audit_now, completed_at=audit_now,
             operator_reference=ctx.operator_reference,  # already sanitized upstream
             supersedes_run_id=supersedes,
             # Preserve identity ESTABLISHED before the failure; absent stays NULL — never
@@ -1619,25 +1679,28 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
             return {"status": "already_applied", "plan_hash": m["plan_hash"]}
         # Consumed once but not currently applied -> it was restored; a NEW plan is required.
         return {"status": "plan_requires_regeneration", "plan_hash": m["plan_hash"]}
-    # 2) deterministic lane locks; 3) full revalidation with a FRESH clock read UNDER the lock, so
-    #    the authorization temporal gates cannot be satisfied by a stale ApplyContext.now (§3v3).
+    # 2) deterministic lane locks; 3) capture the SINGLE operational clock ONCE, now that the global
+    #    lock is held, and thread it through every temporal gate + written timestamp. The
+    #    authorization temporal gates cannot be satisfied by a stale ApplyContext.now (§1v4/§3v3).
     for lane in sorted(m["lanes"], key=lambda x: x["lane_fingerprint"]):
         if not lane.get("excluded"):
             _acquire(db, _lane_lock_key(lane["lane_fingerprint"]), timeout_ms=lock_timeout_ms)
-    _passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True, now=_now_utc())
+    operation_now = _now_utc()
+    _passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=True, operation_now=operation_now)
     if blocking:
         raise ApplyEnvironmentUnsafe("gates_blocking", ",".join(sorted(blocking)))
 
-    run_ts = ctx.now or datetime.now(UTC)
+    run_ts = operation_now  # run_ts / started_at / completed_at all bind to the one clock
     before = _count_snapshot(db)
     o, e = ctx.observed_provenance, ctx.expected_provenance
-    bev = _backup_gate(db, ctx)[1]
+    bev = _backup_gate(db, ctx, operation_now)[1]
     run = HistoryRemediationRun(
         plan_hash=m["plan_hash"], manifest_schema_version=m["schema_version"],
         planner_tool_version=m["tool_version"], planner_source_hash=m["planner_source_hash"],
         writer_contract_version=REQUIRED_WRITER_CONTRACT,
-        main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha") or "",
-        alembic_revision=_alembic_revision(db) or "", execution_mode="apply", status="applied",
+        main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha"),
+        alembic_revision=_alembic_revision(db), execution_mode="apply", status="applied",
         started_at=run_ts, operator_reference=ctx.operator_reference, before_counts=before,
         supersedes_run_id=supersedes,
         observed_commit_sha=ctx.app_commit_sha, expected_commit_sha=e.commit_sha,
@@ -1689,7 +1752,7 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
             ch.apply_evidence_hash = _apply_evidence_hash(ch, m["plan_hash"])
     after = _count_snapshot(db)
     run.after_counts = after
-    run.completed_at = ctx.now or datetime.now(UTC)
+    run.completed_at = operation_now  # §1v4: the one operation clock, not ctx.now
     _capture_post_apply_evidence(db, m, run)  # §4: evidence a restore can re-verify against
     # §2v5: seal the whole run AFTER its post-apply evidence is set; the consumption row copies it.
     run.execution_hash = _run_execution_hash(run, changes)
@@ -1847,13 +1910,13 @@ def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
     for lane_fp in sorted({c.lane_fingerprint for c in changes}):
         _acquire(db, _lane_lock_key(lane_fp), timeout_ms=lock_timeout_ms)
     # Same provenance/contract/env controls as apply (§4/§6), incl. a valid + current + plan-bound
-    # authorization (fresh clock under the lock) — restore is only allowed within the ORIGINAL
-    # package's validity window (§5v3).
-    now = ctx.now or _now_utc()
+    # authorization — restore is only allowed within the ORIGINAL package's validity window (§5v3).
+    # §1v4: capture the single operational clock ONCE, now that the global + lane locks are held.
+    operation_now = _now_utc()
     rm = {"plan_hash": run.plan_hash, "commit_provenance": {}}
     env = dict(_environment_gates(db, settings, ctx))
     if not all(env.get(g) for g in _RESTORE_ENV_GATES) or not _writer_contract_gate()[0] \
-            or not _full_provenance_ok(db, rm, ctx, now=now):
+            or not _full_provenance_ok(db, rm, ctx, now=operation_now):
         raise ApplyEnvironmentUnsafe("restore_gates_blocking", "")
     # ... AND the current context must bind EXACTLY to the run's stored evidence + authorization
     # identity (§3v4/§5v3): the same build AND the same signed package that applied it. A different
@@ -1861,7 +1924,7 @@ def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
     _restore_provenance_bound_to_run(db, run, ctx)
     try:
         _restore_evidence_gates(db, run, changes)  # occurrences / FK / unknown-FK unchanged (§4)
-        return _restore_locked(db, run, changes)
+        return _restore_locked(db, run, changes, operation_now)
     except (ApplyRestoreDrift, ApplyForbiddenWrite) as exc:
         db.rollback()
         _mark_manual_review(run_public_id, exc.code)
@@ -2019,7 +2082,8 @@ def _verify_sealed_evidence(db: Session, run: HistoryRemediationRun,
 
 
 def _restore_locked(db: Session, run: HistoryRemediationRun,
-                    changes: list[HistoryRemediationChange]) -> dict[str, Any]:
+                    changes: list[HistoryRemediationChange],
+                    operation_now: datetime) -> dict[str, Any]:
     allowed_ids = frozenset(c.created_anomaly_live_id for c in changes
                             if c.created_anomaly_live_id is not None)
     with _WriteGuard(db, allow_anomaly_delete=True, allowed_anomaly_ids=allowed_ids):
@@ -2048,7 +2112,7 @@ def _restore_locked(db: Session, run: HistoryRemediationRun,
             ch.created_anomaly_live_id = None  # null the live FK; original id + hash are preserved
             db.flush()
             db.delete(an)  # ORM single-id delete of the exact verified object
-            ch.created_anomaly_deleted_at = datetime.now(UTC)
+            ch.created_anomaly_deleted_at = operation_now  # §1v4: the one operation clock
         db.flush()
         for ch in changes:
             if _thash(_temporal_of(rows[ch.price_observation_id])) != _thash(
@@ -2192,7 +2256,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
     mode.add_argument("--restore", metavar="RUN_PUBLIC_ID")
     a = p.parse_args(argv)
     manifest = load_manifest(a.manifest_path)
-    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"), now=datetime.now(UTC))
+    # §1v4: the CLI never injects a clock; every mode derives its time from _now_utc() internally.
+    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"))
     cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
     if a.apply or a.restore:
         raise SystemExit(

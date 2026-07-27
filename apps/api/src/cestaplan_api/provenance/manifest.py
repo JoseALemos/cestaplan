@@ -42,7 +42,8 @@ _EXCLUDED_DIRS = frozenset({
 _EXCLUDED_SUFFIXES = (".pyc", ".pyo", ".pyd", ".log", ".tmp", ".swp", ".swo", ".dump", ".sqlite",
                       ".sqlite3", ".coverage", ".orig", ".rej")
 _EXCLUDED_NAMES = frozenset({
-    "build-provenance.json", "build-provenance.sha256", ".DS_Store", ".coverage", ".env",
+    "build-provenance.json", "build-provenance.sha256", "build-provenance.json.sha256",
+    ".DS_Store", ".coverage", ".env",
 })
 _EXCLUDED_NAME_PATTERNS = (
     re.compile(r"^\.env(\..+)?$"),          # .env, .env.local, .env.production, ...
@@ -69,6 +70,16 @@ def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
     return (st.st_size, st.st_ino, st.st_mode, st.st_mtime_ns, st.st_ctime_ns)
 
 
+def _nofollow_flag() -> int:
+    """The O_NOFOLLOW open flag, resolved dynamically so tests can remove it. If the platform lacks
+    it we CANNOT open files without following symlinks, so we fail closed rather than silently fall
+    back to a symlink-following O_RDONLY (spec §3v4)."""
+    flag = getattr(os, "O_NOFOLLOW", 0)
+    if not flag:
+        raise ProvenanceError("o_nofollow_unavailable", "")
+    return flag
+
+
 def _add_file(base: Path, path: Path, entries: dict[str, dict[str, Any]]) -> None:
     # rel is the WALK-relative path. Symlinks are rejected OUTRIGHT for these production scopes (no
     # need to follow any) — O_NOFOLLOW makes the check atomic with the open, closing the TOCTOU
@@ -78,7 +89,7 @@ def _add_file(base: Path, path: Path, entries: dict[str, dict[str, Any]]) -> Non
         raise ProvenanceError("control_char_in_path", "")
     if rel in entries:
         raise ProvenanceError("duplicate_path", rel)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | _nofollow_flag()
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -120,16 +131,35 @@ def build_manifest(base: str | os.PathLike[str], includes: list[str]) -> list[di
     base_path = Path(base).resolve()
     if not base_path.is_dir():
         raise ProvenanceError("base_not_a_directory", "")
+    _nofollow_flag()  # fail closed on platforms without O_NOFOLLOW (spec §3v4)
     entries: dict[str, dict[str, Any]] = {}
     for inc in includes:
         target = (base_path / inc)
-        if not target.exists():
-            raise ProvenanceError("include_missing", inc)
-        if target.is_file():
+        # §3v4: NEVER call exists()/is_file() first — those FOLLOW symlinks. Use lstat so an include
+        # root that is a symlink (to a file OR a directory) is rejected outright, not followed.
+        try:
+            st = os.lstat(target)
+        except FileNotFoundError as exc:
+            raise ProvenanceError("include_missing", inc) from exc
+        except OSError as exc:
+            raise ProvenanceError("include_unreadable", inc) from exc
+        if statmod.S_ISLNK(st.st_mode):
+            raise ProvenanceError("symlink_rejected", inc)
+        if statmod.S_ISREG(st.st_mode):
             _add_file(base_path, target, entries)
             continue
+        if not statmod.S_ISDIR(st.st_mode):
+            raise ProvenanceError("irregular_file", inc)
         for root, dirs, files in os.walk(target, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if not _dir_excluded(d))
+            kept = sorted(d for d in dirs if not _dir_excluded(d))
+            # §3v4: every enumerated (non-excluded) subdirectory must be a REAL directory. os.walk
+            # with followlinks=False would silently NOT recurse a directory symlink; instead reject
+            # it explicitly (lstat / follow_symlinks=False) — never skip it silently.
+            for d in kept:
+                dst = os.lstat(os.path.join(root, d))
+                if statmod.S_ISLNK(dst.st_mode) or not statmod.S_ISDIR(dst.st_mode):
+                    raise ProvenanceError("symlink_rejected", d)
+            dirs[:] = kept
             for fn in sorted(files):
                 if file_excluded(fn):
                     continue

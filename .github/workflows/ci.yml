@@ -302,10 +302,12 @@ jobs:
         run: docker build -f apps/api/Dockerfile
              --build-arg BUILD_COMMIT_SHA="${{ github.sha }}" -t cestaplan-image .
 
-      - name: /app is immutable to the app user (§1v3)
+      - name: /app is immutable to the app user (§1v3) + build inputs covered (§4v4)
         run: |
           docker run --rm cestaplan-image python - <<'PY'
           import os, sys
+          from cestaplan_api.provenance import generator as g
+          from cestaplan_api.provenance.manifest import build_manifest
           def cannot_write(p):
               try:
                   open(p, "a").close(); return False
@@ -323,11 +325,17 @@ jobs:
                   return True
           bp, tr, code = ("/app/build-provenance.json", "/app/authorization-trust-root.json",
                           "/app/src/cestaplan_api/main.py")
+          manifest_paths = {e["path"] for e in build_manifest("/app", g.SOURCE_TREE_INCLUDES)}
           checks = {
               "provenance_no_modify": cannot_write(bp), "provenance_no_delete": cannot_delete(bp),
               "provenance_no_rename": cannot_rename(bp),
               "trust_no_modify": cannot_write(tr), "trust_no_delete": cannot_delete(tr),
-              "trust_no_rename": cannot_rename(tr), "code_no_modify": cannot_write(code)}
+              "trust_no_rename": cannot_rename(tr), "code_no_modify": cannot_write(code),
+              # §4v4: the image bakes ONLY the document (no .sha256 sidecar), and README.md — a build
+              # input for uv — is measured by the provenance scopes.
+              "provenance_exists": os.path.isfile(bp),
+              "sha256_sidecar_absent": not os.path.exists(bp + ".sha256"),
+              "readme_covered": "README.md" in manifest_paths}
           try:
               t = "/tmp/permtest"; open(t, "w").write("x"); os.remove(t); tmp_ok = True
           except OSError:

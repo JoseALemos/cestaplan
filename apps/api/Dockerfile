@@ -43,6 +43,8 @@ RUN uv sync --frozen --no-dev
 #    no `--build-arg` flag but Railway exposes SERVICE variables to the build ONLY when the Dockerfile
 #    declares the matching ARG — hence the three ARGs below. The build fails closed without a valid
 #    commit; the document is baked into the image and no runtime var can replace it.
+#    §4v4: the image bakes ONLY /app/build-provenance.json — NOT a build-provenance.json.sha256
+#    sidecar. The separate hash is (re)computed and published solely in CI, never inside the image.
 ARG BUILD_COMMIT_SHA=""
 ARG RAILWAY_GIT_COMMIT_SHA=""
 ARG APP_COMMIT_SHA=""
@@ -50,7 +52,7 @@ RUN BUILD_COMMIT_SHA="$BUILD_COMMIT_SHA" \
     RAILWAY_GIT_COMMIT_SHA="$RAILWAY_GIT_COMMIT_SHA" \
     APP_COMMIT_SHA="$APP_COMMIT_SHA" \
     /app/.venv/bin/python -m cestaplan_api.provenance.generate \
-        --base /app --out /app/build-provenance.json --print-sha256
+        --base /app --out /app/build-provenance.json
 
 # ---------- Runtime: slim, non-root, IMMUTABLE /app ----------
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime

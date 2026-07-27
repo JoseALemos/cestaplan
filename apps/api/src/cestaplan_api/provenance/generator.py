@@ -48,8 +48,11 @@ TRUST_ROOT_FILENAME = "authorization-trust-root.json"
 BUILD_AUTHORIZATION_TRUST_ROOT_PATH = "/app/authorization-trust-root.json"
 
 # Build-affecting, runtime-relevant files hashed in EVERY scope (Dockerfile + trust-root move all
-# three hashes, so a toolchain or trust-root change can never leave the hashes unchanged).
-_BUILD_FILES = ["Dockerfile", TRUST_ROOT_FILENAME]
+# three hashes, so a toolchain or trust-root change can never leave the hashes unchanged). README.md
+# is a BUILD INPUT — pyproject's `readme` points at it and it is COPYed before `uv sync`, so it can
+# affect the installed package; it is measured in every scope so a README change moves all three
+# hashes (§4v4).
+_BUILD_FILES = ["Dockerfile", TRUST_ROOT_FILENAME, "README.md"]
 SOURCE_TREE_INCLUDES = ["src", "migrations", "alembic.ini", "pyproject.toml", "uv.lock",
                         *_BUILD_FILES]
 API_ARTIFACT_INCLUDES = ["src/cestaplan_api", "src/cestaplan_engine", "migrations", "alembic.ini",

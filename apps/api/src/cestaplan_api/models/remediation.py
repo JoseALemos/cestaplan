@@ -60,8 +60,10 @@ class HistoryRemediationRun(BaseModel):
     planner_tool_version: Mapped[str] = mapped_column(Text, nullable=False)
     planner_source_hash: Mapped[str] = mapped_column(Text, nullable=False)
     writer_contract_version: Mapped[str] = mapped_column(Text, nullable=False)
-    main_commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
-    alembic_revision: Mapped[str] = mapped_column(Text, nullable=False)
+    # §5v4: nullable — a failed-run audit persists NULL when no REAL observed commit / live Alembic
+    # revision is available, rather than fabricating an empty string that would read as evidence.
+    main_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alembic_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_mode: Mapped[str] = mapped_column(
         enum_col(*REMEDIATION_MODES, name="history_remediation_mode"), nullable=False
     )
