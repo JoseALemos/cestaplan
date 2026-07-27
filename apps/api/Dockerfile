@@ -32,6 +32,19 @@ COPY apps/api/migrations ./migrations
 COPY apps/api/alembic.ini ./alembic.ini
 RUN uv sync --frozen --no-dev
 
+# 3) Immutable build provenance (feat immutable-build-provenance): a canonical, reproducible
+#    document over the runtime bundle (/app == repo apps/api, base-relative-identical). The commit
+#    MUST be supplied as a build arg; the build fails closed if valid evidence cannot be produced.
+#    NOTE: `railway up` does not set RAILWAY_GIT_COMMIT_SHA, so the deploy MUST pass
+#    `--build-arg BUILD_COMMIT_SHA=<full 40-hex commit>` (GitHub-integrated builds may instead
+#    provide RAILWAY_GIT_COMMIT_SHA). The document is baked into the image; no runtime var replaces it.
+ARG BUILD_COMMIT_SHA=""
+ARG RAILWAY_GIT_COMMIT_SHA=""
+RUN COMMIT="${BUILD_COMMIT_SHA:-$RAILWAY_GIT_COMMIT_SHA}" \
+    && /app/.venv/bin/python -m cestaplan_api.provenance.generate \
+        --base /app --commit-sha "$COMMIT" \
+        --out /app/build-provenance.json --print-sha256
+
 # ---------- Runtime: slim, non-root ----------
 FROM python:3.12-slim AS runtime
 
@@ -47,7 +60,8 @@ COPY --from=builder --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8000 \
+    BUILD_PROVENANCE_PATH=/app/build-provenance.json
 
 USER app
 

@@ -214,6 +214,10 @@ def load_build_provenance(path: str | None = None) -> BuildProvenance:
         return BuildProvenance()
     if not isinstance(doc, dict):
         return BuildProvenance()
+    # Only a document from the known generator schema is accepted; anything else fails closed.
+    from cestaplan_api.provenance.generator import EVIDENCE_DOCUMENT_SCHEMA_VERSION
+    if doc.get("schema_version") != EVIDENCE_DOCUMENT_SCHEMA_VERSION:
+        return BuildProvenance()
     return BuildProvenance(
         commit_sha=doc.get("commit_sha"), source_tree_hash=doc.get("source_tree_hash"),
         api_artifact_hash=doc.get("api_artifact_hash"),
@@ -388,9 +392,12 @@ class ApplyContext:
     backup: BackupEvidence | None = None
     operator_reference: str | None = None
     now: datetime | None = None
+    # Sanitized status of the sealed authorization package (set by from_environment); EXPECTED
+    # come from that package, never from the same runtime env that supplies the OBSERVED values.
+    authorization: dict[str, Any] | None = None
 
     @classmethod
-    def from_environment(cls, **overrides: Any) -> ApplyContext:
+    def from_environment(cls, *, plan_hash: str | None = None, **overrides: Any) -> ApplyContext:
         base = cls(
             app_commit_sha=os.environ.get("APP_COMMIT_SHA"),
             deployed_api_sha=os.environ.get("DEPLOYED_API_SHA") or os.environ.get("APP_COMMIT_SHA"),
@@ -398,9 +405,70 @@ class ApplyContext:
             expected_main_sha=os.environ.get("EXPECTED_MAIN_SHA"),
             expected_alembic=os.environ.get("EXPECTED_ALEMBIC_REVISION"),
             observed_provenance=load_build_provenance())
+        # Load the sealed authorization package if present; it (and ONLY it) supplies expected.
+        status, pkg = _load_authorization(plan_hash, base.now or datetime.now(UTC))
+        base.authorization = status
+        if pkg is not None:
+            base.expected_provenance = ExpectedProvenance(**pkg.expected_provenance_fields())
+            base.expected_main_sha = pkg.main_commit_sha
+            base.expected_alembic = pkg.alembic_revision
+            base.expected_product_price = pkg.expected_product_price
+            base.expected_active_mappings = pkg.expected_active_mappings
+            base.operator_reference = pkg.operator_reference
         for k, v in overrides.items():
             setattr(base, k, v)
         return base
+
+
+def _load_authorization(plan_hash: str | None, now: datetime) -> tuple[dict[str, Any], Any]:
+    """Load + verify the sealed authorization package from env-pointed files (feat provenance). No
+    package (or no plan_hash to bind) -> (absent status, None). Any failure -> sanitized status +
+    None; expected provenance therefore stays empty and apply_ready stays false."""
+    pkg_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
+    sig_path = os.environ.get("AUTHORIZATION_SIGNATURE_PATH")
+    if not pkg_path or not sig_path or plan_hash is None:
+        return {"package_present": False}, None
+    if not Path(pkg_path).is_file() or not Path(sig_path).is_file():
+        return {"package_present": False, "error_code": "package_files_missing"}, None
+    keys = [k for k in re.split(r"[,\s]+", os.environ.get("AUTHORIZATION_PUBLIC_KEYS", "")) if k]
+    from cestaplan_api.provenance import AuthorizationError, load_authorization_package
+    try:
+        pkg = load_authorization_package(
+            Path(pkg_path).read_bytes(), Path(sig_path).read_text().strip(),
+            authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
+    except AuthorizationError as exc:
+        sig_codes = {"signature_not_authorized", "signature_malformed", "no_authorized_public_keys"}
+        return {"package_present": True, "signature_valid": exc.code not in sig_codes,
+                "expired": exc.code == "package_expired", "error_code": exc.code}, None
+    return {"package_present": True, "signature_valid": True, "expired": False,
+            "authorization_id": pkg.authorization_id,
+            "key_fingerprint": pkg.public_key_fingerprint}, pkg
+
+
+def _provenance_report(m: dict[str, Any], ctx: ApplyContext) -> dict[str, Any]:
+    """Sanitized provenance status for verify-only (no hashes leaked — only match booleans)."""
+    gates = dict(_provenance_gates(m, ctx))
+    o = ctx.observed_provenance
+    return {
+        "document_found": o.document_hash is not None,
+        "schema_valid": o.document_hash is not None,  # load_build_provenance rejects other schemas
+        "commit_present": _valid_commit(o.commit_sha),
+        "source_tree_match": gates.get("provenance_source_matches", False),
+        "api_artifact_match": gates.get("provenance_api_artifact_matches", False),
+        "worker_artifact_match": gates.get("provenance_worker_artifact_matches", False),
+        "document_match": gates.get("provenance_document_matches", False),
+        "immutable_build_provenance": gates.get("immutable_build_provenance", False),
+    }
+
+
+def _authorization_report(ctx: ApplyContext) -> dict[str, Any]:
+    a = ctx.authorization or {"package_present": False}
+    return {
+        "package_present": a.get("package_present", False),
+        "signature_valid": a.get("signature_valid", False),
+        "expired": a.get("expired", False),
+        "error_code": a.get("error_code"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -989,6 +1057,9 @@ def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
         "gates_blocking": sorted(blocking),
         "apply_ready": (not blocking) and not apply_blockers,
         "apply_blockers": apply_blockers,
+        "provenance": _provenance_report(m, ctx),
+        # NOT "authorization": that key name is on the sensitive-key denylist (scan_sensitive).
+        "authorization_status": _authorization_report(ctx),
     }
     return report
 
@@ -1804,7 +1875,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
     mode.add_argument("--restore", metavar="RUN_PUBLIC_ID")
     a = p.parse_args(argv)
     manifest = load_manifest(a.manifest_path)
-    ctx = ApplyContext.from_environment(now=datetime.now(UTC))
+    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"), now=datetime.now(UTC))
     cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
     if a.apply or a.restore:
         raise SystemExit(

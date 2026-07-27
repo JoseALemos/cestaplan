@@ -167,3 +167,74 @@ jobs:
       - name: JS audit (pnpm audit)
         continue-on-error: true
         run: pnpm audit --audit-level high
+
+  # -------------------------------------------------------------------------
+  # Build provenance: prove the build-provenance document is reproducible and
+  # correctly scoped. Uses github.sha only — no secrets, no Railway variables.
+  # API and worker share ONE image (apps/api/Dockerfile), so their documents are
+  # identical by construction; CI proves the image document == the repo-reproduced
+  # document and that scope mutations move the right hashes.
+  # -------------------------------------------------------------------------
+  build-provenance:
+    name: build provenance (reproducible + scoped)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (with Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        working-directory: apps/api
+        run: uv sync --frozen
+
+      - name: Generate twice and require byte-for-byte equality
+        working-directory: apps/api
+        run: |
+          uv run python -m cestaplan_api.provenance.generate \
+            --base . --commit-sha "${{ github.sha }}" \
+            --out /tmp/build-provenance.json --print-sha256
+          uv run python -m cestaplan_api.provenance.generate \
+            --base . --commit-sha "${{ github.sha }}" --out /tmp/second.json
+          cmp /tmp/build-provenance.json /tmp/second.json
+
+      - name: Validate hashes, per-scope mutations and exclusions (unit suite)
+        working-directory: apps/api
+        run: uv run pytest tests/provenance -q
+
+      - name: Emit sanitized manifests (paths + content hashes + sizes only)
+        working-directory: apps/api
+        run: |
+          uv run python - <<'PY'
+          import json
+          from cestaplan_api.provenance import generator as g
+          from cestaplan_api.provenance.manifest import build_manifest
+          for name, inc in (("api", g.API_ARTIFACT_INCLUDES),
+                            ("worker", g.WORKER_ARTIFACT_INCLUDES)):
+              with open(f"/tmp/manifest-{name}.json", "w") as fh:
+                  json.dump(build_manifest(".", inc), fh, sort_keys=True, indent=2)
+          PY
+
+      - name: Build the shared image and extract the baked document
+        run: |
+          docker build -f apps/api/Dockerfile \
+            --build-arg BUILD_COMMIT_SHA="${{ github.sha }}" -t cestaplan-image .
+          cid=$(docker create cestaplan-image)
+          docker cp "$cid:/app/build-provenance.json" /tmp/image-provenance.json
+          docker rm "$cid"
+
+      - name: Require image document == repo-reproduced document
+        run: cmp /tmp/build-provenance.json /tmp/image-provenance.json
+
+      - name: Upload provenance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-provenance
+          path: |
+            /tmp/build-provenance.json
+            /tmp/build-provenance.json.sha256
+            /tmp/manifest-api.json
+            /tmp/manifest-worker.json
