@@ -52,19 +52,25 @@ RUN BUILD_COMMIT_SHA="$BUILD_COMMIT_SHA" \
     /app/.venv/bin/python -m cestaplan_api.provenance.generate \
         --base /app --out /app/build-provenance.json --print-sha256
 
-# ---------- Runtime: slim, non-root ----------
+# ---------- Runtime: slim, non-root, IMMUTABLE /app ----------
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
-# Create an unprivileged user to run the app.
-RUN groupadd --system app && useradd --system --gid app --home-dir /app app
+# Unprivileged user with its OWN writable home (NOT /app); any runtime scratch goes to /tmp or $HOME.
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /home/app --create-home --shell /usr/sbin/nologin app
 
 WORKDIR /app
 
-# Copy the fully-built app (including the .venv) from the builder.
-COPY --from=builder --chown=app:app /app /app
+# Copy the fully-built app (including the .venv) as root — the app user must NOT own /app (§1v3).
+COPY --from=builder /app /app
 
-# Put the virtualenv first on PATH so `uvicorn`, `python` and `alembic` resolve to it.
+# Lock /app down: root owns everything, and the write bit is removed for EVERYONE. The app user can
+# read + execute but cannot modify or (because no directory under /app is writable) create, delete or
+# rename any file — including build-provenance.json, the trust-root, code, migrations and .venv.
+RUN chown -R root:root /app && chmod -R a-w /app
+
 ENV PATH="/app/.venv/bin:$PATH" \
+    HOME=/home/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \

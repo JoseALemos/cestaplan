@@ -6,13 +6,16 @@ of the content, and the byte size. It contains NO mtimes, owners, absolute paths
 copy without a git-mode source, so the contract does not depend on it), so the same source tree
 always yields the same manifest and the same hash — byte-for-byte, on any machine.
 
-Hashing is race-safe: each file is read through a single file descriptor, with an ``fstat`` before
-and after the read plus a follow ``stat`` of the path, so a same-size in-place mutation, an atomic
-replacement, a type change or a truncation during the scan all fail closed.
+Hashing is race-safe and TOCTOU-free: symlinks are rejected outright via ``O_NOFOLLOW`` (no
+is_symlink() pre-check to race), and each file is read through a single descriptor with an ``fstat``
+before and after plus an ``O_NOFOLLOW`` re-open, so a same-size in-place mutation, an atomic
+replacement (regular file or symlink swap), a type change or a truncation during the scan all fail
+closed.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -67,23 +70,25 @@ def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 def _add_file(base: Path, path: Path, entries: dict[str, dict[str, Any]]) -> None:
-    # rel is the WALK-relative path (not resolved), so an in-tree symlink keeps its own name.
+    # rel is the WALK-relative path. Symlinks are rejected OUTRIGHT for these production scopes (no
+    # need to follow any) — O_NOFOLLOW makes the check atomic with the open, closing the TOCTOU
+    # window between an is_symlink() pre-check and the open (spec §8).
     rel = path.relative_to(base).as_posix()
     if _CONTROL_RE.search(rel):
         raise ProvenanceError("control_char_in_path", "")
     if rel in entries:
         raise ProvenanceError("duplicate_path", rel)
-    # A symlink whose target escapes the tree is rejected; an in-tree symlink is hashed by target.
-    if path.is_symlink():
-        try:
-            path.resolve().relative_to(base)
-        except ValueError as exc:
-            raise ProvenanceError("symlink_escapes_tree", path.name) from exc  # name only
-    fd = os.open(path, os.O_RDONLY)  # follows an in-tree symlink to its target
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if getattr(exc, "errno", None) in (errno.ELOOP, errno.EMLINK):
+            raise ProvenanceError("symlink_rejected", path.name) from exc  # name only
+        raise ProvenanceError("file_unreadable", rel) from exc
     try:
         st0 = os.fstat(fd)
-        if not statmod.S_ISREG(st0.st_mode):
-            raise ProvenanceError("irregular_file", rel)
+        if statmod.S_ISLNK(st0.st_mode) or not statmod.S_ISREG(st0.st_mode):
+            raise ProvenanceError("irregular_file", rel)  # only regular files are hashed
         h = hashlib.sha256()
         size = 0
         while chunk := os.read(fd, _CHUNK):
@@ -92,8 +97,14 @@ def _add_file(base: Path, path: Path, entries: dict[str, dict[str, Any]]) -> Non
         st1 = os.fstat(fd)
     finally:
         os.close(fd)
+    # An atomic replacement of the path during the hash is caught by re-opening with O_NOFOLLOW: a
+    # swap to a symlink fails ELOOP; a swap to a new regular file changes the inode.
     try:
-        after = os.stat(path)  # follow: detects an atomic replacement of the target
+        vfd = os.open(path, flags)
+        try:
+            after = os.fstat(vfd)
+        finally:
+            os.close(vfd)
     except OSError as exc:
         raise ProvenanceError("file_changed_during_scan", rel) from exc
     if (_stat_key(st0) != _stat_key(st1) or size != st1.st_size

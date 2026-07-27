@@ -270,3 +270,93 @@ jobs:
             /tmp/manifest-worker.json
             /tmp/authorization-trust-root.json
             /tmp/authorization-trust-root.sha256
+
+  # -------------------------------------------------------------------------
+  # Image runtime: build the REAL image and prove /app is immutable to the app
+  # user (spec §1v3) and that API + worker start as that user. No secrets.
+  # -------------------------------------------------------------------------
+  image-runtime:
+    name: image runtime (immutable /app, app-user startup)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cestaplan
+          POSTGRES_PASSWORD: cestaplan
+          POSTGRES_DB: cestaplan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cestaplan"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://cestaplan:cestaplan@localhost:5432/cestaplan
+      DEPLOYMENT_MODE: self_hosted
+      AI_BILLING_MODE: disabled
+      SESSION_SECRET: ci-not-a-real-secret-just-32-bytes-long
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -f apps/api/Dockerfile
+             --build-arg BUILD_COMMIT_SHA="${{ github.sha }}" -t cestaplan-image .
+
+      - name: /app is immutable to the app user (§1v3)
+        run: |
+          docker run --rm cestaplan-image python - <<'PY'
+          import os, sys
+          def cannot_write(p):
+              try:
+                  open(p, "a").close(); return False
+              except OSError:
+                  return True
+          def cannot_delete(p):
+              try:
+                  os.remove(p); return False
+              except OSError:
+                  return True
+          def cannot_rename(p):
+              try:
+                  os.rename(p, p + ".x"); return False
+              except OSError:
+                  return True
+          bp, tr, code = ("/app/build-provenance.json", "/app/authorization-trust-root.json",
+                          "/app/src/cestaplan_api/main.py")
+          checks = {
+              "provenance_no_modify": cannot_write(bp), "provenance_no_delete": cannot_delete(bp),
+              "provenance_no_rename": cannot_rename(bp),
+              "trust_no_modify": cannot_write(tr), "trust_no_delete": cannot_delete(tr),
+              "trust_no_rename": cannot_rename(tr), "code_no_modify": cannot_write(code)}
+          try:
+              t = "/tmp/permtest"; open(t, "w").write("x"); os.remove(t); tmp_ok = True
+          except OSError:
+              tmp_ok = False
+          print("uid", os.getuid(), checks, "tmp_ok", tmp_ok)
+          sys.exit(0 if all(checks.values()) and tmp_ok else 1)
+          PY
+
+      - name: Apply migrations from the image (as the app user)
+        run: docker run --rm --network host -e DATABASE_URL -e DEPLOYMENT_MODE
+             -e AI_BILLING_MODE -e SESSION_SECRET cestaplan-image alembic upgrade head
+
+      - name: API starts and serves /health (as the app user)
+        run: |
+          docker run -d --name apitest --network host -e DATABASE_URL -e DEPLOYMENT_MODE \
+            -e AI_BILLING_MODE -e SESSION_SECRET -e PORT=8091 cestaplan-image
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8091/health || true)
+            [ "$code" = "200" ] && ok=1 && break; sleep 2
+          done
+          docker logs apitest | tail -20; docker rm -f apitest
+          [ "${ok:-0}" = "1" ] || { echo "FAIL: API did not become healthy"; exit 1; }
+
+      - name: Worker imports and starts its loop (as the app user)
+        run: |
+          set +e
+          docker run --rm --network host -e DATABASE_URL -e DEPLOYMENT_MODE -e AI_BILLING_MODE \
+            -e SESSION_SECRET cestaplan-image timeout 8 python -m cestaplan_api.jobs.crawl_worker
+          rc=$?
+          # 124 == still running when timeout fired (healthy loop); 0 == clean exit. Anything else fails.
+          [ "$rc" = "124" ] || [ "$rc" = "0" ] || { echo "FAIL: worker exited rc=$rc"; exit 1; }
+          echo "worker rc=$rc (ok)"

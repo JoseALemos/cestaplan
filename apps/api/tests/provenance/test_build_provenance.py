@@ -155,12 +155,35 @@ def test_atomic_replacement_during_scan_blocks(tmp_path: Path, monkeypatch) -> N
     assert ei.value.code == "file_changed_during_scan"
 
 
-def test_internal_symlink_is_hashed_not_rejected(tmp_path: Path) -> None:  # §7
+def test_internal_symlink_is_rejected(tmp_path: Path) -> None:  # §8 — no symlink is followed
     base = _bundle(tmp_path)
     os.symlink(base / "src/cestaplan_api/__init__.py", base / "src/cestaplan_api/alias.py")
-    manifest = build_manifest(base, ["src/cestaplan_api"])
-    paths = {e["path"] for e in manifest}
-    assert "src/cestaplan_api/alias.py" in paths  # in-tree symlink is included by its own name
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["src/cestaplan_api"])
+    assert ei.value.code == "symlink_rejected"
+
+
+def test_symlink_swap_between_stat_and_open_is_rejected(tmp_path: Path, monkeypatch) -> None:  # §8
+    base = _bundle(tmp_path)
+    target = base / "pyproject.toml"
+    outside = tmp_path.parent / "evil.txt"
+    outside.write_text("evil")
+    from cestaplan_api.provenance import manifest as mani
+    real_open = os.open
+    state = {"done": False}
+
+    def racing_open(path, flags, *a, **k):
+        # simulate a TOCTOU swap: replace the regular file with a symlink just before the real open
+        if not state["done"] and str(path).endswith("pyproject.toml"):
+            state["done"] = True
+            target.unlink()
+            os.symlink(outside, target)
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(mani.os, "open", racing_open)
+    with pytest.raises(ProvenanceError) as ei:
+        build_manifest(base, ["pyproject.toml"])
+    assert ei.value.code == "symlink_rejected"  # O_NOFOLLOW refuses the swapped symlink atomically
 
 
 def test_repo_and_copied_bundle_produce_identical_document(tmp_path: Path) -> None:  # §7
@@ -222,15 +245,14 @@ def test_file_excluded_predicate() -> None:
         assert not file_excluded(name), name
 
 
-def test_unsafe_symlink_escaping_tree_is_blocked(tmp_path: Path) -> None:
+def test_external_symlink_is_rejected(tmp_path: Path) -> None:  # §8
     base = _bundle(tmp_path)
     outside = tmp_path.parent / "outside_secret.txt"
     outside.write_text("secret outside repo")
-    link = base / "src/cestaplan_api/escape.py"
-    os.symlink(outside, link)
+    os.symlink(outside, base / "src/cestaplan_api/escape.py")
     with pytest.raises(ProvenanceError) as ei:
         build_manifest(base, ["src"])
-    assert ei.value.code == "symlink_escapes_tree"
+    assert ei.value.code == "symlink_rejected"
 
 
 def test_malformed_commit_is_blocked(tmp_path: Path) -> None:

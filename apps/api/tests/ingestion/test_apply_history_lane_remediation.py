@@ -57,6 +57,16 @@ _BACKUP_REF_HASH = hashlib.sha256(_BACKUP_REF.encode()).hexdigest()
 # The baked trust-root ships EMPTY in this PR (no real key); its hash binds the build identity.
 _TRUST_ROOT_PATH = str(Path(__file__).resolve().parents[2] / "authorization-trust-root.json")
 _TRUST_HASH = hashlib.sha256(Path(_TRUST_ROOT_PATH).read_bytes()).hexdigest()
+# Simulated verified-authorization identity (tests build ApplyContext directly — the internal
+# explicit API — no signature is checked here; a package FILE with the matching self-hash lets
+# anti-substitution gate pass). §3v3.
+_AUTH_ID = "auth-test-2026-07-27-001"
+_AUTH_PKG_HASH = "9" * 64
+_AUTH_FP = "abcdef0123456789"
+# Fixed authorization validity window (computed once at import; < 1h old for the whole suite) so an
+# apply and its restore share the SAME identity — the restore binding requires exact equality.
+_AUTH_GEN = datetime.now(UTC) - timedelta(minutes=1)
+_AUTH_EXP = datetime.now(UTC) + timedelta(hours=1)
 CONFIRM = ("I_UNDERSTAND_THIS_WRITES", "PLAN_REVIEWED", "BACKUP_VERIFIED")
 RESTORE_CONFIRM = ("I_UNDERSTAND_THIS_RESTORES", "RUN_REVIEWED")
 
@@ -64,18 +74,24 @@ _BACKUP: dict[str, Any] = {}
 
 
 @pytest.fixture(autouse=True)
-def _bake_trust_root():
-    """Point the executor at the baked (empty) trust-root file for the whole module. Uses os.environ
-    directly (not monkeypatch) so a test's own monkeypatch.undo() cannot clear it."""
-    prev = os.environ.get("BUILD_AUTHORIZATION_TRUST_ROOT_PATH")
+def _bake_trust_root(tmp_path_factory):
+    """Point the executor at the baked (empty) trust-root + a stub authorization package for the
+    whole module. Uses os.environ directly (not monkeypatch) so a test's own monkeypatch.undo()
+    cannot clear it. The package carries only the self-hash the anti-substitution gate checks."""
+    pkg = tmp_path_factory.mktemp("authpkg") / "pkg.json"
+    pkg.write_text(json.dumps({"authorization_package_hash": _AUTH_PKG_HASH}))
+    prev = {k: os.environ.get(k) for k in
+            ("BUILD_AUTHORIZATION_TRUST_ROOT_PATH", "AUTHORIZATION_PACKAGE_PATH")}
     os.environ["BUILD_AUTHORIZATION_TRUST_ROOT_PATH"] = _TRUST_ROOT_PATH
+    os.environ["AUTHORIZATION_PACKAGE_PATH"] = str(pkg)
     try:
         yield
     finally:
-        if prev is None:
-            os.environ.pop("BUILD_AUTHORIZATION_TRUST_ROOT_PATH", None)
-        else:
-            os.environ["BUILD_AUTHORIZATION_TRUST_ROOT_PATH"] = prev
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -149,7 +165,7 @@ def _live_counts(db: Session) -> tuple[int, int]:
     return pp, mp
 
 
-def _ctx(db: Session, *, backup: Any = "default", **over):
+def _ctx(db: Session, *, backup: Any = "default", m: Any = None, **over):
     pp, mp = _live_counts(db)
     now = datetime.now(UTC)
     live_alembic = _alembic(db)
@@ -168,13 +184,29 @@ def _ctx(db: Session, *, backup: Any = "default", **over):
         "expected_backup_sha256": _BACKUP["sha256"],
         "expected_backup_storage_reference": _BACKUP_REF,
         "expected_backup_storage_reference_hash": _BACKUP_REF_HASH,
+        # Simulated verified authorization identity (§3v3). authorization_plan_hash is bound to the
+        # manifest by the _apply/_verify/_restore helpers.
+        "authorization": {"package_present": True, "signature_valid": True},
+        "authorization_id": _AUTH_ID, "authorization_package_hash": _AUTH_PKG_HASH,
+        "authorization_key_fingerprint": _AUTH_FP,
+        "authorization_generated_at": _AUTH_GEN,
+        "authorization_expires_at": _AUTH_EXP,
+        "authorization_valid": True,
+        "authorization_plan_hash": m["plan_hash"] if m else None,
         "operator_reference": "ticket-OPS-1", "now": now}
     base.update(over)
     return apply_tool.ApplyContext(**base)
 
 
+def _bind_plan(ctx, plan_hash):
+    """Bind the simulated authorization to a plan_hash (the manifest's, or a run's) when unset."""
+    if getattr(ctx, "authorization_valid", False) and ctx.authorization_plan_hash is None:
+        ctx.authorization_plan_hash = plan_hash
+    return ctx
+
+
 def _verify(db, m, ctx):  # bypasses the public snapshot-pinning for the seeded db_session fixture
-    return apply_tool._verify_report(db, m, ctx)
+    return apply_tool._verify_report(db, m, _bind_plan(ctx, m["plan_hash"]))
 
 
 def _blocking(db, m, ctx):
@@ -187,7 +219,7 @@ def _apply(db, m, ctx, **kw):
     # enforces every real gate; the public virgin gate is covered separately (§6 session tests).
     kw.setdefault("authorized", True)
     kw.setdefault("confirmations", CONFIRM)
-    return apply_tool._apply_guarded(db, m, ctx, **kw)
+    return apply_tool._apply_guarded(db, m, _bind_plan(ctx, m["plan_hash"]), **kw)
 
 
 def _counts(db, rid):
@@ -240,7 +272,7 @@ def test_public_verify_only_pins_readonly_snapshot() -> None:  # §10
         try:
             m = _manifest_committed(slug)
             probe = _isession()  # build ctx from a throwaway session so `s` stays pristine
-            ctx = _ctx(probe)
+            ctx = _ctx(probe, m=m)
             probe.close()
             apply_tool.verify_only(s, m, ctx)  # pins the snapshot as its first statement on `s`
             assert s.execute(text("SHOW transaction_read_only")).scalar() == "on"
@@ -318,6 +350,10 @@ def test_apply_writes_deterministic_audit(db_session: Session) -> None:  # §11.
 def _restore(db, run_id, ctx, **kw):
     kw.setdefault("authorized", True)
     kw.setdefault("confirmations", RESTORE_CONFIRM)
+    plan = db.execute(select(HistoryRemediationRun.plan_hash).where(
+        HistoryRemediationRun.public_id == run_id)).scalar()
+    if plan is not None:
+        _bind_plan(ctx, plan)
     return apply_tool._restore_guarded(db, run_id, ctx, **kw)
 
 
@@ -849,7 +885,7 @@ def test_two_concurrent_applies_only_one_wins(committed_dup_lane) -> None:  # §
     barrier = threading.Barrier(2)
 
     probe = _isession()
-    ctx = _ctx(probe)  # build ctx off a throwaway session; execute_apply owns its own session
+    ctx = _ctx(probe, m=m)  # build ctx off a throwaway session; execute_apply owns its own session
     probe.close()
 
     def run():
@@ -872,7 +908,7 @@ def test_apply_then_restore_committed(committed_dup_lane) -> None:  # §11.22 / 
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    apply_ctx = _ctx(probe)
+    apply_ctx = _ctx(probe, m=m)
     probe.close()
     # execute_apply owns the session AND commits; the caller never manages the transaction.
     res = apply_tool.execute_apply(m, apply_ctx, authorized=True, confirmations=CONFIRM)
@@ -885,7 +921,7 @@ def test_apply_then_restore_committed(committed_dup_lane) -> None:  # §11.22 / 
     finally:
         c.close()
     probe = _isession()
-    restore_ctx = _ctx(probe)
+    restore_ctx = _ctx(probe, m=m)
     probe.close()
     rest = apply_tool.execute_restore(res["run_public_id"], restore_ctx, authorized=True,
                                       confirmations=RESTORE_CONFIRM)
@@ -951,7 +987,7 @@ def test_retry_links_supersedes_run(committed_dup_lane, monkeypatch) -> None:  #
     s1 = _isession()
     try:
         with pytest.raises(apply_tool.ApplyPlanDrift) as ei:
-            apply_tool._apply_guarded(s1, m, _ctx(s1), authorized=True, confirmations=CONFIRM)
+            apply_tool._apply_guarded(s1, m, _ctx(s1, m=m), authorized=True, confirmations=CONFIRM)
         fid = ei.value.failed_run_id
     finally:
         s1.rollback()
@@ -960,7 +996,8 @@ def test_retry_links_supersedes_run(committed_dup_lane, monkeypatch) -> None:  #
     monkeypatch.undo()
     s2 = _isession()
     try:
-        res = apply_tool._apply_guarded(s2, m, _ctx(s2), authorized=True, confirmations=CONFIRM,
+        res = apply_tool._apply_guarded(s2, m, _ctx(s2, m=m), authorized=True,
+                                        confirmations=CONFIRM,
                                         previous_failed_run_id=fid)
         s2.commit()
         assert res["status"] == "applied"
@@ -1037,7 +1074,7 @@ def test_unexpected_error_rolls_back_and_sanitizes(committed_dup_lane, monkeypat
     s = _isession()
     try:
         with pytest.raises(RuntimeError):
-            apply_tool._apply_guarded(s, m, _ctx(s), authorized=True, confirmations=CONFIRM)
+            apply_tool._apply_guarded(s, m, _ctx(s, m=m), authorized=True, confirmations=CONFIRM)
     finally:
         s.rollback()
         s.close()
@@ -1394,7 +1431,7 @@ def test_execute_apply_commits_and_is_visible_to_another_connection(committed_du
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    ctx = _ctx(probe)
+    ctx = _ctx(probe, m=m)
     probe.close()
     try:
         res = apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
@@ -1422,12 +1459,12 @@ def test_execute_restore_commits_and_is_visible_to_another_connection(committed_
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    actx = _ctx(probe)
+    actx = _ctx(probe, m=m)
     probe.close()
     try:
         res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
         probe = _isession()
-        rctx = _ctx(probe)
+        rctx = _ctx(probe, m=m)
         probe.close()
         rest = apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
                                           confirmations=RESTORE_CONFIRM)
@@ -1453,7 +1490,7 @@ def test_execute_apply_failure_before_commit_leaves_zero_changes(committed_dup_l
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    ctx = _ctx(probe)
+    ctx = _ctx(probe, m=m)
     probe.close()
     monkeypatch.setattr(apply_tool, "_apply_row",
                         lambda *a, **k: _raise(apply_tool.ApplyPlanDrift("injected")))
@@ -1472,7 +1509,7 @@ def test_execute_apply_commit_failure_does_not_return_applied(committed_dup_lane
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    ctx = _ctx(probe)
+    ctx = _ctx(probe, m=m)
     probe.close()
 
     def failing_factory():
@@ -1496,13 +1533,13 @@ def test_execute_apply_reapply_after_session_close_is_already_applied(committed_
     slug, _rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    ctx = _ctx(probe)
+    ctx = _ctx(probe, m=m)
     probe.close()
     try:
         assert apply_tool.execute_apply(
             m, ctx, authorized=True, confirmations=CONFIRM)["status"] == "applied"
         probe = _isession()
-        ctx2 = _ctx(probe)
+        ctx2 = _ctx(probe, m=m)
         probe.close()
         # session fully closed between calls; the durable consumption record still blocks re-apply.
         assert apply_tool.execute_apply(
@@ -1515,17 +1552,17 @@ def test_execute_apply_restore_reapply_requires_regeneration(committed_dup_lane)
     slug, _rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    actx = _ctx(probe)
+    actx = _ctx(probe, m=m)
     probe.close()
     try:
         res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
         probe = _isession()
-        rctx = _ctx(probe)
+        rctx = _ctx(probe, m=m)
         probe.close()
         apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
                                    confirmations=RESTORE_CONFIRM)
         probe = _isession()
-        actx2 = _ctx(probe)
+        actx2 = _ctx(probe, m=m)
         probe.close()
         assert apply_tool.execute_apply(
             m, actx2, authorized=True,
@@ -1655,7 +1692,7 @@ def test_restore_drift_marks_manual_review_durably(committed_dup_lane) -> None: 
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    actx = _ctx(probe)
+    actx = _ctx(probe, m=m)
     probe.close()
     try:
         res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
@@ -1673,7 +1710,7 @@ def test_restore_drift_marks_manual_review_durably(committed_dup_lane) -> None: 
         finally:
             d.close()
         probe = _isession()
-        rctx = _ctx(probe)
+        rctx = _ctx(probe, m=m)
         probe.close()
         with pytest.raises(apply_tool.ApplyRestoreDrift):
             apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
@@ -1692,20 +1729,20 @@ def test_restore_provenance_bound_to_run(committed_dup_lane) -> None:  # §3v4
     slug, _rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
-    actx = _ctx(probe)
+    actx = _ctx(probe, m=m)
     probe.close()
     try:
         res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
 
         def _restore_with(**over):
             probe = _isession()
-            c = _ctx(probe, **over)
+            c = _ctx(probe, m=m, **over)
             probe.close()
             return apply_tool.execute_restore(res["run_public_id"], c, authorized=True,
                                               confirmations=RESTORE_CONFIRM)
 
         # A later but internally-valid package -> blocked (bound to the run, not self-coherent).
-        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        with pytest.raises((apply_tool.ApplyProvenanceMismatch, apply_tool.ApplyEnvironmentUnsafe)):
             _restore_with(app_commit_sha=_COMMIT2, deployed_api_sha=_COMMIT2,
                           deployed_worker_sha=_COMMIT2, expected_main_sha=_COMMIT2,
                           observed_provenance=apply_tool.BuildProvenance(
@@ -1713,16 +1750,16 @@ def test_restore_provenance_bound_to_run(committed_dup_lane) -> None:  # §3v4
                           expected_provenance=apply_tool.ExpectedProvenance(
                               _COMMIT2, _SRC2, _API2, _WRK2, _DOC2))
         # A different Alembic revision -> blocked.
-        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        with pytest.raises((apply_tool.ApplyProvenanceMismatch, apply_tool.ApplyEnvironmentUnsafe)):
             _restore_with(expected_alembic="not-the-applied-revision")
         # A different provenance document only -> blocked.
-        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        with pytest.raises((apply_tool.ApplyProvenanceMismatch, apply_tool.ApplyEnvironmentUnsafe)):
             _restore_with(observed_provenance=apply_tool.BuildProvenance(
                               _COMMIT, _SRC, _API, _WRK, _DOC2),
                           expected_provenance=apply_tool.ExpectedProvenance(
                               _COMMIT, _SRC, _API, _WRK, _DOC2))
         # A different worker artifact only -> blocked.
-        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        with pytest.raises((apply_tool.ApplyProvenanceMismatch, apply_tool.ApplyEnvironmentUnsafe)):
             _restore_with(observed_provenance=apply_tool.BuildProvenance(
                               _COMMIT, _SRC, _API, _WRK2, _DOC),
                           expected_provenance=apply_tool.ExpectedProvenance(
@@ -1786,7 +1823,7 @@ def test_run_persists_only_sanitized_reference_and_hash(db_session: Session) -> 
 # =========================================================================== #
 def _seal_apply(m: dict):
     probe = _isession()
-    ctx = _ctx(probe)
+    ctx = _ctx(probe, m=m)
     probe.close()
     return apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
 
@@ -1818,7 +1855,7 @@ def _sql_tamper(sql: str, params: dict) -> None:
 
 def _assert_restore_blocked_and_manual_review(res, m, rid, *, rolled=1) -> None:
     probe = _isession()
-    rctx = _ctx(probe)
+    rctx = _ctx(probe, m=m)
     probe.close()
     with pytest.raises(apply_tool.ApplyRestoreDrift):
         apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
@@ -1972,7 +2009,7 @@ def test_seal_positive_restore_roundtrip(committed_dup_lane) -> None:  # §3v5 p
     m = _manifest_committed(slug)
     res = _seal_apply(m)  # session fully closed by execute_apply
     probe = _isession()
-    rctx = _ctx(probe)
+    rctx = _ctx(probe, m=m)
     probe.close()
     rest = apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
                                       confirmations=RESTORE_CONFIRM)
@@ -2059,27 +2096,24 @@ def test_authorization_identity_persisted_and_sealed(db_session: Session) -> Non
     r, v = _fixture(db_session)
     _dup_lane(db_session, r.id, v.id)
     m = _make_manifest(db_session)
-    gen = datetime(2026, 7, 27, 11, 0, tzinfo=UTC)
-    exp = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
-    ctx = _ctx(db_session, authorization_id="auth-xyz", authorization_package_hash="a" * 64,
-               authorization_key_fingerprint="deadbeefdeadbeef", authorization_generated_at=gen,
-               authorization_expires_at=exp)
-    res = _apply(db_session, m, ctx)
+    res = _apply(db_session, m, _ctx(db_session, m=m))  # valid, fixture-provided authorization
     run = db_session.execute(select(HistoryRemediationRun).where(
         HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
-    assert run.authorization_id == "auth-xyz" and run.authorization_package_hash == "a" * 64
+    assert run.authorization_id == _AUTH_ID and run.authorization_package_hash == _AUTH_PKG_HASH
+    assert run.authorization_key_fingerprint == _AUTH_FP
     assert run.expected_backup_sha256 == _BACKUP["sha256"]
     assert run.execution_hash == apply_tool._run_execution_hash(run, list(db_session.execute(
         select(HistoryRemediationChange).where(
             HistoryRemediationChange.remediation_run_id == run.id)).scalars()))
-    # tampering the sealed authorization id must break the restore seal
+    # tampering the persisted authorization id breaks the restore: the package-binding gate (§5v3)
+    # trips first (ctx id != run id), before the sealed-evidence recompute.
     db_session.execute(text("UPDATE history_remediation_run SET authorization_id='tampered' "
                             "WHERE id=:i"), {"i": run.id})
     db_session.flush()
     db_session.expire_all()  # force the restore to re-read the tampered row
-    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch) as ei:
         _restore(db_session, res["run_public_id"], _ctx(db_session))
-    assert ei.value.code == "run_execution_hash_mismatch"
+    assert ei.value.code == "restore_provenance_mismatch"
 
 
 def test_identity_blocks_when_doc_commit_differs_from_app(db_session: Session) -> None:  # §3.1
@@ -2136,6 +2170,229 @@ def test_from_environment_forbids_expected_overrides(monkeypatch) -> None:  # §
         apply_tool.ApplyContext.from_environment(plan_hash="d" * 64,
                                                  expected_backup_sha256="e" * 64)
     assert ei.value.code == "override_forbidden_operational_path"
+
+
+# =========================================================================== #
+# provenance v3 — §2 fixed operational paths, §3 explicit authorization gate,
+# §5 restore bound to the original package, §6 failed-run audit, §7 toolchain doc.
+# =========================================================================== #
+def test_cloud_ignores_env_provenance_and_trust_root(monkeypatch) -> None:  # §2v3
+    monkeypatch.setenv("DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("BUILD_PROVENANCE_PATH", "/tmp/evil-provenance.json")
+    monkeypatch.setenv("BUILD_AUTHORIZATION_TRUST_ROOT_PATH", "/tmp/evil-trust-root.json")
+    bp, tr = apply_tool._runtime_provenance_paths()
+    assert bp == apply_tool.RUNTIME_BUILD_PROVENANCE_PATH
+    assert tr == apply_tool.RUNTIME_AUTHORIZATION_TRUST_ROOT_PATH
+
+
+def test_self_hosted_uses_env_provenance_paths(monkeypatch) -> None:  # §2v3
+    monkeypatch.setenv("DEPLOYMENT_MODE", "self_hosted")
+    monkeypatch.setenv("BUILD_PROVENANCE_PATH", "/tmp/bp.json")
+    monkeypatch.setenv("BUILD_AUTHORIZATION_TRUST_ROOT_PATH", "/tmp/tr.json")
+    assert apply_tool._runtime_provenance_paths() == ("/tmp/bp.json", "/tmp/tr.json")
+
+
+def test_apply_blocks_without_valid_authorization(db_session: Session) -> None:  # §3v3
+    _r, m = _dup_manifest(db_session)
+    assert "authz_valid" in _blocking(db_session, m, _ctx(db_session, authorization_valid=False))
+
+
+def test_apply_blocks_on_expired_authorization(db_session: Session) -> None:  # §3v3
+    _r, m = _dup_manifest(db_session)
+    past = datetime.now(UTC) - timedelta(minutes=1)
+    assert "authz_not_expired" in _blocking(
+        db_session, m, _ctx(db_session, authorization_expires_at=past))
+
+
+def test_apply_blocks_on_stale_generation(db_session: Session) -> None:  # §3v3
+    _r, m = _dup_manifest(db_session)
+    old = datetime.now(UTC) - timedelta(hours=3)
+    assert "authz_generation_fresh" in _blocking(
+        db_session, m, _ctx(db_session, authorization_generated_at=old))
+
+
+def test_apply_blocks_on_plan_hash_mismatch(db_session: Session) -> None:  # §3v3
+    _r, m = _dup_manifest(db_session)
+    # authorization_plan_hash pre-set (not None) -> the helper won't rebind -> mismatch
+    assert "authz_plan_hash_matches" in _blocking(
+        db_session, m, _ctx(db_session, authorization_plan_hash="0" * 64))
+
+
+def test_apply_blocks_on_package_substituted(db_session: Session, monkeypatch, tmp_path) -> None:
+    _r, m = _dup_manifest(db_session)  # §3v3
+    swapped = tmp_path / "swapped.json"
+    swapped.write_text(json.dumps({"authorization_package_hash": "1" * 64}))  # != ctx package hash
+    monkeypatch.setenv("AUTHORIZATION_PACKAGE_PATH", str(swapped))
+    assert "authz_not_substituted" in _blocking(db_session, m, _ctx(db_session))
+
+
+def test_fresh_clock_used_under_lock(db_session: Session, monkeypatch) -> None:  # §3v3
+    r, v = _fixture(db_session)
+    _dup_lane(db_session, r.id, v.id)
+    m = _make_manifest(db_session)
+    ctx = _ctx(db_session, m=m)  # window valid at build time
+    monkeypatch.setattr(apply_tool, "_now_utc", lambda: _AUTH_EXP + timedelta(hours=1))  # jump past
+    with pytest.raises(apply_tool.ApplyEnvironmentUnsafe) as ei:
+        _apply(db_session, m, ctx)
+    assert "authz_not_expired" in str(ei.value)
+
+
+# ---- §5v3 restore bound to the ORIGINAL signed package ----
+def test_restore_blocks_on_different_authorization_id(db_session: Session) -> None:  # §5v3.2
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session, authorization_id="other-id"))
+    assert ei.value.code == "restore_provenance_mismatch"
+
+
+def test_restore_blocks_on_different_package_hash(db_session: Session, monkeypatch,
+                                                  tmp_path) -> None:  # §5v3.3/§5v3.8
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    # A NEW package (different self-hash) at the env path, and a ctx that matches it: the
+    # anti-substitution gate passes, but the run-binding rejects the different package.
+    newpkg = tmp_path / "newpkg.json"
+    newpkg.write_text(json.dumps({"authorization_package_hash": "1" * 64}))
+    monkeypatch.setenv("AUTHORIZATION_PACKAGE_PATH", str(newpkg))
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        _restore(db_session, res["run_public_id"],
+                 _ctx(db_session, authorization_package_hash="1" * 64))
+
+
+def test_restore_blocks_on_different_fingerprint(db_session: Session) -> None:  # §5v3.4
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        _restore(db_session, res["run_public_id"],
+                 _ctx(db_session, authorization_key_fingerprint="0000000000000000"))
+
+
+def test_restore_blocks_on_different_dates(db_session: Session) -> None:  # §5v3.5
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        _restore(db_session, res["run_public_id"],
+                 _ctx(db_session, authorization_generated_at=_AUTH_GEN - timedelta(seconds=30)))
+
+
+def test_restore_blocks_on_different_expected_backup(db_session: Session) -> None:  # §5v3.6
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+        _restore(db_session, res["run_public_id"],
+                 _ctx(db_session, expected_backup_sha256="e" * 64,
+                      expected_backup_storage_reference_hash="e" * 64))
+
+
+def test_restore_blocks_on_expired_original_package(db_session: Session) -> None:  # §5v3.7
+    _r, _a, _b, _m, res, _run = _apply_dup(db_session)
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    with pytest.raises(apply_tool.ApplyEnvironmentUnsafe) as ei:
+        _restore(db_session, res["run_public_id"],
+                 _ctx(db_session, authorization_expires_at=expired))
+    assert ei.value.code == "restore_gates_blocking"
+
+
+# ---- §6v3 failed-run audit ----
+def test_failed_run_preserves_authorization_identity(committed_dup_lane, monkeypatch) -> None:  # §6
+    slug, _rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    ctx = _ctx(probe, m=m)
+    probe.close()
+    monkeypatch.setattr(apply_tool, "_apply_row",
+                        lambda *a, **k: _raise(apply_tool.ApplyPlanDrift("injected")))
+    s = _isession()
+    try:
+        with pytest.raises(apply_tool.ApplyPlanDrift):
+            apply_tool._apply_guarded(s, m, ctx, authorized=True, confirmations=CONFIRM)
+    finally:
+        s.rollback()
+        s.close()
+    monkeypatch.undo()
+    try:
+        chk = _isession()
+        try:
+            run = chk.execute(select(HistoryRemediationRun).where(
+                HistoryRemediationRun.plan_hash == m["plan_hash"],
+                HistoryRemediationRun.status == "failed")).scalar_one()
+            assert run.authorization_id == _AUTH_ID
+            assert run.authorization_package_hash == _AUTH_PKG_HASH
+            assert run.expected_backup_sha256 == _BACKUP["sha256"]
+            assert run.observed_commit_sha == _COMMIT and run.expected_source_hash == _SRC
+            assert planner.scan_sensitive({
+                "authorization_id": run.authorization_id,
+                "operator_reference": run.operator_reference,
+                "error_code": run.error_code}) == []
+        finally:
+            chk.close()
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_failed_run_null_authorization_when_absent(committed_dup_lane) -> None:  # §6
+    slug, _rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    # a ctx with NO authorization (as if the package never loaded) -> the gates block BEFORE any
+    # write, and the durable failed run carries null authorization fields (never invented values).
+    ctx = _ctx(probe, m=m, authorization_valid=False, authorization_id=None,
+               authorization_package_hash=None, authorization_key_fingerprint=None,
+               authorization_generated_at=None, authorization_expires_at=None,
+               expected_backup_sha256=None, expected_backup_storage_reference_hash=None)
+    probe.close()
+    s = _isession()
+    try:
+        with pytest.raises(apply_tool.ApplyEnvironmentUnsafe):
+            apply_tool._apply_guarded(s, m, ctx, authorized=True, confirmations=CONFIRM)
+    finally:
+        s.rollback()
+        s.close()
+    try:
+        chk = _isession()
+        try:
+            run = chk.execute(select(HistoryRemediationRun).where(
+                HistoryRemediationRun.plan_hash == m["plan_hash"],
+                HistoryRemediationRun.status == "failed")).scalar_one()
+            assert run.authorization_id is None and run.authorization_package_hash is None
+            assert run.expected_backup_sha256 is None and run.error_code == "gates_blocking"
+        finally:
+            chk.close()
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+# ---- §7v3 full document toolchain validation ----
+def _write_doc(tmp_path, **override):
+    from cestaplan_api.provenance import generator as g
+    doc = {
+        "schema_version": 2, "commit_sha": _COMMIT, "source_tree_hash": _SRC,
+        "api_artifact_hash": _API, "worker_artifact_hash": _WRK, "alembic_revision": "360a55cb6abb",
+        "generator_version": g.GENERATOR_VERSION,
+        "toolchain_contract_version": g.TOOLCHAIN_CONTRACT_VERSION,
+        "python_base_image_digest": g.PYTHON_BASE_IMAGE_DIGEST,
+        "uv_image_digest": g.UV_IMAGE_DIGEST,
+        "authorization_trust_root_hash": _TRUST_HASH}
+    doc.update(override)
+    p = tmp_path / "build-provenance.json"
+    p.write_bytes(g.render_document(doc))
+    return str(p)
+
+
+def test_document_valid_loads(tmp_path) -> None:  # §7v3
+    o = apply_tool.load_build_provenance(_write_doc(tmp_path))
+    assert o.commit_sha == _COMMIT and o.alembic_revision == "360a55cb6abb"
+
+
+def test_document_wrong_python_digest_rejected(tmp_path) -> None:  # §7v3
+    path = _write_doc(tmp_path, python_base_image_digest="sha256:" + "0" * 64)  # valid form, wrong
+    assert apply_tool.load_build_provenance(path).commit_sha is None  # fails closed (empty)
+
+
+def test_document_wrong_uv_digest_rejected(tmp_path) -> None:  # §7v3
+    path = _write_doc(tmp_path, uv_image_digest="sha256:" + "0" * 64)
+    assert apply_tool.load_build_provenance(path).commit_sha is None
+
+
+def test_document_wrong_toolchain_contract_rejected(tmp_path) -> None:  # §7v3
+    path = _write_doc(tmp_path, toolchain_contract_version="toolchain-v99")
+    assert apply_tool.load_build_provenance(path).commit_sha is None
 
 
 # uses timedelta to keep the import meaningful for future window tests
