@@ -413,8 +413,10 @@ class BackupEvidence:
             ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
                 ev["observed_sha256"] == self.expected_sha256.removeprefix("sha256:")
             try:
+                # errors="replace": a corrupt/adversarial dump may make pg_restore emit non-UTF-8
+                # bytes; decoding must never raise — the verify fails closed on returncode/identity.
                 ver = subprocess.run(["pg_restore", "--version"], capture_output=True, text=True,
-                                     timeout=30, check=False)
+                                     errors="replace", timeout=30, check=False)
                 ev["observed_pg_restore_version"] = _major(ver.stdout.strip()) \
                     if ver.returncode == 0 else None
                 if not os.path.isdir(PROC_SELF_FD):
@@ -423,11 +425,11 @@ class BackupEvidence:
                     os.lseek(dump.fd, 0, os.SEEK_SET)
                     lst = subprocess.run(  # examine the SAME descriptor, not a re-opened path
                         ["pg_restore", "--list", f"{PROC_SELF_FD}/{dump.fd}"],
-                        pass_fds=(dump.fd,), capture_output=True, text=True, timeout=60,
-                        check=False)
+                        pass_fds=(dump.fd,), capture_output=True, text=True, errors="replace",
+                        timeout=60, check=False)
                     ev["pg_restore_list_verified"] = lst.returncode == 0 and bool(lst.stdout)
                     ev["dump_database_version"] = _dump_db_version(lst.stdout)
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, ValueError, subprocess.SubprocessError):
                 ev["pg_restore_list_verified"] = False
             st1 = os.fstat(dump.fd)
             after = dump.reopen_stat()  # descriptor-relative re-open; require identical identity
