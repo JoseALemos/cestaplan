@@ -26,6 +26,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -254,6 +256,50 @@ def _dump_db_version(restore_list: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+# A storage reference is either an opaque allowlisted id OR a bare bucket URI. Anything that could
+# carry a credential, token or signed-URL parameter is rejected outright (spec §4v4).
+_STORAGE_REF_MAX_LEN = 200
+_STORAGE_REF_SCHEMES = frozenset({"s3", "gs", "gcs", "b2"})
+_STORAGE_OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-/]{0,199}$")
+_STORAGE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
+_STORAGE_SENSITIVE_RE = re.compile(
+    r"(?i)(token|secret|signature|sig=|credential|password|passwd|x-amz-|access[_-]?key|api[_-]?key)")
+
+
+def sanitize_storage_reference(ref: str | None) -> str | None:
+    """Return a SAFE-to-persist reference or ``None`` when it cannot be sanitized (spec §4v4).
+
+    Never returns anything containing userinfo, a query string, a fragment, a sensitive parameter,
+    a control character or an over-long value. A local filesystem path is not a valid reference.
+    """
+    if not isinstance(ref, str) or not (0 < len(ref) <= _STORAGE_REF_MAX_LEN):
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in ref):  # control chars, tabs, newlines
+        return None
+    if _STORAGE_SENSITIVE_RE.search(ref) or "@" in ref:
+        return None
+    if "://" not in ref:  # opaque identifier
+        if ref.startswith(("/", "./", "../")):  # a local path is not an opaque reference
+            return None
+        return ref if _STORAGE_OPAQUE_RE.match(ref) else None
+    try:
+        parsed = urllib.parse.urlsplit(ref)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in _STORAGE_REF_SCHEMES:
+        return None
+    if parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port:
+        return None
+    host_path = (parsed.netloc or "") + (parsed.path or "")
+    if not host_path or not _STORAGE_PATH_RE.match(host_path):
+        return None
+    return ref
+
+
+def _storage_reference_hash(sanitized: str | None) -> str | None:
+    return hashlib.sha256(sanitized.encode()).hexdigest() if sanitized else None
+
+
 @dataclass(slots=True)
 class BackupEvidence:
     """A verified pre-apply backup. ``verify()`` checks the artifact on disk — never a bare
@@ -273,10 +319,14 @@ class BackupEvidence:
             "within_window": False, "compatibility_ok": False, "reference_sanitized": True,
             "size_bytes": 0, "observed_sha256": None, "expected_postgres_version": _major(
                 self.expected_postgres_version), "observed_pg_restore_version": None,
-            "observed_database_version": _major(server_version), "dump_database_version": None}
-        if self.storage_reference and ("://" not in self.storage_reference
-                                       or "@" in self.storage_reference):
-            ev["reference_sanitized"] = "@" not in (self.storage_reference or "")
+            "observed_database_version": _major(server_version), "dump_database_version": None,
+            "storage_reference_sanitized": None, "storage_reference_hash": None}
+        # A reference that is present but not sanitizable blocks the backup entirely (§4v4).
+        if self.storage_reference is not None:
+            _san = sanitize_storage_reference(self.storage_reference)
+            ev["reference_sanitized"] = _san is not None
+            ev["storage_reference_sanitized"] = _san
+            ev["storage_reference_hash"] = _storage_reference_hash(_san)
         p = Path(self.path)
         if not p.exists():
             return False, ev
@@ -1047,8 +1097,10 @@ def _backup_run_fields(ctx: ApplyContext, bev: dict[str, Any]) -> dict[str, Any]
         "backup_restore_list_verified": bev.get("pg_restore_list_verified"),
         "backup_permissions_verified": bev.get("permissions_not_public"),
         "backup_created_at": ctx.backup.created_at if ctx.backup is not None else None,
-        "backup_storage_reference":
-            ctx.backup.storage_reference if ctx.backup is not None else None,
+        # Only the SANITIZED reference (+ its hash) is ever persisted — never the raw value or the
+        # local dump path (§4v4).
+        "backup_storage_reference": bev.get("storage_reference_sanitized"),
+        "backup_storage_reference_hash": bev.get("storage_reference_hash"),
         "backup_evidence_hash": planner._value_hash(bev),
     }
 
@@ -1135,11 +1187,41 @@ def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str,
         s.close()
 
 
+def execute_apply(m: dict[str, Any], ctx: ApplyContext, *,
+                  session_factory: Callable[[], Session] = SessionLocal, authorized: bool = False,
+                  confirmations: tuple[str, ...] = (), previous_failed_run_id: str | None = None,
+                  settings: Settings | None = None, lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """OPERATIONAL apply entrypoint (spec §1v4). This function OWNS the Session and the single
+    transaction end-to-end: it creates a fresh Session, proves it is virgin, runs locks / gates /
+    writes / verification, COMMITS before returning a success status, and closes the Session. On any
+    failure (including a commit that fails) it rolls back, records a durable failed run in an
+    INDEPENDENT transaction and re-raises the original. A returned status of ``applied`` therefore
+    means the run, changes, plan-consumption row and temporal writes are durably visible to other
+    connections."""
+    settings = settings or Settings()
+    db = session_factory()
+    try:
+        _require_virgin_session(db)
+        result = _apply_guarded(db, m, ctx, authorized=authorized, confirmations=confirmations,
+                                previous_failed_run_id=previous_failed_run_id, settings=settings,
+                                lock_timeout_ms=lock_timeout_ms)
+        try:
+            db.commit()  # success is only returned AFTER a durable commit
+        except Exception as exc:
+            db.rollback()
+            exc.failed_run_id = _record_failed_run(  # type: ignore[attr-defined]
+                m, ctx, "apply_commit_failed")
+            raise
+        return result
+    finally:
+        db.close()
+
+
 def apply(db: Session, m: dict[str, Any], ctx: ApplyContext, *, authorized: bool = False,
           confirmations: tuple[str, ...] = (), previous_failed_run_id: str | None = None,
           settings: Settings | None = None, lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Public apply (spec §4C/§5/§6): requires a VIRGIN session (no pending state, no open
-    transaction, no prior queries) that this call owns; then executes atomically."""
+    """NON-operational helper for tests only (spec §1v4): requires a VIRGIN session but does NOT
+    commit — the caller owns durability. Operational callers must use :func:`execute_apply`."""
     _require_virgin_session(db)
     return _apply_guarded(db, m, ctx, authorized=authorized, confirmations=confirmations,
                           previous_failed_run_id=previous_failed_run_id, settings=settings,
@@ -1212,7 +1294,8 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
         expected_api_artifact_hash=e.api_artifact_hash,
         observed_worker_artifact_hash=o.worker_artifact_hash,
         expected_worker_artifact_hash=e.worker_artifact_hash,
-        provenance_document_hash=o.document_hash,
+        expected_provenance_document_hash=e.document_hash,
+        observed_provenance_document_hash=o.document_hash,
         **_backup_run_fields(ctx, bev))
     db.add(run)
     try:
@@ -1335,10 +1418,39 @@ _RESTORE_ENV_GATES = ("production_disabled", "per_chain_flags_false", "price_pro
                       "crawl_run_not_running", "crawl_job_not_active")
 
 
+def execute_restore(run_public_id: str, ctx: ApplyContext, *,
+                    session_factory: Callable[[], Session] = SessionLocal, authorized: bool = False,
+                    confirmations: tuple[str, ...] = (), settings: Settings | None = None,
+                    lock_timeout_ms: int = 5000) -> dict[str, Any]:
+    """OPERATIONAL restore entrypoint (spec §1v4). OWNS the Session and single transaction: creates
+    a fresh virgin Session, runs the full gates + all-rows revalidation + per-anomaly verification,
+    COMMITS before returning ``restored``, and closes the Session. On drift it rolls back, persists
+    ``manual_review_required`` in an INDEPENDENT transaction and re-raises; a commit that fails is
+    treated the same way. ``restored`` therefore means the rolled_back run, restore_status, restored
+    rows, historical anomaly references and surviving plan-consumption are all durably visible."""
+    settings = settings or Settings()
+    db = session_factory()
+    try:
+        _require_virgin_session(db)
+        result = _restore_guarded(db, run_public_id, ctx, authorized=authorized,
+                                  confirmations=confirmations, settings=settings,
+                                  lock_timeout_ms=lock_timeout_ms)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            _mark_manual_review(run_public_id, "restore_commit_failed")
+            raise
+        return result
+    finally:
+        db.close()
+
+
 def restore(db: Session, run_public_id: str, ctx: ApplyContext, *, authorized: bool = False,
             confirmations: tuple[str, ...] = (), settings: Settings | None = None,
             lock_timeout_ms: int = 5000) -> dict[str, Any]:
-    """Public restore (spec §6): requires a VIRGIN session that this call owns."""
+    """NON-operational helper for tests only (spec §1v4): requires a VIRGIN session but does NOT
+    commit. Operational callers must use :func:`execute_restore`."""
     _require_virgin_session(db)
     return _restore_guarded(db, run_public_id, ctx, authorized=authorized,
                             confirmations=confirmations, settings=settings,
@@ -1371,11 +1483,14 @@ def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
         HistoryRemediationChange.remediation_run_id == run.id)).scalars())
     for lane_fp in sorted({c.lane_fingerprint for c in changes}):
         _acquire(db, _lane_lock_key(lane_fp), timeout_ms=lock_timeout_ms)
-    # Same provenance/contract/env controls as apply (§4/§6).
+    # Same provenance/contract/env controls as apply (§4/§6) ...
     env = dict(_environment_gates(db, settings, ctx))
     if not all(env.get(g) for g in _RESTORE_ENV_GATES) or not _writer_contract_gate()[0] \
             or not _full_provenance_ok({"commit_provenance": {}}, ctx):
         raise ApplyEnvironmentUnsafe("restore_gates_blocking", "")
+    # ... AND the current context must bind EXACTLY to the run's stored evidence (§3v4): the same
+    # build + authorized package that applied it. A later/other build is rejected even if valid.
+    _restore_provenance_bound_to_run(db, run, ctx)
     try:
         _restore_evidence_gates(db, run, changes)  # occurrences / FK / unknown-FK unchanged (§4)
         return _restore_locked(db, run, changes)
@@ -1383,6 +1498,39 @@ def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
         db.rollback()
         _mark_manual_review(run_public_id, exc.code)
         raise
+
+
+def _restore_provenance_bound_to_run(db: Session, run: HistoryRemediationRun,
+                                     ctx: ApplyContext) -> None:
+    """Restore must run under the SAME build + sealed package that applied the run (spec §3v4).
+
+    Every provenance field is compared EXACTLY against the evidence persisted on the run — the run
+    is the source of the expected values, never a freely-substituted runtime package. Any mismatch
+    (later build, different commit/api/worker/alembic/document) fails closed.
+    """
+    o, e = ctx.observed_provenance, ctx.expected_provenance
+    checks: list[tuple[str, Any, Any]] = [
+        ("main_commit_sha", run.main_commit_sha, ctx.expected_main_sha),
+        ("alembic_revision_expected", run.alembic_revision, ctx.expected_alembic),
+        ("alembic_revision_live", run.alembic_revision, _alembic_revision(db)),
+        ("observed_commit_sha", run.observed_commit_sha, ctx.app_commit_sha),
+        ("expected_commit_sha", run.expected_commit_sha, e.commit_sha),
+        ("observed_source_hash", run.observed_source_hash, o.source_tree_hash),
+        ("expected_source_hash", run.expected_source_hash, e.source_tree_hash),
+        ("observed_api_artifact_hash", run.observed_api_artifact_hash, o.api_artifact_hash),
+        ("expected_api_artifact_hash", run.expected_api_artifact_hash, e.api_artifact_hash),
+        ("observed_worker_artifact_hash",
+         run.observed_worker_artifact_hash, o.worker_artifact_hash),
+        ("expected_worker_artifact_hash",
+         run.expected_worker_artifact_hash, e.worker_artifact_hash),
+        ("observed_provenance_document_hash",
+         run.observed_provenance_document_hash, o.document_hash),
+        ("expected_provenance_document_hash",
+         run.expected_provenance_document_hash, e.document_hash),
+    ]
+    for name, run_value, ctx_value in checks:
+        if run_value != ctx_value:
+            raise ApplyProvenanceMismatch("restore_provenance_mismatch", name)
 
 
 def _restore_evidence_gates(db: Session, run: HistoryRemediationRun,
@@ -1416,6 +1564,58 @@ def _verify_anomaly_before_delete(db: Session, ch: HistoryRemediationChange) -> 
     return an
 
 
+def _change_side_effect_ref(ch: HistoryRemediationChange, an: PriceAnomaly | None) -> str:
+    """Reconstruct the sealed side-effect reference for a change from its VERIFIED anomaly (or empty
+    when the change carried no side effect), so deterministic_action_id can be recomputed at restore
+    without the deleted manifest (spec §2v4/§9). Mirrors :func:`_sealed_side_effect_ref`."""
+    if an is None:
+        return ""
+    payload = "\x1f".join(
+        ("create_price_anomaly", ch.original_hash, an.anomaly_type, an.severity))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _validate_all_changes(db: Session, run: HistoryRemediationRun,
+                          changes: list[HistoryRemediationChange],
+                          rows: dict[int, PriceObservation],
+                          anomalies: dict[Any, PriceAnomaly]) -> None:
+    """Before restoring ANY row, every change (keep / excluded_no_action / logical_rollback /
+    reconstruct_interval alike — not only writes) must still match its recorded post-apply state and
+    the audit must be internally consistent (spec §2v4). Any failure fails closed, zero writes."""
+    # Pass 1 — structural uniqueness across ALL changes (independent of live-row state), so a true
+    # duplicate is always reported as such regardless of row iteration order.
+    seen_obs_action: set[tuple[int, str]] = set()
+    seen_det: set[str] = set()
+    for ch in changes:
+        oa = (ch.price_observation_id, ch.action_type)
+        if oa in seen_obs_action:
+            raise ApplyRestoreDrift("duplicate_change_for_observation",
+                                    str(ch.price_observation_id))
+        seen_obs_action.add(oa)
+        if ch.deterministic_action_id in seen_det:
+            raise ApplyRestoreDrift("duplicate_deterministic_action_id", ch.deterministic_action_id)
+        seen_det.add(ch.deterministic_action_id)
+    # Pass 2 — per-row post-apply state + audit consistency (ALL actions, not only writes).
+    for ch in changes:
+        cnt = db.scalar(select(func.count()).select_from(PriceObservation).where(
+            PriceObservation.id == ch.price_observation_id))
+        if cnt != 1 or ch.price_observation_id not in rows:
+            raise ApplyRestoreDrift("observation_missing_or_duplicated",
+                                    str(ch.price_observation_id))
+        if ch.actual_after_hash is None or ch.actual_after_state is None:
+            raise ApplyRestoreDrift("actual_after_missing", str(ch.price_observation_id))
+        live = _temporal_of(rows[ch.price_observation_id])
+        if _thash(live) != ch.actual_after_hash:
+            raise ApplyRestoreDrift("row_changed_after_apply", str(ch.price_observation_id))
+        if _json(live) != ch.actual_after_state:
+            raise ApplyRestoreDrift("actual_after_state_mismatch", str(ch.price_observation_id))
+        ref = _change_side_effect_ref(ch, anomalies.get(ch.created_anomaly_live_id))
+        expected = _det_action_id(run.plan_hash, ch.lane_fingerprint, ch.original_hash,
+                                  ch.action_type, ref)
+        if expected != ch.deterministic_action_id:
+            raise ApplyRestoreDrift("deterministic_action_id_invalid", ch.deterministic_action_id)
+
+
 def _restore_locked(db: Session, run: HistoryRemediationRun,
                     changes: list[HistoryRemediationChange]) -> dict[str, Any]:
     allowed_ids = frozenset(c.created_anomaly_live_id for c in changes
@@ -1424,14 +1624,11 @@ def _restore_locked(db: Session, run: HistoryRemediationRun,
         rows = {o.id: o for o in db.execute(select(PriceObservation).where(
             PriceObservation.id.in_([c.price_observation_id for c in changes])
         ).with_for_update()).scalars()}
-        # Every row must still be in its EXPECTED post-apply state (§4).
-        for ch in changes:
-            if ch.action_type in _ACTION_WRITES and \
-                    _thash(_temporal_of(rows[ch.price_observation_id])) != ch.actual_after_hash:
-                raise ApplyRestoreDrift("row_changed_after_apply", str(ch.price_observation_id))
-        # Verify each anomaly BEFORE any delete; a mismatch aborts the whole restore (§5).
+        # Verify each anomaly BEFORE any write; a mismatch aborts the whole restore (§5).
         anomalies = {ch.created_anomaly_live_id: _verify_anomaly_before_delete(db, ch)
                      for ch in changes if ch.created_anomaly_live_id is not None}
+        # ALL rows must match their recorded post-apply state before any restoration begins (§2v4).
+        _validate_all_changes(db, run, changes, rows, anomalies)
         for ch in changes:
             row = rows[ch.price_observation_id]
             for k in WHITELIST_FIELDS:

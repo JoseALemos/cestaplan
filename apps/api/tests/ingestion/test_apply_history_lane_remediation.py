@@ -84,7 +84,7 @@ def _backup_evidence(now: datetime) -> Any:
     return apply_tool.BackupEvidence(
         path=_BACKUP["path"], expected_sha256=_BACKUP["sha256"], created_at=now,
         expected_postgres_version=_BACKUP["pg_major"],
-        storage_reference="s3://backups/<sanitized>")
+        storage_reference="s3://cestaplan-backups/history-remediation.dump")
 
 
 def _prov():
@@ -272,7 +272,9 @@ def test_apply_writes_deterministic_audit(db_session: Session) -> None:  # §11.
     run = db_session.execute(select(HistoryRemediationRun).where(
         HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
     assert run.status == "applied" and run.observed_source_hash == _SRC
-    assert run.expected_source_hash == _SRC and run.provenance_document_hash == _DOC
+    assert run.expected_source_hash == _SRC
+    assert run.observed_provenance_document_hash == _DOC
+    assert run.expected_provenance_document_hash == _DOC
     changes = db_session.execute(select(HistoryRemediationChange).where(
         HistoryRemediationChange.remediation_run_id == run.id)).scalars().all()
     assert len(changes) == 2
@@ -816,21 +818,17 @@ def test_two_concurrent_applies_only_one_wins(committed_dup_lane) -> None:  # §
     results: list[str] = []
     barrier = threading.Barrier(2)
 
+    probe = _isession()
+    ctx = _ctx(probe)  # build ctx off a throwaway session; execute_apply owns its own session
+    probe.close()
+
     def run():
-        probe = _isession()
-        ctx = _ctx(probe)  # build ctx off a throwaway session so `s` stays virgin for the §6 gate
-        probe.close()
-        s = _isession()
         try:
             barrier.wait(timeout=30)
-            res = apply_tool.apply(s, m, ctx, authorized=True, confirmations=CONFIRM)
-            s.commit()
+            res = apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
             results.append(res["status"])
         except Exception as exc:
-            s.rollback()
             results.append(type(exc).__name__)
-        finally:
-            s.close()
 
     threads = [threading.Thread(target=run) for _ in range(2)]
     for t in threads:
@@ -840,34 +838,28 @@ def test_two_concurrent_applies_only_one_wins(committed_dup_lane) -> None:  # §
     assert results.count("applied") == 1
 
 
-def test_apply_then_restore_committed(committed_dup_lane) -> None:  # §11.22 / §6
+def test_apply_then_restore_committed(committed_dup_lane) -> None:  # §11.22 / §6 / §1v4
     slug, rid = committed_dup_lane
     m = _manifest_committed(slug)
     probe = _isession()
     apply_ctx = _ctx(probe)
     probe.close()
-    s = _isession()
-    try:
-        res = apply_tool.apply(s, m, apply_ctx, authorized=True, confirmations=CONFIRM)
-        s.commit()
-        assert res["status"] == "applied"
-    finally:
-        s.close()
-    probe = _isession()
-    restore_ctx = _ctx(probe)
-    probe.close()
+    # execute_apply owns the session AND commits; the caller never manages the transaction.
+    res = apply_tool.execute_apply(m, apply_ctx, authorized=True, confirmations=CONFIRM)
+    assert res["status"] == "applied"
     c = _isession()
     try:
         rows = c.execute(select(PriceObservation).where(
             PriceObservation.retailer_id == rid)).scalars().all()
         assert len(rows) == 2 and sum(1 for x in rows if x.rolled_back_at is not None) == 1
-        c.rollback()  # the read above began a transaction; restore demands a virgin session (§6)
-        rest = apply_tool.restore(c, res["run_public_id"], restore_ctx, authorized=True,
-                                  confirmations=RESTORE_CONFIRM)
-        c.commit()
-        assert rest["status"] == "restored"
     finally:
         c.close()
+    probe = _isession()
+    restore_ctx = _ctx(probe)
+    probe.close()
+    rest = apply_tool.execute_restore(res["run_public_id"], restore_ctx, authorized=True,
+                                      confirmations=RESTORE_CONFIRM)
+    assert rest["status"] == "restored"
 
 
 # =========================================================================== #
@@ -1330,6 +1322,404 @@ def test_deterministic_id_no_collision_over_196() -> None:  # §9
                                      "logical_rollback_exact_duplicate", "")
            for i in range(196)}
     assert len(ids) == 196
+
+
+# =========================================================================== #
+# v4 FINAL — §1 transaction-owning public API + durable commit, §2 all-rows
+# restore gate, §3 restore provenance bound to the run, §4 sanitized storage ref.
+# =========================================================================== #
+_COMMIT2 = "1" * 40
+_SRC2, _API2, _WRK2, _DOC2 = "1" * 64, "2" * 64, "3" * 64, "4" * 64
+
+
+def _run_row(plan_hash: str, *, status: str) -> dict | None:
+    """Read a run via an INDEPENDENT connection, returning plain fields (session then closed)."""
+    s = _isession()
+    try:
+        run = s.execute(select(HistoryRemediationRun).where(
+            HistoryRemediationRun.plan_hash == plan_hash,
+            HistoryRemediationRun.status == status)).scalar_one_or_none()
+        if run is None:
+            return None
+        return {"id": run.id, "public_id": str(run.public_id), "status": run.status,
+                "restore_status": run.restore_status, "error_code": run.error_code}
+    finally:
+        s.close()
+
+
+def _rolled_back_count(rid: int) -> int:
+    s = _isession()
+    try:
+        rows = s.execute(select(PriceObservation).where(
+            PriceObservation.retailer_id == rid)).scalars().all()
+        return sum(1 for x in rows if x.rolled_back_at is not None)
+    finally:
+        s.close()
+
+
+# --------------------------------------------------------------------------- #
+# §1 execute_apply / execute_restore own the session AND commit before success
+# --------------------------------------------------------------------------- #
+def test_execute_apply_commits_and_is_visible_to_another_connection(committed_dup_lane) -> None:
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    ctx = _ctx(probe)
+    probe.close()
+    try:
+        res = apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
+        assert res["status"] == "applied"
+        # A SECOND independent connection must see the durable results at once (no caller commit).
+        chk = _isession()
+        try:
+            run = chk.execute(select(HistoryRemediationRun).where(
+                HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
+            assert run.status == "applied"
+            changes = chk.execute(select(HistoryRemediationChange).where(
+                HistoryRemediationChange.remediation_run_id == run.id)).scalars().all()
+            assert len(changes) == 2
+            cons = chk.execute(select(HistoryRemediationPlanConsumption).where(
+                HistoryRemediationPlanConsumption.plan_hash == m["plan_hash"])).scalar_one()
+            assert cons is not None
+        finally:
+            chk.close()
+        assert _rolled_back_count(rid) == 1  # temporal write is durable too
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_execute_restore_commits_and_is_visible_to_another_connection(committed_dup_lane) -> None:
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    actx = _ctx(probe)
+    probe.close()
+    try:
+        res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
+        probe = _isession()
+        rctx = _ctx(probe)
+        probe.close()
+        rest = apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
+                                          confirmations=RESTORE_CONFIRM)
+        assert rest["status"] == "restored"
+        chk = _isession()
+        try:
+            run = chk.execute(select(HistoryRemediationRun).where(
+                HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
+            assert run.status == "rolled_back" and run.restore_status == "restored"
+            # plan consumption is STILL present after restore (§1)
+            cons = chk.execute(select(HistoryRemediationPlanConsumption).where(
+                HistoryRemediationPlanConsumption.plan_hash == m["plan_hash"])).scalar_one()
+            assert cons is not None
+        finally:
+            chk.close()
+        assert _rolled_back_count(rid) == 0  # rows restored, durably
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_execute_apply_failure_before_commit_leaves_zero_changes(committed_dup_lane,
+                                                                 monkeypatch) -> None:
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    ctx = _ctx(probe)
+    probe.close()
+    monkeypatch.setattr(apply_tool, "_apply_row",
+                        lambda *a, **k: _raise(apply_tool.ApplyPlanDrift("injected")))
+    try:
+        with pytest.raises(apply_tool.ApplyPlanDrift):
+            apply_tool.execute_apply(m, ctx, authorized=True, confirmations=CONFIRM)
+        monkeypatch.undo()
+        assert _run_row(m["plan_hash"], status="applied") is None  # never committed applied
+        assert _run_row(m["plan_hash"], status="failed") is not None  # durable failed run
+        assert _rolled_back_count(rid) == 0  # zero business changes
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_execute_apply_commit_failure_does_not_return_applied(committed_dup_lane) -> None:
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    ctx = _ctx(probe)
+    probe.close()
+
+    def failing_factory():
+        s = apply_tool.SessionLocal()
+        s.commit = lambda: _raise(RuntimeError("commit boom"))  # type: ignore[method-assign]
+        return s
+
+    try:
+        with pytest.raises(RuntimeError):
+            apply_tool.execute_apply(m, ctx, session_factory=failing_factory,
+                                     authorized=True, confirmations=CONFIRM)
+        assert _run_row(m["plan_hash"], status="applied") is None  # commit failed -> not applied
+        failed = _run_row(m["plan_hash"], status="failed")
+        assert failed is not None and failed["error_code"] == "apply_commit_failed"
+        assert _rolled_back_count(rid) == 0  # rolled back -> zero business changes
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_execute_apply_reapply_after_session_close_is_already_applied(committed_dup_lane) -> None:
+    slug, _rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    ctx = _ctx(probe)
+    probe.close()
+    try:
+        assert apply_tool.execute_apply(
+            m, ctx, authorized=True, confirmations=CONFIRM)["status"] == "applied"
+        probe = _isession()
+        ctx2 = _ctx(probe)
+        probe.close()
+        # session fully closed between calls; the durable consumption record still blocks re-apply.
+        assert apply_tool.execute_apply(
+            m, ctx2, authorized=True, confirmations=CONFIRM)["status"] == "already_applied"
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+def test_execute_apply_restore_reapply_requires_regeneration(committed_dup_lane) -> None:
+    slug, _rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    actx = _ctx(probe)
+    probe.close()
+    try:
+        res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
+        probe = _isession()
+        rctx = _ctx(probe)
+        probe.close()
+        apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
+                                   confirmations=RESTORE_CONFIRM)
+        probe = _isession()
+        actx2 = _ctx(probe)
+        probe.close()
+        assert apply_tool.execute_apply(
+            m, actx2, authorized=True,
+            confirmations=CONFIRM)["status"] == "plan_requires_regeneration"
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+# --------------------------------------------------------------------------- #
+# §2 restore validates EVERY change (not just writes) before touching a row
+# --------------------------------------------------------------------------- #
+def _keep_change(db, run):
+    return db.execute(select(HistoryRemediationChange).where(
+        HistoryRemediationChange.remediation_run_id == run.id,
+        HistoryRemediationChange.action_type == "keep")).scalars().first()
+
+
+def test_restore_blocks_on_keep_row_drift(db_session: Session) -> None:  # §2v4
+    _r, _a, _b, _m, res, run = _apply_dup(db_session)
+    ch = _keep_change(db_session, run)
+    assert ch is not None  # a dup lane keeps one canonical row
+    obs = db_session.get(PriceObservation, ch.price_observation_id)
+    assert obs is not None
+    obs.valid_until = T2  # a NON-write ("keep") row drifted -> must still block restore
+    db_session.flush()
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "row_changed_after_apply"
+
+
+def test_restore_blocks_on_deleted_observation(db_session: Session) -> None:  # §2v4
+    _r, a, _b, _m, res, _run = _apply_dup(db_session)
+    db_session.execute(text("DELETE FROM price_observation WHERE id = :i"), {"i": a.id})
+    db_session.flush()
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "observation_missing_or_duplicated"
+
+
+def test_restore_blocks_on_null_actual_after_hash(db_session: Session) -> None:  # §2v4
+    _r, _a, _b, _m, res, run = _apply_dup(db_session)
+    db_session.execute(text(
+        "UPDATE history_remediation_change SET actual_after_hash = NULL "
+        "WHERE remediation_run_id = :r"), {"r": run.id})
+    db_session.flush()
+    db_session.expire_all()
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "actual_after_missing"
+
+
+def test_restore_blocks_on_altered_deterministic_id(db_session: Session) -> None:  # §2v4
+    _r, _a, _b, _m, res, run = _apply_dup(db_session)
+    ch = db_session.execute(select(HistoryRemediationChange).where(
+        HistoryRemediationChange.remediation_run_id == run.id)).scalars().first()
+    assert ch is not None
+    ch.deterministic_action_id = "f" * 64  # tampered audit -> recompute mismatch
+    db_session.flush()
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "deterministic_action_id_invalid"
+
+
+def test_restore_blocks_on_duplicate_change(db_session: Session) -> None:  # §2v4
+    _r, _a, _b, _m, res, run = _apply_dup(db_session)
+    ch = db_session.execute(select(HistoryRemediationChange).where(
+        HistoryRemediationChange.remediation_run_id == run.id)).scalars().first()
+    assert ch is not None
+    dup = HistoryRemediationChange(
+        remediation_run_id=run.id, deterministic_action_id="a" * 64,  # distinct id, same obs+action
+        lane_fingerprint=ch.lane_fingerprint, price_observation_id=ch.price_observation_id,
+        action_type=ch.action_type, original_temporal_state=ch.original_temporal_state,
+        expected_bound_state=ch.expected_bound_state, actual_after_state=ch.actual_after_state,
+        original_hash=ch.original_hash, expected_bound_hash=ch.expected_bound_hash,
+        actual_after_hash=ch.actual_after_hash, status="applied")
+    db_session.add(dup)
+    db_session.flush()
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        _restore(db_session, res["run_public_id"], _ctx(db_session))
+    assert ei.value.code == "duplicate_change_for_observation"
+
+
+def test_all_rows_gate_covers_excluded_no_action(db_session: Session) -> None:  # §2v4
+    # excluded_no_action rows exist only in EXCLUDED lanes (which apply skips), so they never become
+    # real changes; assert the all-rows gate would nonetheless block one that drifted.
+    r, v = _fixture(db_session)
+    a = _obs(db_session, r.id, v.id, amount="1.19", observed_at=T0)
+    ch = SimpleNamespace(price_observation_id=a.id, action_type="excluded_no_action",
+                         deterministic_action_id="d" * 64, actual_after_hash="stale-hash",
+                         actual_after_state={"x": 1}, original_hash="r" * 64,
+                         lane_fingerprint="lf", created_anomaly_live_id=None)
+    run = SimpleNamespace(plan_hash="p")
+    with pytest.raises(apply_tool.ApplyRestoreDrift) as ei:
+        apply_tool._validate_all_changes(db_session, run, [ch], {a.id: a}, {})  # type: ignore[arg-type,list-item]
+    assert ei.value.code == "row_changed_after_apply"
+
+
+def test_restore_drift_marks_manual_review_durably(committed_dup_lane) -> None:  # §2v4
+    slug, rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    actx = _ctx(probe)
+    probe.close()
+    try:
+        res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
+        # Drift a KEEP row from an independent connection, committed.
+        d = _isession()
+        try:
+            run_id = d.execute(select(HistoryRemediationRun.id).where(
+                HistoryRemediationRun.plan_hash == m["plan_hash"])).scalar_one()
+            keep_obs = d.execute(select(HistoryRemediationChange.price_observation_id).where(
+                HistoryRemediationChange.remediation_run_id == run_id,
+                HistoryRemediationChange.action_type == "keep")).scalars().first()
+            d.execute(text("UPDATE price_observation SET valid_until = :t WHERE id = :i"),
+                      {"t": T2, "i": keep_obs})
+            d.commit()
+        finally:
+            d.close()
+        probe = _isession()
+        rctx = _ctx(probe)
+        probe.close()
+        with pytest.raises(apply_tool.ApplyRestoreDrift):
+            apply_tool.execute_restore(res["run_public_id"], rctx, authorized=True,
+                                       confirmations=RESTORE_CONFIRM)
+        run = _run_row(m["plan_hash"], status="applied")  # still applied, not rolled back
+        assert run is not None and run["restore_status"] == "manual_review_required"
+        assert _rolled_back_count(rid) == 1  # nothing partially restored
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+# --------------------------------------------------------------------------- #
+# §3 restore provenance must bind EXACTLY to the run's stored evidence
+# --------------------------------------------------------------------------- #
+def test_restore_provenance_bound_to_run(committed_dup_lane) -> None:  # §3v4
+    slug, _rid = committed_dup_lane
+    m = _manifest_committed(slug)
+    probe = _isession()
+    actx = _ctx(probe)
+    probe.close()
+    try:
+        res = apply_tool.execute_apply(m, actx, authorized=True, confirmations=CONFIRM)
+
+        def _restore_with(**over):
+            probe = _isession()
+            c = _ctx(probe, **over)
+            probe.close()
+            return apply_tool.execute_restore(res["run_public_id"], c, authorized=True,
+                                              confirmations=RESTORE_CONFIRM)
+
+        # A later but internally-valid package -> blocked (bound to the run, not self-coherent).
+        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+            _restore_with(app_commit_sha=_COMMIT2, deployed_api_sha=_COMMIT2,
+                          deployed_worker_sha=_COMMIT2, expected_main_sha=_COMMIT2,
+                          observed_provenance=apply_tool.BuildProvenance(
+                              _COMMIT2, _SRC2, _API2, _WRK2, _DOC2),
+                          expected_provenance=apply_tool.ExpectedProvenance(
+                              _COMMIT2, _SRC2, _API2, _WRK2, _DOC2))
+        # A different Alembic revision -> blocked.
+        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+            _restore_with(expected_alembic="not-the-applied-revision")
+        # A different provenance document only -> blocked.
+        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+            _restore_with(observed_provenance=apply_tool.BuildProvenance(
+                              _COMMIT, _SRC, _API, _WRK, _DOC2),
+                          expected_provenance=apply_tool.ExpectedProvenance(
+                              _COMMIT, _SRC, _API, _WRK, _DOC2))
+        # A different worker artifact only -> blocked.
+        with pytest.raises(apply_tool.ApplyProvenanceMismatch):
+            _restore_with(observed_provenance=apply_tool.BuildProvenance(
+                              _COMMIT, _SRC, _API, _WRK2, _DOC),
+                          expected_provenance=apply_tool.ExpectedProvenance(
+                              _COMMIT, _SRC, _API, _WRK2, _DOC))
+        # The run is still applied; no restore happened.
+        run = _run_row(m["plan_hash"], status="applied")
+        assert run is not None and run["restore_status"] == "none"
+    finally:
+        _delete_runs(m["plan_hash"])
+
+
+# --------------------------------------------------------------------------- #
+# §4 storage reference sanitisation
+# --------------------------------------------------------------------------- #
+def test_sanitize_storage_reference_accepts_opaque_and_uri() -> None:  # §4v4
+    assert apply_tool.sanitize_storage_reference("backup-2026-07-27-abc123") == \
+        "backup-2026-07-27-abc123"
+    uri = "s3://cestaplan-backups/history/2026-07-27.dump"
+    assert apply_tool.sanitize_storage_reference(uri) == uri
+
+
+def test_sanitize_storage_reference_rejects_unsafe() -> None:  # §4v4
+    bad = [
+        "https://bucket.s3.amazonaws.com/x?X-Amz-Signature=deadbeef",  # signed URL query
+        "s3://user:secret@bucket/x",                                    # userinfo
+        "s3://bucket/x#frag",                                           # fragment
+        "s3://bucket/x?token=abc",                                      # token param
+        "s3://bucket/with a space",                                     # unsafe char
+        "line\none",                                                    # newline
+        "/var/lib/postgresql/backup.dump",                             # local path
+        "x" * 201,                                                      # too long
+        "s3://bucket/apikey-thing?apikey=z",                            # sensitive param
+    ]
+    for ref in bad:
+        assert apply_tool.sanitize_storage_reference(ref) is None, ref
+
+
+def test_backup_verify_blocks_unsanitizable_reference() -> None:  # §4v4
+    now = datetime.now(UTC)
+    be = apply_tool.BackupEvidence(
+        path=_BACKUP["path"], expected_sha256=_BACKUP["sha256"], created_at=now,
+        expected_postgres_version=_BACKUP["pg_major"],
+        storage_reference="https://host/x?X-Amz-Signature=abc")
+    ok, ev = be.verify(now, server_version=_BACKUP["pg_major"])
+    assert ok is False and ev["reference_sanitized"] is False
+    assert ev["storage_reference_sanitized"] is None
+
+
+def test_run_persists_only_sanitized_reference_and_hash(db_session: Session) -> None:  # §4v4
+    _r, _a, _b, _m, _res, run = _apply_dup(db_session)
+    ref = "s3://cestaplan-backups/history-remediation.dump"
+    assert run.backup_storage_reference == ref  # already sanitized
+    assert run.backup_storage_reference_hash == hashlib.sha256(ref.encode()).hexdigest()
+    # a local path is NEVER persisted as the reference
+    assert run.backup_storage_reference != _BACKUP["path"]
 
 
 # uses timedelta to keep the import meaningful for future window tests

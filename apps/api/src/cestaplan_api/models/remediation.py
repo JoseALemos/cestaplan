@@ -82,7 +82,10 @@ class HistoryRemediationRun(BaseModel):
     observed_api_artifact_hash: Mapped[str | None] = mapped_column(Text)
     expected_worker_artifact_hash: Mapped[str | None] = mapped_column(Text)
     observed_worker_artifact_hash: Mapped[str | None] = mapped_column(Text)
-    provenance_document_hash: Mapped[str | None] = mapped_column(Text)
+    # Provenance document hash kept as a separate expected/observed pair (§4v4): a restore proves
+    # the build's document matches the run's, not merely that a fresh package is self-coherent.
+    expected_provenance_document_hash: Mapped[str | None] = mapped_column(Text)
+    observed_provenance_document_hash: Mapped[str | None] = mapped_column(Text)
 
     # --- Backup evidence (§7/§9) — observed values, never a copied expected ---
     backup_sha256: Mapped[str | None] = mapped_column(Text)
@@ -94,7 +97,10 @@ class HistoryRemediationRun(BaseModel):
     backup_restore_list_verified: Mapped[bool | None] = mapped_column(Boolean)
     backup_permissions_verified: Mapped[bool | None] = mapped_column(Boolean)
     backup_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    backup_storage_reference: Mapped[str | None] = mapped_column(Text)  # sanitized
+    # Sanitized reference only — NEVER a local path, signed URL, credential or token (§4v4). The
+    # hash lets two records be compared without re-storing even the sanitized string.
+    backup_storage_reference: Mapped[str | None] = mapped_column(Text)  # sanitized or NULL
+    backup_storage_reference_hash: Mapped[str | None] = mapped_column(Text)
     backup_evidence_hash: Mapped[str | None] = mapped_column(Text)
 
     # --- Post-apply evidence for a same-controls restore (§4), sanitized ---
