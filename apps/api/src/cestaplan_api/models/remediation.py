@@ -60,8 +60,10 @@ class HistoryRemediationRun(BaseModel):
     planner_tool_version: Mapped[str] = mapped_column(Text, nullable=False)
     planner_source_hash: Mapped[str] = mapped_column(Text, nullable=False)
     writer_contract_version: Mapped[str] = mapped_column(Text, nullable=False)
-    main_commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
-    alembic_revision: Mapped[str] = mapped_column(Text, nullable=False)
+    # §5v4: nullable — a failed-run audit persists NULL when no REAL observed commit / live Alembic
+    # revision is available, rather than fabricating an empty string that would read as evidence.
+    main_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alembic_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_mode: Mapped[str] = mapped_column(
         enum_col(*REMEDIATION_MODES, name="history_remediation_mode"), nullable=False
     )
@@ -102,6 +104,15 @@ class HistoryRemediationRun(BaseModel):
     backup_storage_reference: Mapped[str | None] = mapped_column(Text)  # sanitized or NULL
     backup_storage_reference_hash: Mapped[str | None] = mapped_column(Text)
     backup_evidence_hash: Mapped[str | None] = mapped_column(Text)
+
+    # --- Sealed authorization identity + expected backup, from the signed package (§1v2) ----------
+    authorization_id: Mapped[str | None] = mapped_column(Text)
+    authorization_package_hash: Mapped[str | None] = mapped_column(Text)
+    authorization_key_fingerprint: Mapped[str | None] = mapped_column(Text)  # sanitized fingerprint
+    authorization_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorization_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expected_backup_sha256: Mapped[str | None] = mapped_column(Text)
+    expected_backup_storage_reference_hash: Mapped[str | None] = mapped_column(Text)
 
     # --- Post-apply evidence for a same-controls restore (§4), sanitized ---
     post_apply_occurrence_hashes: Mapped[dict | None] = mapped_column(JSONB)

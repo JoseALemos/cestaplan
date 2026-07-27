@@ -60,8 +60,13 @@ if TYPE_CHECKING:
 APPLY_TOOL_VERSION = "0.1.0-apply"
 REQUIRED_SCHEMA_VERSION = 4
 # Version of the canonical apply/run evidence seal (spec §1v5/§2v5). Bump only on a contract change.
-EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2  # v2 adds sealed authorization identity + expected backup to the seal
 REQUIRED_PLANNER_TOOL_VERSION = "0.4.0-plan-only"
+# Fixed, compiled runtime paths (spec §2v3): in cloud/production these are the ONLY provenance +
+# trust-root locations; a mutable BUILD_PROVENANCE_PATH / _TRUST_ROOT_PATH env var
+# cannot redirect them. (The signed AUTHORIZATION_PACKAGE_PATH / _SIGNATURE_PATH stay configurable.)
+RUNTIME_BUILD_PROVENANCE_PATH = "/app/build-provenance.json"
+RUNTIME_AUTHORIZATION_TRUST_ROOT_PATH = "/app/authorization-trust-root.json"
 REQUIRED_WRITER_CONTRACT = "record-price-fact-v2-active-only"
 # The deployed writer must declare exactly these guarantees before any apply may execute (spec §1).
 REQUIRED_WRITER_FLAGS = {
@@ -184,6 +189,9 @@ class BuildProvenance:
     api_artifact_hash: str | None = None
     worker_artifact_hash: str | None = None
     document_hash: str | None = None  # sha256 of the provenance document file itself
+    alembic_revision: str | None = None
+    generator_version: str | None = None
+    authorization_trust_root_hash: str | None = None  # trust-root hash recorded in the document
 
 
 @dataclass(slots=True)
@@ -196,6 +204,21 @@ class ExpectedProvenance:
     api_artifact_hash: str | None = None
     worker_artifact_hash: str | None = None
     document_hash: str | None = None
+
+
+def _is_cloud() -> bool:
+    return os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
+
+
+def _runtime_provenance_paths() -> tuple[str | None, str | None]:
+    """(build_provenance_path, trust_root_path) for the CURRENT deployment (spec §2v3). In
+    cloud/production the FIXED baked paths are used and any BUILD_PROVENANCE_PATH /
+    BUILD_AUTHORIZATION_TRUST_ROOT_PATH env override is IGNORED; elsewhere (self_hosted / tests) the
+    env may point at temp files via the explicit internal path."""
+    if _is_cloud():
+        return RUNTIME_BUILD_PROVENANCE_PATH, RUNTIME_AUTHORIZATION_TRUST_ROOT_PATH
+    return (os.environ.get("BUILD_PROVENANCE_PATH"),
+            os.environ.get("BUILD_AUTHORIZATION_TRUST_ROOT_PATH"))
 
 
 def load_build_provenance(path: str | None = None) -> BuildProvenance:
@@ -212,13 +235,44 @@ def load_build_provenance(path: str | None = None) -> BuildProvenance:
         doc = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return BuildProvenance()
-    if not isinstance(doc, dict):
+    from cestaplan_api.provenance.generator import (
+        EVIDENCE_DOCUMENT_SCHEMA_VERSION,
+        GENERATOR_VERSION,
+        PYTHON_BASE_IMAGE_DIGEST,
+        TOOLCHAIN_CONTRACT_VERSION,
+        UV_IMAGE_DIGEST,
+        render_document,
+    )
+    # STRICT (§3v2/§7v3): exact fields, exact schema/generator/toolchain-contract, the python + uv
+    # digests EXACTLY equal to the reviewed constants, valid commit/hashes/revision, and bytes ==
+    # render_document(doc). Any deviation fails closed (empty BuildProvenance) even if the field is
+    # present and well-formed (a canonical document with a different python/uv digest is rejected).
+    required = {"schema_version", "commit_sha", "source_tree_hash", "api_artifact_hash",
+                "worker_artifact_hash", "alembic_revision", "generator_version",
+                "toolchain_contract_version", "python_base_image_digest", "uv_image_digest",
+                "authorization_trust_root_hash"}
+    if not isinstance(doc, dict) or set(doc) != required:
+        return BuildProvenance()
+    if (doc["schema_version"] != EVIDENCE_DOCUMENT_SCHEMA_VERSION
+            or doc["generator_version"] != GENERATOR_VERSION
+            or doc["toolchain_contract_version"] != TOOLCHAIN_CONTRACT_VERSION
+            or doc["python_base_image_digest"] != PYTHON_BASE_IMAGE_DIGEST
+            or doc["uv_image_digest"] != UV_IMAGE_DIGEST
+            or not _valid_commit(doc["commit_sha"])
+            or not all(_valid_sha256(doc[k]) for k in (
+                "source_tree_hash", "api_artifact_hash", "worker_artifact_hash",
+                "authorization_trust_root_hash"))
+            or not (isinstance(doc["alembic_revision"], str)
+                    and bool(re.match(r"^[0-9a-z_]{6,64}$", doc["alembic_revision"])))
+            or render_document(doc) != raw):
         return BuildProvenance()
     return BuildProvenance(
-        commit_sha=doc.get("commit_sha"), source_tree_hash=doc.get("source_tree_hash"),
-        api_artifact_hash=doc.get("api_artifact_hash"),
-        worker_artifact_hash=doc.get("worker_artifact_hash"),
-        document_hash=hashlib.sha256(raw).hexdigest())
+        commit_sha=doc["commit_sha"], source_tree_hash=doc["source_tree_hash"],
+        api_artifact_hash=doc["api_artifact_hash"],
+        worker_artifact_hash=doc["worker_artifact_hash"],
+        document_hash=hashlib.sha256(raw).hexdigest(),
+        alembic_revision=doc["alembic_revision"], generator_version=doc["generator_version"],
+        authorization_trust_root_hash=doc["authorization_trust_root_hash"])
 
 
 def _valid_sha256(v: str | None) -> bool:
@@ -388,19 +442,190 @@ class ApplyContext:
     backup: BackupEvidence | None = None
     operator_reference: str | None = None
     now: datetime | None = None
+    # Sanitized status of the sealed authorization package (set by from_environment); EXPECTED
+    # come from that package, never from the same runtime env that supplies the OBSERVED values.
+    authorization: dict[str, Any] | None = None
+    # --- Authorization identity + expected backup, filled ONLY from the signed package (§1v2) ---
+    authorization_id: str | None = None
+    authorization_package_hash: str | None = None
+    authorization_key_fingerprint: str | None = None
+    authorization_generated_at: datetime | None = None
+    authorization_expires_at: datetime | None = None
+    expected_backup_sha256: str | None = None
+    expected_backup_storage_reference: str | None = None
+    expected_backup_storage_reference_hash: str | None = None
+    # --- Explicit authorization gate (§3v3): only the verified loader sets these operationally ---
+    authorization_plan_hash: str | None = None
+    authorization_validated_at: datetime | None = None
+    authorization_valid: bool = False
+
+    # These are OWNED by the signed package on the operational path — a caller may not override them
+    # via from_environment (tests inject them by building ApplyContext(...) directly).
+    _PACKAGE_OWNED = frozenset({
+        "expected_provenance", "expected_main_sha", "expected_alembic", "expected_product_price",
+        "expected_active_mappings", "operator_reference", "authorization_id",
+        "authorization_package_hash", "authorization_key_fingerprint", "authorization_generated_at",
+        "authorization_expires_at", "expected_backup_sha256", "expected_backup_storage_reference",
+        "expected_backup_storage_reference_hash", "authorization_plan_hash",
+        "authorization_validated_at", "authorization_valid"})
 
     @classmethod
-    def from_environment(cls, **overrides: Any) -> ApplyContext:
+    def from_environment(cls, *, plan_hash: str | None = None, **overrides: Any) -> ApplyContext:
+        forbidden = set(overrides) & cls._PACKAGE_OWNED
+        if forbidden:
+            raise ApplyNotAuthorized(
+                "override_forbidden_operational_path", ",".join(sorted(forbidden)))
+        # §1v4: in cloud/production NO caller may inject the clock — the only operational time
+        # source is _now_utc(), captured under the global lock. A "now" override is a test-only
+        # affordance (self_hosted) and is rejected outright in cloud.
+        if "now" in overrides and _is_cloud():
+            raise ApplyNotAuthorized("override_forbidden_operational_clock", "now")
+        bp_path, _tr_path = _runtime_provenance_paths()  # fixed paths in cloud/production (§2v3)
         base = cls(
             app_commit_sha=os.environ.get("APP_COMMIT_SHA"),
             deployed_api_sha=os.environ.get("DEPLOYED_API_SHA") or os.environ.get("APP_COMMIT_SHA"),
             deployed_worker_sha=os.environ.get("DEPLOYED_WORKER_SHA"),
-            expected_main_sha=os.environ.get("EXPECTED_MAIN_SHA"),
-            expected_alembic=os.environ.get("EXPECTED_ALEMBIC_REVISION"),
-            observed_provenance=load_build_provenance())
+            observed_provenance=load_build_provenance(bp_path))
         for k, v in overrides.items():
             setattr(base, k, v)
+        # Pre-check load clock only (self_hosted tests may inject base.now); the OPERATIONAL
+        # temporal decision is re-made under the lock with operation_now. Cloud always _now_utc().
+        now = base.now or _now_utc()
+        # The sealed package (verified against the FIXED baked trust-root) is the ONLY source of
+        # expected values + the authorization identity (§3v3).
+        status, pkg = _load_authorization(plan_hash, now)
+        base.authorization = status
+        if pkg is not None:
+            base.expected_provenance = ExpectedProvenance(**pkg.expected_provenance_fields())
+            base.expected_main_sha = pkg.main_commit_sha
+            base.expected_alembic = pkg.alembic_revision
+            base.expected_product_price = pkg.expected_product_price
+            base.expected_active_mappings = pkg.expected_active_mappings
+            base.operator_reference = pkg.operator_reference
+            base.authorization_id = pkg.authorization_id
+            base.authorization_package_hash = pkg.authorization_package_hash
+            base.authorization_key_fingerprint = pkg.public_key_fingerprint
+            base.authorization_generated_at = pkg.generated_at
+            base.authorization_expires_at = pkg.expires_at
+            base.expected_backup_sha256 = pkg.backup_expected_sha256
+            base.expected_backup_storage_reference = pkg.backup_storage_reference
+            base.expected_backup_storage_reference_hash = pkg.backup_storage_reference_hash
+            base.authorization_plan_hash = pkg.plan_hash
+            base.authorization_validated_at = now
+            base.authorization_valid = True
         return base
+
+
+def _load_authorization(plan_hash: str | None, now: datetime, *,
+                        trust_root_keys: list[str] | None = None) -> tuple[dict[str, Any], Any]:
+    """Load + verify the sealed authorization package (feat provenance v2). The authorized keys come
+    ONLY from the BAKED trust-root file (never a runtime env var); ``trust_root_keys`` is a test
+    test-injection hook, unused on the operational path. No package/plan_hash -> absent. Any failure
+    -> sanitized status + None, so expected provenance stays empty and apply_ready stays false."""
+    from cestaplan_api.provenance import (
+        AuthorizationError,
+        TrustRootError,
+        load_authorization_package_from_files,
+        load_trust_root,
+    )
+    pkg_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
+    sig_path = os.environ.get("AUTHORIZATION_SIGNATURE_PATH")
+    if not pkg_path or not sig_path or plan_hash is None:
+        return {"package_present": False}, None
+    if trust_root_keys is not None:
+        keys = trust_root_keys
+    else:
+        trust_path = _runtime_provenance_paths()[1]  # fixed in cloud/production (§2v3)
+        if not trust_path or not Path(trust_path).is_file():
+            return {"package_present": True, "signature_valid": False,
+                    "error_code": "trust_root_missing"}, None
+        try:
+            keys = load_trust_root(trust_path)
+        except TrustRootError as exc:
+            return {"package_present": True, "signature_valid": False,
+                    "error_code": exc.code}, None
+    if not Path(pkg_path).is_file() or not Path(sig_path).is_file():
+        return {"package_present": False, "error_code": "package_files_missing"}, None
+    try:
+        pkg = load_authorization_package_from_files(
+            pkg_path, sig_path, authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
+    except AuthorizationError as exc:
+        sig_codes = {"signature_not_authorized", "signature_malformed", "no_authorized_public_keys"}
+        return {"package_present": True, "signature_valid": exc.code not in sig_codes,
+                "expired": exc.code == "package_expired", "error_code": exc.code}, None
+    return {"package_present": True, "signature_valid": True, "expired": False,
+            "authorization_id": pkg.authorization_id,
+            "key_fingerprint": pkg.public_key_fingerprint}, pkg
+
+
+def _document_toolchain_ok() -> dict[str, bool]:
+    """Sanitized booleans for the document toolchain fields vs the reviewed constants + live
+    trust-root (no hashes shown, §7v3); a different python/uv digest reads False."""
+    from cestaplan_api.provenance.generator import (
+        GENERATOR_VERSION,
+        PYTHON_BASE_IMAGE_DIGEST,
+        TOOLCHAIN_CONTRACT_VERSION,
+        UV_IMAGE_DIGEST,
+    )
+    bp_path = _runtime_provenance_paths()[0]
+    doc: dict[str, Any] = {}
+    if bp_path and Path(bp_path).is_file():
+        try:
+            loaded = json.loads(Path(bp_path).read_bytes())
+            doc = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError, ValueError):
+            doc = {}
+    live_trust = _observed_trust_root_hash()
+    return {
+        "generator_version_match": doc.get("generator_version") == GENERATOR_VERSION,
+        "toolchain_contract_match": doc.get("toolchain_contract_version")
+        == TOOLCHAIN_CONTRACT_VERSION,
+        "python_base_image_digest_match": doc.get("python_base_image_digest")
+        == PYTHON_BASE_IMAGE_DIGEST,
+        "uv_image_digest_match": doc.get("uv_image_digest") == UV_IMAGE_DIGEST,
+        "trust_root_live_match": _valid_sha256(live_trust)
+        and live_trust == doc.get("authorization_trust_root_hash"),
+    }
+
+
+def _provenance_report(m: dict[str, Any], ctx: ApplyContext) -> dict[str, Any]:
+    """Sanitized provenance status for verify-only (no hashes leaked — only match booleans)."""
+    gates = dict(_provenance_gates(m, ctx))
+    ident = dict(_build_identity_gates_safe(ctx))
+    o = ctx.observed_provenance
+    return {
+        "document_found": o.document_hash is not None,
+        "schema_valid": o.document_hash is not None,  # load_build_provenance rejects other schemas
+        "commit_present": _valid_commit(o.commit_sha),
+        "source_tree_match": gates.get("provenance_source_matches", False),
+        "api_artifact_match": gates.get("provenance_api_artifact_matches", False),
+        "worker_artifact_match": gates.get("provenance_worker_artifact_matches", False),
+        "document_match": gates.get("provenance_document_matches", False),
+        "immutable_build_provenance": gates.get("immutable_build_provenance", False),
+        "trust_root_match": ident.get("trust_root_matches_document", False),
+        **_document_toolchain_ok(),
+    }
+
+
+def _build_identity_gates_safe(ctx: ApplyContext) -> list[tuple[str, bool]]:
+    """Build-identity gates that need no DB session (for the sanitized verify-only report)."""
+    o, e = ctx.observed_provenance, ctx.expected_provenance
+    return [
+        ("build_doc_commit_matches_app", _eq_commit(o.commit_sha, ctx.app_commit_sha)),
+        ("package_main_matches_expected", _eq_commit(ctx.expected_main_sha, e.commit_sha)),
+        ("trust_root_matches_document", _valid_sha256(_observed_trust_root_hash())
+         and _observed_trust_root_hash() == o.authorization_trust_root_hash),
+    ]
+
+
+def _authorization_report(ctx: ApplyContext) -> dict[str, Any]:
+    a = ctx.authorization or {"package_present": False}
+    return {
+        "package_present": a.get("package_present", False),
+        "signature_valid": a.get("signature_valid", False),
+        "expired": a.get("expired", False),
+        "error_code": a.get("error_code"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +783,36 @@ def _provenance_gates(m: dict[str, Any], ctx: ApplyContext) -> list[tuple[str, b
     ]
 
 
+def _observed_trust_root_hash() -> str | None:
+    """SHA-256 of the trust-root file at the RESOLVED path (fixed in cloud/production, §2v3)."""
+    path = _runtime_provenance_paths()[1]
+    if not path or not Path(path).is_file():
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _build_identity_gates(db: Session, ctx: ApplyContext) -> list[tuple[str, bool]]:
+    """Bind the full build identity (spec §3v2): the observed document commit, APP_COMMIT_SHA, the
+    package commit/main, the live + document Alembic revision and the trust-root must all agree — no
+    separately-coherent-but-contradictory chains. Needs a valid package (empty expected=False)."""
+    o, e = ctx.observed_provenance, ctx.expected_provenance
+    app = ctx.app_commit_sha
+    live_trust = _observed_trust_root_hash()
+    return [
+        ("build_doc_commit_matches_app", _eq_commit(o.commit_sha, app)),
+        ("package_main_matches_expected", _eq_commit(ctx.expected_main_sha, e.commit_sha)),
+        ("build_doc_alembic_matches_package",
+         o.alembic_revision is not None and o.alembic_revision == ctx.expected_alembic),
+        ("build_doc_alembic_matches_live",
+         o.alembic_revision is not None and o.alembic_revision == _alembic_revision(db)),
+        ("trust_root_matches_document",
+         _valid_sha256(live_trust) and live_trust == o.authorization_trust_root_hash),
+    ]
+
+
 def _server_version(db: Session) -> str | None:
     try:
         return db.execute(text("SHOW server_version")).scalar()
@@ -565,10 +820,25 @@ def _server_version(db: Session) -> str | None:
         return None
 
 
-def _backup_gate(db: Session, ctx: ApplyContext) -> tuple[bool, dict[str, Any]]:
+def _backup_gate(
+    db: Session, ctx: ApplyContext, operation_now: datetime
+) -> tuple[bool, dict[str, Any]]:
+    # §1v4: the single operational clock captured under the global lock is the only temporal
+    # source for the backup-age decision — never ctx.now.
     if ctx.backup is None:
         return False, {"backup_present": False}
-    return ctx.backup.verify(ctx.now or datetime.now(UTC), server_version=_server_version(db))
+    ok, ev = ctx.backup.verify(operation_now, server_version=_server_version(db))
+    # §1v2: the backup must be the one the SIGNED package authorized — same expected SHA (and the
+    # observed file SHA equals it), same sanitized storage reference and same reference hash.
+    bound = (
+        _valid_sha256(ctx.expected_backup_sha256)
+        and ctx.backup.expected_sha256 == ctx.expected_backup_sha256
+        and ev.get("observed_sha256") == ctx.expected_backup_sha256
+        and ctx.expected_backup_storage_reference is not None
+        and ev.get("storage_reference_sanitized") == ctx.expected_backup_storage_reference
+        and ev.get("storage_reference_hash") == ctx.expected_backup_storage_reference_hash)
+    ev["authorization_backup_bound"] = bound
+    return (ok and bound), ev
 
 
 # --------------------------------------------------------------------------- #
@@ -580,11 +850,17 @@ _KNOWN_BLOCKERS = frozenset({
 })
 
 
-def _full_provenance_ok(m: dict[str, Any], ctx: ApplyContext) -> bool:
-    """The conjunction of EVERY provenance gate (§8): app-commit present, api/worker aligned,
-    main-commit match, immutable build (document present + document/commit/source/api/worker
-    all matching). A blocker is never 'resolved' while any commit or artifact mismatches."""
-    return all(ok for _, ok in _provenance_gates(m, ctx))
+def _full_provenance_ok(db: Session, m: dict[str, Any], ctx: ApplyContext, *,
+                        now: datetime) -> bool:
+    """The conjunction of EVERY provenance, build-identity AND authorization gate (§4v3): app-commit
+    present, api/worker aligned, main-commit match, immutable build, the full build identity (doc
+    commit == APP == package main == expected; doc Alembic == package Alembic == live DB; trust-root
+    live == document) and a valid, current, plan-bound authorization package. A manifest blocker is
+    never 'resolved' while any of these fails — so the report never shows a blocker resolved while
+    build identity or authorization is blocking."""
+    return (all(ok for _, ok in _provenance_gates(m, ctx))
+            and all(ok for _, ok in _build_identity_gates(db, ctx))
+            and all(ok for _, ok in _authorization_gates(m, ctx, now)))
 
 
 def _resolve_manifest_blockers(m: dict[str, Any], *, writer_ok: bool,
@@ -881,8 +1157,101 @@ def _simulate_plan(m: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Gate driver: collect (verify) or fail-closed (apply)
 # --------------------------------------------------------------------------- #
+def _now_utc() -> datetime:
+    """A fresh UTC instant. The single internal clock hook — tests monkeypatch THIS; an operational
+    caller can never pass an arbitrary clock into the gates (spec §3v3)."""
+    return datetime.now(UTC)
+
+
+_AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _authorization_revalidated(ctx: ApplyContext, operation_now: datetime) -> bool:
+    """§2v4: FULLY re-validate the sealed authorization UNDER the global lock, using operation_now.
+
+    It is not enough to re-read the JSON and compare one field. Here we re-read package + signature
+    race-safe from the configured paths, reload the trust-root from the FIXED baked path, and re-run
+    the entire loader (exact canonical encoding, self-hash recompute, Ed25519 verification, plan
+    binding, generated/expires/freshness against operation_now, fingerprint derivation). Then the
+    freshly reloaded package must match the ApplyContext EXACTLY on every operational field. Any
+    difference — a swapped or re-signed package, a changed signature file, a rotated trust-root, an
+    expiry that has since passed — fails closed. We NEVER trust ctx.authorization_valid or the
+    cached ctx.authorization["signature_valid"]: informational load-time state, not current proof.
+    """
+    if ctx.authorization_plan_hash is None or ctx.expected_provenance is None:
+        return False
+    try:
+        status, pkg = _load_authorization(ctx.authorization_plan_hash, operation_now)
+    except Exception:  # fail-closed on any loader/IO error
+        return False
+    if pkg is None or not status.get("signature_valid"):
+        return False
+    try:
+        expected_prov = {
+            "commit_sha": ctx.expected_provenance.commit_sha,
+            "source_tree_hash": ctx.expected_provenance.source_tree_hash,
+            "api_artifact_hash": ctx.expected_provenance.api_artifact_hash,
+            "worker_artifact_hash": ctx.expected_provenance.worker_artifact_hash,
+            "document_hash": ctx.expected_provenance.document_hash,
+        }
+        pairs: list[tuple[Any, Any]] = [
+            (ctx.authorization_id, pkg.authorization_id),
+            (ctx.authorization_package_hash, pkg.authorization_package_hash),
+            (ctx.authorization_key_fingerprint, pkg.public_key_fingerprint),
+            (ctx.authorization_plan_hash, pkg.plan_hash),
+            (ctx.expected_main_sha, pkg.main_commit_sha),
+            (ctx.expected_alembic, pkg.alembic_revision),
+            (expected_prov, pkg.expected_provenance_fields()),
+            (ctx.expected_product_price, pkg.expected_product_price),
+            (ctx.expected_active_mappings, pkg.expected_active_mappings),
+            (ctx.authorization_generated_at, pkg.generated_at),
+            (ctx.authorization_expires_at, pkg.expires_at),
+            (ctx.expected_backup_sha256, pkg.backup_expected_sha256),
+            (ctx.expected_backup_storage_reference, pkg.backup_storage_reference),
+            (ctx.expected_backup_storage_reference_hash, pkg.backup_storage_reference_hash),
+            (ctx.operator_reference, pkg.operator_reference),
+        ]
+    except AttributeError:
+        return False
+    return all(a == b for a, b in pairs)
+
+
+def _authorization_gates(m: dict[str, Any], ctx: ApplyContext,
+                         now: datetime) -> list[tuple[str, bool]]:
+    """Explicit authorization gates (§3v3). The temporal gates use a FRESH ``now`` (from under
+    the global lock at apply time), not the timestamp ApplyContext was built with."""
+    a = ctx.authorization or {}
+    aid_ok = isinstance(ctx.authorization_id, str) and bool(_AUTH_ID_RE.match(ctx.authorization_id))
+    ph_ok = _valid_sha256(ctx.authorization_package_hash)
+    fp_ok = isinstance(ctx.authorization_key_fingerprint, str) and \
+        bool(_FINGERPRINT_RE.match(ctx.authorization_key_fingerprint))
+    gen, exp = ctx.authorization_generated_at, ctx.authorization_expires_at
+    from cestaplan_api.provenance.authorization import MAX_GENERATION_AGE_SECONDS
+    return [
+        ("authz_package_present", bool(a.get("package_present"))),
+        ("authz_signature_valid", bool(a.get("signature_valid"))),
+        ("authz_valid", ctx.authorization_valid is True),
+        ("authz_identity_complete",
+         aid_ok and ph_ok and fp_ok and gen is not None and exp is not None),
+        ("authz_plan_hash_matches",
+         ctx.authorization_plan_hash is not None and ctx.authorization_plan_hash == m["plan_hash"]),
+        ("authz_id_valid", aid_ok),
+        ("authz_package_hash_valid", ph_ok),
+        ("authz_key_fingerprint_valid", fp_ok),
+        ("authz_generated_before_now", gen is not None and gen <= now),
+        ("authz_not_expired", exp is not None and now <= exp),
+        ("authz_generation_fresh",
+         gen is not None and 0 <= (now - gen).total_seconds() <= MAX_GENERATION_AGE_SECONDS),
+        # §2v4: full re-validation of the sealed package under the lock (not a one-field re-read).
+        ("authz_revalidated_under_lock", _authorization_revalidated(ctx, now)),
+    ]
+
+
 def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: Settings,
-                   *, for_apply: bool) -> tuple[list[str], list[str]]:
+                   *, for_apply: bool, operation_now: datetime) -> tuple[list[str], list[str]]:
+    # §1v4: ``operation_now`` is the single non-injectable operational clock, captured ONCE by the
+    # caller (under the global lock for apply/restore, a fresh read for verify). ctx.now is ignored.
     passed: list[str] = []
     blocking: list[str] = []
 
@@ -890,33 +1259,36 @@ def _run_all_gates(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: 
         (passed if ok else blocking).append(code)
 
     record("plan_hash_intact", _recompute_plan_hash(m) == m["plan_hash"])
-    record("plan_not_expired", _plan_age_ok(m, ctx))
+    record("plan_not_expired", _plan_age_ok(m, operation_now))
     record("supported_actions_only", _actions_supported(m))
     wgate_ok, _wgate_code = _writer_contract_gate()
     record("writer_contract_v2", wgate_ok)
     prov = _provenance_gates(m, ctx)
-    for code, ok in prov:
+    ident = _build_identity_gates(db, ctx)  # §3v2: bind the full build identity
+    authz = _authorization_gates(m, ctx, operation_now)  # §3v3/§2v4: plan-bound, re-verified authz
+    for code, ok in (*prov, *ident, *authz):
         record(code, ok)
-    full_prov = all(ok for _, ok in prov)
+    # §4v3: manifest blockers resolve ONLY under the full conjunction (prov + identity + authz).
+    full_prov = all(ok for _, ok in (*prov, *ident, *authz))
     _present, _resolved, unresolved = _resolve_manifest_blockers(
         m, writer_ok=wgate_ok, full_provenance_ok=full_prov)
-    record("manifest_blockers_resolved", not unresolved)  # §2: any unresolved blocker fails closed
+    record("manifest_blockers_resolved", not unresolved)  # any unresolved blocker fails closed
     for code, ok in _environment_gates(db, settings, ctx):
         record(code, ok)
     for code, ok in _drift_gates(db, m):
         record(code, ok)
     if for_apply:
-        record("backup_verified", _backup_gate(db, ctx)[0])
+        record("backup_verified", _backup_gate(db, ctx, operation_now)[0])
     return passed, blocking
 
 
-def _plan_age_ok(m: dict[str, Any], ctx: ApplyContext) -> bool:
+def _plan_age_ok(m: dict[str, Any], operation_now: datetime) -> bool:
+    # §1v4: plan age is measured against the single operational clock, never ctx.now.
     gen = m.get("generated_at")
     if not gen:
         return False
-    now = ctx.now or datetime.now(UTC)
     try:
-        age = (now - _parse_dt(gen)).total_seconds()
+        age = (operation_now - _parse_dt(gen)).total_seconds()
     except (ValueError, TypeError):
         return False
     return 0 <= age <= _MAX_PLAN_AGE_SECONDS
@@ -959,15 +1331,19 @@ def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
-    passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True)
+    # §1v4: verify-only is read-only; it takes a single FRESH operational clock at the start of its
+    # snapshot and threads it through every temporal gate. ctx.now is never consulted.
+    operation_now = _now_utc()
+    passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=True, operation_now=operation_now)
     wgate_ok, _ = _writer_contract_gate()
-    full_prov = _full_provenance_ok(m, ctx)
+    full_prov = _full_provenance_ok(db, m, ctx, now=operation_now)
     present, resolved, unresolved = _resolve_manifest_blockers(
         m, writer_ok=wgate_ok, full_provenance_ok=full_prov)
     apply_blockers: list[str] = []
     if not full_prov:
         apply_blockers.append("immutable_build_provenance_missing")
-    if not _backup_gate(db, ctx)[0]:
+    if not _backup_gate(db, ctx, operation_now)[0]:
         apply_blockers.append("verified_backup_missing")
     apply_blockers.extend(f"unresolved_manifest_blocker:{b}" for b in unresolved)
     report = {
@@ -989,6 +1365,9 @@ def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
         "gates_blocking": sorted(blocking),
         "apply_ready": (not blocking) and not apply_blockers,
         "apply_blockers": apply_blockers,
+        "provenance": _provenance_report(m, ctx),
+        # NOT "authorization": that key name is on the sensitive-key denylist (scan_sensitive).
+        "authorization_status": _authorization_report(ctx),
     }
     return report
 
@@ -1008,7 +1387,9 @@ def _simulate_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
     _require_postgres(db)
     _require_manifest_shape(m)
     settings = settings or Settings()
-    passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=False)
+    # §1v4: simulate is in-memory/read-only — a single fresh operational clock, ctx.now ignored.
+    passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=False, operation_now=_now_utc())
     sim = _simulate_plan(m)
     return {
         "apply_tool_version": APPLY_TOOL_VERSION,
@@ -1173,17 +1554,43 @@ def _record_failed_run(m: dict[str, Any], ctx: ApplyContext, error_code: str,
     from cestaplan_api.models import HistoryRemediationRun
     s = SessionLocal()
     try:
+        o, e = ctx.observed_provenance, ctx.expected_provenance
+        # §5v4: NEVER fabricate empty-string evidence. main_commit_sha is the REAL observed commit
+        # (APP_COMMIT_SHA, else the baked document's commit); alembic_revision is read LIVE from the
+        # database during THIS audit transaction. When neither yields a real value -> NULL (the
+        # columns are nullable), never "".
+        observed_main = ctx.app_commit_sha or (o.commit_sha if o is not None else None) or None
+        audit_alembic = _alembic_revision(s) or None
+        # §1v4: the failure audit uses the single non-injectable clock (_now_utc), never ctx.now.
+        audit_now = _now_utc()
         run = HistoryRemediationRun(
             plan_hash=m["plan_hash"], manifest_schema_version=m.get("schema_version", 0),
             planner_tool_version=m.get("tool_version", ""),
             planner_source_hash=m.get("planner_source_hash", ""),
             writer_contract_version=REQUIRED_WRITER_CONTRACT,
-            main_commit_sha=ctx.expected_main_sha or "",
-            alembic_revision=ctx.expected_alembic or "",
+            main_commit_sha=observed_main,
+            alembic_revision=audit_alembic,
             execution_mode="apply", status="failed", error_code=error_code,
-            started_at=ctx.now or datetime.now(UTC), completed_at=datetime.now(UTC),
-            operator_reference=ctx.operator_reference,
-            supersedes_run_id=supersedes, observed_commit_sha=ctx.app_commit_sha)
+            started_at=audit_now, completed_at=audit_now,
+            operator_reference=ctx.operator_reference,  # already sanitized upstream
+            supersedes_run_id=supersedes,
+            # Preserve identity ESTABLISHED before the failure; absent stays NULL — never
+            # invent a value (§6v3).
+            observed_commit_sha=ctx.app_commit_sha, expected_commit_sha=e.commit_sha,
+            observed_source_hash=o.source_tree_hash, expected_source_hash=e.source_tree_hash,
+            observed_api_artifact_hash=o.api_artifact_hash,
+            expected_api_artifact_hash=e.api_artifact_hash,
+            observed_worker_artifact_hash=o.worker_artifact_hash,
+            expected_worker_artifact_hash=e.worker_artifact_hash,
+            observed_provenance_document_hash=o.document_hash,
+            expected_provenance_document_hash=e.document_hash,
+            authorization_id=ctx.authorization_id,
+            authorization_package_hash=ctx.authorization_package_hash,
+            authorization_key_fingerprint=ctx.authorization_key_fingerprint,
+            authorization_generated_at=ctx.authorization_generated_at,
+            authorization_expires_at=ctx.authorization_expires_at,
+            expected_backup_sha256=ctx.expected_backup_sha256,
+            expected_backup_storage_reference_hash=ctx.expected_backup_storage_reference_hash)
         s.add(run)
         s.commit()
         return str(run.public_id)
@@ -1272,24 +1679,28 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
             return {"status": "already_applied", "plan_hash": m["plan_hash"]}
         # Consumed once but not currently applied -> it was restored; a NEW plan is required.
         return {"status": "plan_requires_regeneration", "plan_hash": m["plan_hash"]}
-    # 2) deterministic lane locks; 3) full revalidation under the locks.
+    # 2) deterministic lane locks; 3) capture the SINGLE operational clock ONCE, now that the global
+    #    lock is held, and thread it through every temporal gate + written timestamp. The
+    #    authorization temporal gates cannot be satisfied by a stale ApplyContext.now (§1v4/§3v3).
     for lane in sorted(m["lanes"], key=lambda x: x["lane_fingerprint"]):
         if not lane.get("excluded"):
             _acquire(db, _lane_lock_key(lane["lane_fingerprint"]), timeout_ms=lock_timeout_ms)
-    _passed, blocking = _run_all_gates(db, m, ctx, settings, for_apply=True)
+    operation_now = _now_utc()
+    _passed, blocking = _run_all_gates(
+        db, m, ctx, settings, for_apply=True, operation_now=operation_now)
     if blocking:
         raise ApplyEnvironmentUnsafe("gates_blocking", ",".join(sorted(blocking)))
 
-    run_ts = ctx.now or datetime.now(UTC)
+    run_ts = operation_now  # run_ts / started_at / completed_at all bind to the one clock
     before = _count_snapshot(db)
     o, e = ctx.observed_provenance, ctx.expected_provenance
-    bev = _backup_gate(db, ctx)[1]
+    bev = _backup_gate(db, ctx, operation_now)[1]
     run = HistoryRemediationRun(
         plan_hash=m["plan_hash"], manifest_schema_version=m["schema_version"],
         planner_tool_version=m["tool_version"], planner_source_hash=m["planner_source_hash"],
         writer_contract_version=REQUIRED_WRITER_CONTRACT,
-        main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha") or "",
-        alembic_revision=_alembic_revision(db) or "", execution_mode="apply", status="applied",
+        main_commit_sha=ctx.expected_main_sha or m["commit_provenance"].get("base_main_sha"),
+        alembic_revision=_alembic_revision(db), execution_mode="apply", status="applied",
         started_at=run_ts, operator_reference=ctx.operator_reference, before_counts=before,
         supersedes_run_id=supersedes,
         observed_commit_sha=ctx.app_commit_sha, expected_commit_sha=e.commit_sha,
@@ -1300,6 +1711,13 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
         expected_worker_artifact_hash=e.worker_artifact_hash,
         expected_provenance_document_hash=e.document_hash,
         observed_provenance_document_hash=o.document_hash,
+        authorization_id=ctx.authorization_id,
+        authorization_package_hash=ctx.authorization_package_hash,
+        authorization_key_fingerprint=ctx.authorization_key_fingerprint,
+        authorization_generated_at=ctx.authorization_generated_at,
+        authorization_expires_at=ctx.authorization_expires_at,
+        expected_backup_sha256=ctx.expected_backup_sha256,
+        expected_backup_storage_reference_hash=ctx.expected_backup_storage_reference_hash,
         **_backup_run_fields(ctx, bev))
     db.add(run)
     try:
@@ -1334,7 +1752,7 @@ def _apply_locked(db: Session, m: dict[str, Any], ctx: ApplyContext, settings: S
             ch.apply_evidence_hash = _apply_evidence_hash(ch, m["plan_hash"])
     after = _count_snapshot(db)
     run.after_counts = after
-    run.completed_at = ctx.now or datetime.now(UTC)
+    run.completed_at = operation_now  # §1v4: the one operation clock, not ctx.now
     _capture_post_apply_evidence(db, m, run)  # §4: evidence a restore can re-verify against
     # §2v5: seal the whole run AFTER its post-apply evidence is set; the consumption row copies it.
     run.execution_hash = _run_execution_hash(run, changes)
@@ -1491,17 +1909,22 @@ def _restore_guarded(db: Session, run_public_id: str, ctx: ApplyContext, *,
         HistoryRemediationChange.remediation_run_id == run.id)).scalars())
     for lane_fp in sorted({c.lane_fingerprint for c in changes}):
         _acquire(db, _lane_lock_key(lane_fp), timeout_ms=lock_timeout_ms)
-    # Same provenance/contract/env controls as apply (§4/§6) ...
+    # Same provenance/contract/env controls as apply (§4/§6), incl. a valid + current + plan-bound
+    # authorization — restore is only allowed within the ORIGINAL package's validity window (§5v3).
+    # §1v4: capture the single operational clock ONCE, now that the global + lane locks are held.
+    operation_now = _now_utc()
+    rm = {"plan_hash": run.plan_hash, "commit_provenance": {}}
     env = dict(_environment_gates(db, settings, ctx))
     if not all(env.get(g) for g in _RESTORE_ENV_GATES) or not _writer_contract_gate()[0] \
-            or not _full_provenance_ok({"commit_provenance": {}}, ctx):
+            or not _full_provenance_ok(db, rm, ctx, now=operation_now):
         raise ApplyEnvironmentUnsafe("restore_gates_blocking", "")
-    # ... AND the current context must bind EXACTLY to the run's stored evidence (§3v4): the same
-    # build + authorized package that applied it. A later/other build is rejected even if valid.
+    # ... AND the current context must bind EXACTLY to the run's stored evidence + authorization
+    # identity (§3v4/§5v3): the same build AND the same signed package that applied it. A different
+    # package — even signed by the same key with the same provenance — is rejected.
     _restore_provenance_bound_to_run(db, run, ctx)
     try:
         _restore_evidence_gates(db, run, changes)  # occurrences / FK / unknown-FK unchanged (§4)
-        return _restore_locked(db, run, changes)
+        return _restore_locked(db, run, changes, operation_now)
     except (ApplyRestoreDrift, ApplyForbiddenWrite) as exc:
         db.rollback()
         _mark_manual_review(run_public_id, exc.code)
@@ -1535,6 +1958,21 @@ def _restore_provenance_bound_to_run(db: Session, run: HistoryRemediationRun,
          run.observed_provenance_document_hash, o.document_hash),
         ("expected_provenance_document_hash",
          run.expected_provenance_document_hash, e.document_hash),
+        # §5v3: bind the EXACT signed package that applied the run (id, self-hash, key fingerprint,
+        # validity window, expected backup) + the plan_hash. A different package fails closed.
+        ("authorization_id", run.authorization_id, ctx.authorization_id),
+        ("authorization_package_hash", run.authorization_package_hash,
+         ctx.authorization_package_hash),
+        ("authorization_key_fingerprint", run.authorization_key_fingerprint,
+         ctx.authorization_key_fingerprint),
+        ("authorization_generated_at", _iso_utc(run.authorization_generated_at),
+         _iso_utc(ctx.authorization_generated_at)),
+        ("authorization_expires_at", _iso_utc(run.authorization_expires_at),
+         _iso_utc(ctx.authorization_expires_at)),
+        ("expected_backup_sha256", run.expected_backup_sha256, ctx.expected_backup_sha256),
+        ("expected_backup_storage_reference_hash", run.expected_backup_storage_reference_hash,
+         ctx.expected_backup_storage_reference_hash),
+        ("authorization_plan_hash", run.plan_hash, ctx.authorization_plan_hash),
     ]
     for name, run_value, ctx_value in checks:
         if run_value != ctx_value:
@@ -1644,7 +2082,8 @@ def _verify_sealed_evidence(db: Session, run: HistoryRemediationRun,
 
 
 def _restore_locked(db: Session, run: HistoryRemediationRun,
-                    changes: list[HistoryRemediationChange]) -> dict[str, Any]:
+                    changes: list[HistoryRemediationChange],
+                    operation_now: datetime) -> dict[str, Any]:
     allowed_ids = frozenset(c.created_anomaly_live_id for c in changes
                             if c.created_anomaly_live_id is not None)
     with _WriteGuard(db, allow_anomaly_delete=True, allowed_anomaly_ids=allowed_ids):
@@ -1673,7 +2112,7 @@ def _restore_locked(db: Session, run: HistoryRemediationRun,
             ch.created_anomaly_live_id = None  # null the live FK; original id + hash are preserved
             db.flush()
             db.delete(an)  # ORM single-id delete of the exact verified object
-            ch.created_anomaly_deleted_at = datetime.now(UTC)
+            ch.created_anomaly_deleted_at = operation_now  # §1v4: the one operation clock
         db.flush()
         for ch in changes:
             if _thash(_temporal_of(rows[ch.price_observation_id])) != _thash(
@@ -1724,6 +2163,11 @@ def _completed_run(db: Session, plan_hash: str) -> HistoryRemediationRun | None:
 
 def _json(state: dict[str, Any]) -> dict[str, Any]:
     return _norm_state(state)
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """A stable UTC isoformat for sealing (survives the DB timestamptz round-trip)."""
+    return dt.astimezone(UTC).isoformat() if dt is not None else None
 
 
 def _canonical_sha256(payload: Any) -> str:
@@ -1781,6 +2225,14 @@ def _run_execution_hash(run: HistoryRemediationRun,
         "expected_provenance_document_hash": run.expected_provenance_document_hash,
         "observed_provenance_document_hash": run.observed_provenance_document_hash,
         "backup_evidence_hash": run.backup_evidence_hash,
+        # Sealed authorization identity + expected backup (§1v2).
+        "authorization_id": run.authorization_id,
+        "authorization_package_hash": run.authorization_package_hash,
+        "authorization_key_fingerprint": run.authorization_key_fingerprint,
+        "authorization_generated_at": _iso_utc(run.authorization_generated_at),
+        "authorization_expires_at": _iso_utc(run.authorization_expires_at),
+        "expected_backup_sha256": run.expected_backup_sha256,
+        "expected_backup_storage_reference_hash": run.expected_backup_storage_reference_hash,
     })
 
 
@@ -1804,7 +2256,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
     mode.add_argument("--restore", metavar="RUN_PUBLIC_ID")
     a = p.parse_args(argv)
     manifest = load_manifest(a.manifest_path)
-    ctx = ApplyContext.from_environment(now=datetime.now(UTC))
+    # §1v4: the CLI never injects a clock; every mode derives its time from _now_utc() internally.
+    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"))
     cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
     if a.apply or a.restore:
         raise SystemExit(
