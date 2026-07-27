@@ -36,6 +36,7 @@ OPERATIONAL_EVIDENCE_SCHEMA_VERSION = 1
 MAX_EVIDENCE_BYTES = 64 * 1024
 MAX_PACKAGE_BYTES = 64 * 1024
 MAX_SIGNATURE_BYTES = 1024
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024  # a sealed plan manifest — generous, but bounded (§4v3)
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -93,10 +94,14 @@ def stat_identity(st: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _resolve_parent_dirfd(path: str) -> tuple[int, str]:
+def _resolve_parent_dirfd(path: str) -> tuple[int, str, list[os.stat_result]]:
     """Open the parent directory of ``path`` by walking every component from ``/`` with
-    ``O_DIRECTORY | O_NOFOLLOW`` (no component may be a symlink), returning (parent_fd, final_name).
-    Absolute path required; ``.``/``..`` components rejected. Caller closes parent_fd."""
+    ``O_DIRECTORY | O_NOFOLLOW`` (no component may be a symlink), returning
+    (parent_fd, final_name, dir_stats) where dir_stats is the fstat of each opened directory from
+    ``/`` down to the parent. After lstat + open of each component the OPENED descriptor is fstat'd
+    and required to be the SAME directory (dev/ino/mode/mtime_ns/ctime_ns) — a substitution between
+    lstat and open fails with ``directory_changed_during_traversal`` (§1v3). Absolute path required;
+    ``.``/``..`` components rejected. Caller closes parent_fd."""
     if not isinstance(path, str) or not path:
         raise CeremonyFileError("path_invalid")
     if _CONTROL_RE.search(path):
@@ -108,6 +113,7 @@ def _resolve_parent_dirfd(path: str) -> tuple[int, str]:
         raise CeremonyFileError("path_invalid")
     dir_flags = os.O_RDONLY | _flag("O_DIRECTORY") | _flag("O_NOFOLLOW") | _cloexec()
     dirfd = os.open("/", dir_flags)
+    stats: list[os.stat_result] = [os.fstat(dirfd)]
     try:
         for comp in parts[:-1]:
             if comp in (".", ".."):
@@ -115,12 +121,12 @@ def _resolve_parent_dirfd(path: str) -> tuple[int, str]:
             # lstat first for a clean symlink classification (O_NOFOLLOW|O_DIRECTORY on a symlink
             # can surface as ELOOP or ENOTDIR); O_NOFOLLOW on the open still guards a later swap.
             try:
-                st = os.lstat(comp, dir_fd=dirfd)
+                lst = os.lstat(comp, dir_fd=dirfd)
             except OSError as exc:
                 raise CeremonyFileError("path_unreadable") from exc
-            if statmod.S_ISLNK(st.st_mode):
+            if statmod.S_ISLNK(lst.st_mode):
                 raise CeremonyFileError("symlink_rejected")
-            if not statmod.S_ISDIR(st.st_mode):
+            if not statmod.S_ISDIR(lst.st_mode):
                 raise CeremonyFileError("not_a_directory")
             try:
                 nfd = os.open(comp, dir_flags, dir_fd=dirfd)
@@ -128,8 +134,17 @@ def _resolve_parent_dirfd(path: str) -> tuple[int, str]:
                 if getattr(exc, "errno", None) in (errno.ELOOP, errno.EMLINK):
                     raise CeremonyFileError("symlink_rejected") from exc
                 raise CeremonyFileError("path_unreadable") from exc
+            try:
+                ost = os.fstat(nfd)  # §1v3: the OPENED dir must be exactly the one we lstat'd
+                if (statmod.S_ISLNK(ost.st_mode) or not statmod.S_ISDIR(ost.st_mode)
+                        or stat_identity(ost) != stat_identity(lst)):
+                    raise CeremonyFileError("directory_changed_during_traversal")
+            except BaseException:
+                os.close(nfd)
+                raise
             os.close(dirfd)
             dirfd = nfd
+            stats.append(ost)
     except BaseException:
         os.close(dirfd)
         raise
@@ -137,7 +152,7 @@ def _resolve_parent_dirfd(path: str) -> tuple[int, str]:
     if final in (".", ".."):
         os.close(dirfd)
         raise CeremonyFileError("path_traversal_component")
-    return dirfd, final
+    return dirfd, final, stats
 
 
 def _open_final(parent_fd: int, name: str, flags: int, mode: int = 0o777) -> int:
@@ -168,7 +183,7 @@ def secure_read_bytes(path: str, *, require_owner_only: bool = False,
     same-size in-place edit, a truncation, an atomic replace or an inode reuse with different
     metadata all fail closed. Owner-only perms and a size cap are enforced. All fds closed in
     finally. Errors are sanitized codes — never a path."""
-    parent_fd, name = _resolve_parent_dirfd(path)
+    parent_fd, name, _stats = _resolve_parent_dirfd(path)
     try:
         fd = _open_final(parent_fd, name, os.O_RDONLY)
         try:
@@ -183,16 +198,20 @@ def secure_read_bytes(path: str, *, require_owner_only: bool = False,
             st1 = os.fstat(fd)
         finally:
             os.close(fd)
+        # §1v3: the second read brackets the read with fstat before AND after, so a change during
+        # the second read (even one restored to the same bytes) is caught by the identity check.
         vfd = _open_final(parent_fd, name, os.O_RDONLY)
         try:
-            after = os.fstat(vfd)
+            second_before = os.fstat(vfd)
             data2 = _read_all(vfd, max_bytes)
+            second_after = os.fstat(vfd)
         finally:
             os.close(vfd)
     finally:
         os.close(parent_fd)
-    if (stat_identity(st0) != stat_identity(st1) or stat_identity(st0) != stat_identity(after)
-            or data != data2):
+    identities = {stat_identity(st0), stat_identity(st1),
+                  stat_identity(second_before), stat_identity(second_after)}
+    if len(identities) != 1 or data != data2:
         raise CeremonyFileError("file_changed_during_read")
     return data
 
@@ -224,7 +243,7 @@ class SecureDump:
 def secure_open_dump(path: str) -> SecureDump:
     """Open a backup dump fail-closed for single-fd verification (§2v2): reject symlink components,
     ``O_NOFOLLOW`` open, regular file, positive size, owner-only perms. Caller MUST close()."""
-    parent_fd, name = _resolve_parent_dirfd(path)
+    parent_fd, name, _stats = _resolve_parent_dirfd(path)
     try:
         fd = _open_final(parent_fd, name, os.O_RDONLY)
     except BaseException:
@@ -277,26 +296,69 @@ def _write_all(fd: int, payload: bytes) -> None:
         total += n
 
 
+def _check_output_dir_security(dir_stats: list[os.stat_result]) -> None:
+    """§3v3: the FINAL output directory must be owned by the current euid and not group/other
+    writable. A group/other-writable ancestor is tolerated ONLY when it is sticky, owned by root or
+    the euid, and its opened child is owned by the euid (so a private 0700 dir inside sticky
+    world-writable /tmp is fine, but writing into an unprotected 0777 dir is not)."""
+    euid = os.geteuid()
+    final = dir_stats[-1]
+    if final.st_uid != euid:
+        raise CeremonyFileError("output_directory_insecure")
+    if final.st_mode & 0o022:  # group- or other-writable final dir
+        raise CeremonyFileError("output_directory_insecure")
+    for i, st in enumerate(dir_stats[:-1]):
+        if st.st_mode & 0o022:  # a group/other-writable ancestor
+            sticky = bool(st.st_mode & statmod.S_ISVTX)
+            owned = st.st_uid in (0, euid)
+            child_owned = dir_stats[i + 1].st_uid == euid
+            if not (sticky and owned and child_owned):
+                raise CeremonyFileError("output_directory_insecure")
+
+
+def _cleanup_created(parent_fd: int, name: str, created_ident: tuple[int, int]) -> None:
+    """Remove ONLY the file THIS run created: verify the name still resolves to the same
+    (st_dev, st_ino); if a substitute took the name, never delete it; if our own file cannot be
+    unlinked, raise ``output_cleanup_failed`` (never claim the file is gone). §3v3."""
+    try:
+        st = os.lstat(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return  # already gone
+    except OSError as exc:
+        raise CeremonyFileError("output_cleanup_failed") from exc
+    if statmod.S_ISLNK(st.st_mode) or (st.st_dev, st.st_ino) != created_ident:
+        return  # a substitute replaced the name — do NOT delete it
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CeremonyFileError("output_cleanup_failed") from exc
+
+
 def secure_create_request_file(path: str, payload: bytes) -> None:
-    """Create ``path`` EXCLUSIVELY (§1v2): absolute, outside the repo and /app, parent a real
-    directory reached descriptor-relative (no symlink component), final open
-    ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`` mode 0600 (O_EXCL blocks any pre-existing
-    target — manifest/evidence/package/signature/trust-root/build-provenance/backup — which is
-    NEVER touched). Writes fully (short-write safe), fsyncs the file and parent dir, and
-    fstat-verifies regular + exactly 0600 + owner-only + exact size. On failure only THIS run's
-    newly-created file is unlinked. Errors are sanitized — never a path."""
+    """Create ``path`` EXCLUSIVELY (§1v2/§3v3): absolute, outside the repo and /app, parent reached
+    descriptor-relative (no symlink component, race-checked), and a SECURE output directory (owned
+    by the euid, not group/other writable; a world-writable ancestor only if sticky + trusted-owner
+    + euid-owned child). Final open ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`` mode 0600
+    (O_EXCL blocks any pre-existing target — manifest/evidence/package/signature/trust-root/
+    build-provenance/backup — never touched). Writes short-write-safe, fsyncs the file, fstat-checks
+    regular + exactly 0600 + owner-only + exact size, then fsyncs the parent dir (a parent fsync is
+    fatal). On failure only THIS run's file is unlinked, and only after confirming the name still
+    points at it; if that unlink fails, ``output_cleanup_failed``. Errors are sanitized — never a
+    path."""
     if not isinstance(path, str) or not path or _CONTROL_RE.search(path):
         raise CeremonyFileError("path_invalid")
     if not os.path.isabs(path):
         raise CeremonyFileError("path_not_absolute")
     _reject_forbidden_output_location(path)
-    parent_fd, name = _resolve_parent_dirfd(path)
-    created = False
+    parent_fd, name, dir_stats = _resolve_parent_dirfd(path)
+    created_ident: tuple[int, int] | None = None
     try:
+        _check_output_dir_security(dir_stats)
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _flag("O_NOFOLLOW") | _cloexec(),
                      0o600, dir_fd=parent_fd)
-        created = True
         try:
+            st = os.fstat(fd)
+            created_ident = (st.st_dev, st.st_ino)  # remember exactly what we created
             _write_all(fd, payload)
             os.fsync(fd)
             st = os.fstat(fd)
@@ -305,15 +367,17 @@ def secure_create_request_file(path: str, payload: bytes) -> None:
                 raise CeremonyFileError("output_verification_failed")
         finally:
             os.close(fd)
-        with contextlib.suppress(OSError):
-            os.fsync(parent_fd)  # make the new directory entry durable
+        try:
+            os.fsync(parent_fd)  # durability of the new dir entry is REQUIRED, not best-effort
+        except OSError as exc:
+            raise CeremonyFileError("parent_fsync_failed") from exc
     except CeremonyFileError:
-        if created:
-            _unlink_created(parent_fd, name)
+        if created_ident is not None:
+            _cleanup_created(parent_fd, name, created_ident)  # may raise output_cleanup_failed
         raise
     except OSError as exc:
-        if created:
-            _unlink_created(parent_fd, name)
+        if created_ident is not None:
+            _cleanup_created(parent_fd, name, created_ident)
         if getattr(exc, "errno", None) == errno.EEXIST:
             raise CeremonyFileError("output_exists") from exc
         if getattr(exc, "errno", None) in (errno.ELOOP, errno.EMLINK):
@@ -321,11 +385,6 @@ def secure_create_request_file(path: str, payload: bytes) -> None:
         raise CeremonyFileError("output_unwritable") from exc
     finally:
         os.close(parent_fd)
-
-
-def _unlink_created(parent_fd: int, name: str) -> None:
-    with contextlib.suppress(OSError):
-        os.unlink(name, dir_fd=parent_fd)  # remove ONLY the file this run created
 
 
 # --------------------------------------------------------------------------- #

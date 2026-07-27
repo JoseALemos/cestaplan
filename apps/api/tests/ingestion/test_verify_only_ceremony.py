@@ -602,3 +602,158 @@ def test_cli_verify_ceremony_invalid_evidence_returns_3(tmp_path, monkeypatch, c
 def test_exit_codes_are_stable():
     assert (apply_tool.EXIT_OK, apply_tool.EXIT_GATES_BLOCKING,
             apply_tool.EXIT_INVALID_INPUT, apply_tool.EXIT_UNEXPECTED) == (0, 2, 3, 4)
+
+
+# --------------------------------------------------------------------------- #
+# §2v3: backup strict permissions + versions + second hash
+# --------------------------------------------------------------------------- #
+def test_backup_chmod_after_open_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    real = oe.secure_open_dump
+
+    def wrap(path):
+        d = real(path)
+        os.fchmod(d.fd, 0o644)  # loosen perms AFTER the secure open
+        return d
+
+    monkeypatch.setattr(oe, "secure_open_dump", wrap)
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["permissions_not_public"] is False
+
+
+def test_backup_db_version_absent_blocks(tmp_path):
+    dump = _copy_dump(tmp_path)
+    ok, ev = _be(dump).verify(datetime.now(UTC), server_version=None)
+    assert ok is False and ev["compatibility_ok"] is False
+
+
+def test_backup_dump_version_absent_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    monkeypatch.setattr(apply_tool, "_dump_db_version", lambda _s: None)
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["compatibility_ok"] is False
+
+
+def test_backup_pg_restore_version_absent_blocks(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    real_run = apply_tool.subprocess.run
+
+    def run_hook(cmd, *a, **k):
+        r = real_run(cmd, *a, **k)
+        if "--version" in cmd:
+            r.returncode = 1  # pg_restore --version "fails" -> observed version None
+        return r
+
+    monkeypatch.setattr(apply_tool.subprocess, "run", run_hook)
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["observed_pg_restore_version"] is None
+
+
+def test_backup_version_mismatch_blocks(tmp_path):
+    dump = _copy_dump(tmp_path)
+    ok, ev = _be(dump).verify(datetime.now(UTC), server_version="99")  # DB major != the rest
+    assert ok is False and ev["compatibility_ok"] is False
+
+
+def test_backup_content_change_during_pg_restore_blocks_via_second_hash(tmp_path, monkeypatch):
+    dump = _copy_dump(tmp_path)
+    size = os.path.getsize(dump)
+    real_run = apply_tool.subprocess.run
+    state = {"done": False}
+
+    def run_hook(cmd, *a, **k):
+        if not state["done"] and "--list" in cmd:
+            state["done"] = True
+            with open(dump, "r+b") as f:  # same-size content change during pg_restore
+                f.seek(size // 2)
+                cur = f.read(1)
+                f.seek(size // 2)
+                f.write(bytes([cur[0] ^ 0xFF]))
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(apply_tool.subprocess, "run", run_hook)
+    ok, ev = _verify(_be(dump))
+    assert ok is False and ev["second_sha256_matches"] is False
+
+
+def test_backup_all_versions_equal_passes(tmp_path):
+    ok, ev = _verify(_be(_copy_dump(tmp_path)))
+    assert ok is True and ev["compatibility_ok"] is True and ev["second_sha256_matches"] is True
+
+
+# --------------------------------------------------------------------------- #
+# §4v3: manifest under sanitized errors + mode ordering
+# --------------------------------------------------------------------------- #
+def _write_manifest(tmp_path, obj) -> str:
+    p = tmp_path / "m.json"
+    p.write_text(obj if isinstance(obj, str) else json.dumps(obj))
+    return str(p)
+
+
+def test_load_ceremony_manifest_valid(tmp_path):
+    m = apply_tool._load_ceremony_manifest(_write_manifest(tmp_path, {"plan_hash": "a" * 64}))
+    assert m["plan_hash"] == "a" * 64
+
+
+def test_load_ceremony_manifest_nonexistent(tmp_path):
+    with pytest.raises(oe.CeremonyFileError):
+        apply_tool._load_ceremony_manifest(str(tmp_path / "nope.json"))
+
+
+def test_load_ceremony_manifest_malformed(tmp_path):
+    with pytest.raises(apply_tool.ApplyManifestInvalid):
+        apply_tool._load_ceremony_manifest(_write_manifest(tmp_path, "{not json"))
+
+
+def test_load_ceremony_manifest_bad_plan_hash(tmp_path):
+    with pytest.raises(apply_tool.ApplyManifestInvalid):
+        apply_tool._load_ceremony_manifest(_write_manifest(tmp_path, {"plan_hash": "ZZZ"}))
+
+
+def test_load_ceremony_manifest_symlink_blocks(tmp_path):
+    real = _write_manifest(tmp_path, {"plan_hash": "a" * 64})
+    link = tmp_path / "link.json"
+    os.symlink(real, link)
+    with pytest.raises(oe.CeremonyFileError):
+        apply_tool._load_ceremony_manifest(str(link))
+
+
+def test_cli_apply_nonexistent_manifest_aborts_without_reading(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        apply_tool.main(["--manifest-path", str(tmp_path / "nope.json"), "--apply"])
+    assert "not authorized" in str(e.value)
+
+
+def test_cli_restore_nonexistent_manifest_aborts_without_reading(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        apply_tool.main(["--manifest-path", str(tmp_path / "nope.json"), "--restore", "x"])
+    assert "not authorized" in str(e.value)
+
+
+def test_cli_prepare_nonexistent_manifest_exit3(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "self_hosted")
+    ev = _bad_evidence(tmp_path)  # never reached; manifest fails first
+    rc = apply_tool.main([
+        "--manifest-path", str(tmp_path / "nope.json"), "--prepare-authorization-request",
+        "--operational-evidence-path", ev, "--operator-reference", "ops/1",
+        "--output-path", str(tmp_path / "out.json")])
+    assert rc == apply_tool.EXIT_INVALID_INPUT
+    out = capsys.readouterr()
+    assert json.loads(out.out)["apply_ready"] is False
+    assert str(tmp_path) not in out.out and str(tmp_path) not in out.err
+
+
+def test_cli_verify_ceremony_malformed_manifest_exit3(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "self_hosted")
+    manifest = _write_manifest(tmp_path, "{bad")
+    pkg = tmp_path / "p.json"
+    pkg.write_text("{}")
+    sig = tmp_path / "p.sig"
+    sig.write_text("00")
+    rc = apply_tool.main([
+        "--manifest-path", manifest, "--verify-authorization-ceremony",
+        "--operational-evidence-path", _bad_evidence(tmp_path),
+        "--authorization-package-path", str(pkg), "--authorization-signature-path", str(sig)])
+    assert rc == apply_tool.EXIT_INVALID_INPUT
+    out = capsys.readouterr()
+    assert "Traceback" not in out.err and str(tmp_path) not in (out.out + out.err)

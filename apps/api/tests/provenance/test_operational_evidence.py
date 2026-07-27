@@ -472,3 +472,173 @@ def test_create_errors_never_contain_path(tmp_path: Path) -> None:
     with pytest.raises(CeremonyFileError) as e:
         secure_create_request_file(str(out), _PAYLOAD)
     assert "secretname" not in str(e.value) and "secretname" not in e.value.code
+
+
+# --------------------------------------------------------------------------- #
+# §1v3: adversarial races in traversal + second read
+# --------------------------------------------------------------------------- #
+def test_traversal_dir_substituted_between_lstat_and_open(tmp_path: Path, monkeypatch) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "f").write_bytes(b"x")
+    d2 = tmp_path / "d2"
+    d2.mkdir()
+    (d2 / "f").write_bytes(b"y")
+    real_open = oe.os.open
+    state = {"done": False}
+
+    def racing_open(name, flags, *a, **k):
+        if not state["done"] and name == "d":
+            state["done"] = True
+            os.replace(str(d2), str(d))  # swap the dir (new inode) between lstat and open
+        return real_open(name, flags, *a, **k)
+
+    monkeypatch.setattr(oe.os, "open", racing_open)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_read_bytes(str(d / "f"))
+    assert _code(e) in ("directory_changed_during_traversal", "path_unreadable")
+
+
+def _read_race(tmp_path, mutate, monkeypatch):
+    p = tmp_path / "f"
+    p.write_bytes(b"A" * 40)
+    real_read = oe.os.read
+    reads = {"n": 0}
+
+    def read_hook(fd, n):
+        d = real_read(fd, n)
+        if d:
+            reads["n"] += 1
+            if reads["n"] == 2:  # during the SECOND read (after second_before fstat)
+                mutate(p)
+        return d
+
+    monkeypatch.setattr(oe.os, "read", read_hook)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_read_bytes(str(p))
+    assert _code(e) == "file_changed_during_read"
+
+
+def test_secure_read_change_during_second_read(tmp_path: Path, monkeypatch) -> None:
+    _read_race(tmp_path, lambda p: p.write_bytes(b"B" * 80), monkeypatch)  # different size
+
+
+def test_secure_read_change_and_restore_bytes_second_read(tmp_path: Path, monkeypatch) -> None:
+    def mutate(p):
+        p.write_bytes(b"A" * 40)  # same bytes, but a new mtime
+        st = os.stat(p)
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _read_race(tmp_path, mutate, monkeypatch)
+
+
+def test_secure_read_metadata_change_no_size(tmp_path: Path, monkeypatch) -> None:
+    _read_race(tmp_path, lambda p: os.chmod(p, 0o640), monkeypatch)  # mode/ctime change, same size
+
+
+# --------------------------------------------------------------------------- #
+# §3v3: output directory policy + durability + cleanup
+# --------------------------------------------------------------------------- #
+def test_create_final_dir_group_writable_blocks(tmp_path: Path) -> None:
+    d = tmp_path / "grp"
+    d.mkdir()
+    os.chmod(d, 0o770)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_create_request_file(str(d / "req.json"), _PAYLOAD)
+    assert _code(e) == "output_directory_insecure"
+
+
+def test_create_final_dir_world_writable_blocks(tmp_path: Path) -> None:
+    d = tmp_path / "wrld"
+    d.mkdir()
+    os.chmod(d, 0o777)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_create_request_file(str(d / "req.json"), _PAYLOAD)
+    assert _code(e) == "output_directory_insecure"
+
+
+def test_create_private_0700_dir_passes(tmp_path: Path) -> None:
+    d = tmp_path / "priv"
+    d.mkdir(mode=0o700)
+    os.chmod(d, 0o700)
+    out = d / "req.json"
+    secure_create_request_file(str(out), _PAYLOAD)
+    assert out.read_bytes() == _PAYLOAD and (os.stat(out).st_mode & 0o777) == 0o600
+
+
+def test_create_non_sticky_world_writable_ancestor_blocks(tmp_path: Path) -> None:
+    anc = tmp_path / "anc"
+    anc.mkdir()
+    os.chmod(anc, 0o777)  # world-writable, NO sticky bit
+    sub = anc / "sub"
+    sub.mkdir(mode=0o700)
+    os.chmod(sub, 0o700)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_create_request_file(str(sub / "req.json"), _PAYLOAD)
+    assert _code(e) == "output_directory_insecure"
+
+
+def test_create_fsync_file_failure_no_partial(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / "req.json"
+    real = oe.os.fsync
+    calls = {"n": 0}
+
+    def fsync_hook(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the file fsync
+            raise OSError("no fsync")
+        return real(fd)
+
+    monkeypatch.setattr(oe.os, "fsync", fsync_hook)
+    with pytest.raises(CeremonyFileError):
+        secure_create_request_file(str(out), _PAYLOAD)
+    assert not out.exists()  # partial cleaned up
+
+
+def test_create_parent_fsync_failure_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / "req.json"
+    real = oe.os.fsync
+    calls = {"n": 0}
+
+    def fsync_hook(fd):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the parent-dir fsync
+            raise OSError("no dir fsync")
+        return real(fd)
+
+    monkeypatch.setattr(oe.os, "fsync", fsync_hook)
+    with pytest.raises(CeremonyFileError) as e:
+        secure_create_request_file(str(out), _PAYLOAD)
+    assert _code(e) == "parent_fsync_failed"
+    assert not out.exists()  # our file cleaned up
+
+
+def test_create_cleanup_failure_returns_specific_code(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / "req.json"
+    monkeypatch.setattr(oe.os, "fsync",
+                        lambda fd: (_ for _ in ()).throw(OSError("boom")))  # force error path
+    monkeypatch.setattr(oe.os, "unlink",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("cannot unlink")))
+    with pytest.raises(CeremonyFileError) as e:
+        secure_create_request_file(str(out), _PAYLOAD)
+    assert _code(e) == "output_cleanup_failed"
+
+
+def test_create_substitution_before_cleanup_never_deletes_substitute(tmp_path: Path,
+                                                                     monkeypatch) -> None:
+    out = tmp_path / "req.json"
+    substitute = tmp_path / "sub.dat"
+    substitute.write_bytes(b"SUBSTITUTE")
+    real = oe.os.fsync
+    calls = {"n": 0}
+
+    def fsync_hook(fd):
+        calls["n"] += 1
+        if calls["n"] == 2:  # right before cleanup: swap our file for a different inode
+            os.replace(str(substitute), str(out))
+            raise OSError("parent fsync failed")
+        return real(fd)
+
+    monkeypatch.setattr(oe.os, "fsync", fsync_hook)
+    with pytest.raises(CeremonyFileError):
+        secure_create_request_file(str(out), _PAYLOAD)
+    assert out.read_bytes() == b"SUBSTITUTE"  # the substitute was NOT deleted

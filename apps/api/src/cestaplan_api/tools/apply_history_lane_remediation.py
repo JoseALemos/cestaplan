@@ -373,6 +373,8 @@ class BackupEvidence:
 
     def verify(self, now: datetime, *,
                server_version: str | None = None) -> tuple[bool, dict[str, Any]]:
+        import stat as statmod
+
         from cestaplan_api.provenance.operational_evidence import (
             PROC_SELF_FD,
             CeremonyFileError,
@@ -382,8 +384,8 @@ class BackupEvidence:
         )
         ev: dict[str, Any] = {
             "path_present": False, "regular_file": False, "permissions_not_public": False,
-            "size_positive": False, "sha256_matches": False, "pg_restore_list_verified": False,
-            "identity_stable": False,
+            "size_positive": False, "sha256_matches": False, "second_sha256_matches": False,
+            "pg_restore_list_verified": False, "identity_stable": False,
             "within_window": False, "compatibility_ok": False, "reference_sanitized": True,
             "size_bytes": 0, "observed_sha256": None, "expected_postgres_version": _major(
                 self.expected_postgres_version), "observed_pg_restore_version": None,
@@ -405,13 +407,16 @@ class BackupEvidence:
         try:
             st0 = os.fstat(dump.fd)
             ev["path_present"] = True
-            ev["regular_file"] = True  # secure_open_dump enforced regular + positive size + owner
-            ev["permissions_not_public"] = True
+            # §2v3: RE-DERIVE these from st0 (do not assume secure_open_dump's checks still hold — a
+            # chmod after the open must surface here as a blocking gate).
+            ev["regular_file"] = statmod.S_ISREG(st0.st_mode)
+            ev["permissions_not_public"] = (st0.st_mode & 0o077) == 0
             ev["size_bytes"] = st0.st_size
             ev["size_positive"] = st0.st_size > 0
-            ev["observed_sha256"] = stream_sha256_fd(dump.fd)  # from the held fd, streaming
+            first_sha = stream_sha256_fd(dump.fd)  # from the held fd, streaming
+            ev["observed_sha256"] = first_sha
             ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
-                ev["observed_sha256"] == self.expected_sha256.removeprefix("sha256:")
+                first_sha == self.expected_sha256.removeprefix("sha256:")
             try:
                 # errors="replace": a corrupt/adversarial dump may make pg_restore emit non-UTF-8
                 # bytes; decoding must never raise — the verify fails closed on returncode/identity.
@@ -431,23 +436,27 @@ class BackupEvidence:
                     ev["dump_database_version"] = _dump_db_version(lst.stdout)
             except (OSError, ValueError, subprocess.SubprocessError):
                 ev["pg_restore_list_verified"] = False
+            # §2v3: re-hash the SAME fd AFTER pg_restore and require it equals the first hash, so a
+            # content change during the subprocess is caught even if identity granularity misses it.
+            second_sha = stream_sha256_fd(dump.fd)
+            ev["second_sha256_matches"] = second_sha == first_sha
             st1 = os.fstat(dump.fd)
             after = dump.reopen_stat()  # descriptor-relative re-open; require identical identity
             ev["identity_stable"] = (
                 stat_identity(st0) == stat_identity(st1) == stat_identity(after))
         finally:
             dump.close()
-        # Compatibility is EXPLICIT: dump/database/pg_restore majors must all agree with expected.
-        majors = {ev["expected_postgres_version"], ev["observed_database_version"],
-                  ev["dump_database_version"], ev["observed_pg_restore_version"]}
-        majors.discard(None)
-        ev["compatibility_ok"] = len(majors) == 1 and ev["expected_postgres_version"] is not None
+        # §2v3: STRICT compatibility — all four majors must be non-NULL AND exactly equal (no
+        # set+discard(None), which would silently tolerate a missing version).
+        majors = (ev["expected_postgres_version"], ev["observed_database_version"],
+                  ev["dump_database_version"], ev["observed_pg_restore_version"])
+        ev["compatibility_ok"] = all(v is not None for v in majors) and len(set(majors)) == 1
         age = (now - self.created_at).total_seconds()
         ev["within_window"] = 0 <= age <= _BACKUP_MAX_AGE_SECONDS
         ok = all(ev[k] for k in (
             "path_present", "regular_file", "permissions_not_public", "size_positive",
-            "sha256_matches", "pg_restore_list_verified", "identity_stable", "within_window",
-            "compatibility_ok", "reference_sanitized"))
+            "sha256_matches", "second_sha256_matches", "pg_restore_list_verified",
+            "identity_stable", "within_window", "compatibility_ok", "reference_sanitized"))
         return ok, ev
 
 
@@ -2533,6 +2542,24 @@ def _emit_ceremony_error(code: int) -> int:
     return code
 
 
+def _load_ceremony_manifest(path: str) -> dict[str, Any]:
+    """Load a plan manifest for a ceremony mode fail-closed (§4v3): symlink-rejecting, race-safe,
+    size-capped read; valid JSON object with a well-formed plan_hash. Every failure is a sanitized
+    ApplyManifestInvalid (caught by the CLI -> EXIT_INVALID_INPUT), never a path or traceback."""
+    from cestaplan_api.provenance.operational_evidence import MAX_MANIFEST_BYTES, secure_read_bytes
+    raw = secure_read_bytes(path, max_bytes=MAX_MANIFEST_BYTES)  # raises CeremonyFileError (caught)
+    try:
+        m = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ApplyManifestInvalid("manifest_not_json") from exc
+    if not isinstance(m, dict):
+        raise ApplyManifestInvalid("manifest_not_object")
+    ph = m.get("plan_hash")
+    if not isinstance(ph, str) or re.fullmatch(r"[0-9a-f]{64}", ph) is None:
+        raise ApplyManifestInvalid("manifest_plan_hash_invalid")
+    return m
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI wrapper
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest-path", required=True)
@@ -2549,9 +2576,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
     mode.add_argument("--prepare-authorization-request", action="store_true")
     mode.add_argument("--verify-authorization-ceremony", action="store_true")
     a = p.parse_args(argv)
-    manifest = load_manifest(a.manifest_path)
     cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
-    # apply/restore stay impossible from the CLI, in every phase and every mode (§8v5).
+    # §4v3: block apply/restore (and simulate-in-cloud) BEFORE the manifest is ever read.
     if a.apply or a.restore:
         raise SystemExit(
             "ABORT: --apply/--restore are not authorized in this phase. Only read-only modes "
@@ -2569,10 +2595,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
             CeremonyFileError,
             secure_create_request_file,
         )
-        # §1v4: the CLI never injects a clock; the ceremony context loads observed evidence only.
+        # §1v4/§4v3: the CLI never injects a clock; the manifest is loaded inside the SAME sanitized
+        # try as evidence, so a bad manifest -> EXIT_INVALID_INPUT (no path/traceback).
         try:
+            manifest = _load_ceremony_manifest(a.manifest_path)
             ctx = ApplyContext.from_ceremony_files(
-                plan_hash=manifest.get("plan_hash") or "",
+                plan_hash=manifest["plan_hash"],
                 operational_evidence_path=a.operational_evidence_path)
             with SessionLocal() as db:
                 out = prepare_authorization_request(
@@ -2603,8 +2631,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
                              "--authorization-package-path and --authorization-signature-path.")
         from cestaplan_api.provenance.operational_evidence import CeremonyFileError
         try:
+            manifest = _load_ceremony_manifest(a.manifest_path)  # sanitized; inside the try (§4v3)
             ctx = ApplyContext.from_ceremony_files(
-                plan_hash=manifest.get("plan_hash") or "",
+                plan_hash=manifest["plan_hash"],
                 operational_evidence_path=a.operational_evidence_path,
                 authorization_package_path=a.authorization_package_path,
                 authorization_signature_path=a.authorization_signature_path)
@@ -2618,6 +2647,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI w
         code = EXIT_OK if out.get("apply_ready") else EXIT_GATES_BLOCKING
         return _emit_ceremony_report(out, code)
 
+    # verify-only / simulate: unchanged behaviour — load the manifest as before (§4v3).
+    manifest = load_manifest(a.manifest_path)
     ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"))
     with SessionLocal() as db:  # verify_only/simulate pin the read-only snapshot themselves (§10)
         out = verify_only(db, manifest, ctx) if a.verify_only else simulate(db, manifest, ctx)
