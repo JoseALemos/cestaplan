@@ -357,18 +357,16 @@ def _pg_dirs_secure(dir_stats: list[os.stat_result]) -> bool:
 
 
 def _verify_manifest_file(path: str, expected_sha256: str) -> bool:
-    """One documented runtime library: open O_NOFOLLOW, require a regular, root-owned, non-group/
-    other-writable file whose sha256 equals the documented value. Fail-closed. A file that cannot be
-    opened is tolerated ONLY on a non-root test runner (never in cloud/production, where the real
-    /usr closure is verified — and covered by CI's image-runtime job); a file that DOES exist is
-    always fully verified, so a tampered library is caught even in test mode."""
+    """One documented runtime library: open O_NOFOLLOW, require a regular, root-owned (or the euid
+    under the test relaxation), non-group/other-writable file whose sha256 equals the documented
+    value. Fail-closed — an absent or tampered file returns False."""
     import stat as statmod
     if not _SHA256_RE.match(str(expected_sha256)):
         return False
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
-        return (not _PG_REQUIRE_ROOT_OWNED) and (not _is_cloud())
+        return False
     try:
         st = os.fstat(fd)
         if (statmod.S_ISLNK(st.st_mode) or not statmod.S_ISREG(st.st_mode)
@@ -383,6 +381,14 @@ def _verify_manifest_file(path: str, expected_sha256: str) -> bool:
 
 
 def _verify_manifest_files(files: tuple[tuple[str, str], ...]) -> bool:
+    """Verify EVERY documented library file against the runtime. In the relaxed (non-root,
+    non-cloud) test mode the /usr closure is neither present nor trusted-owned — and a CI runner may
+    even ship a DIFFERENT PostgreSQL at those canonical paths — so it is not verifiable here and is
+    accepted; it is enforced strictly in cloud/production and by CI's image-runtime job (the real
+    image). Element enforcement (`_verify_manifest_file`) stays strict for direct tamper/absent
+    unit tests."""
+    if not _PG_REQUIRE_ROOT_OWNED and not _is_cloud():
+        return True
     return bool(files) and all(_verify_manifest_file(p, s) for p, s in files)
 
 

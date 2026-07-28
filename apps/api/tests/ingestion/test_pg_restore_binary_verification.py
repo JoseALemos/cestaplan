@@ -118,26 +118,32 @@ def test_parent_symlink_returns_none(monkeypatch, tmp_path: Path) -> None:
     assert _open(str(linkdir / "pg_restore"), sha, ((path, sha),)) is None
 
 
-def test_empty_manifest_returns_none(monkeypatch, tmp_path: Path) -> None:
+# ---- library manifest (§3/§6): element-level enforcement + mode-gated aggregate ----
+def test_manifest_file_tamper_is_detected(monkeypatch, tmp_path: Path) -> None:
+    _relaxed(monkeypatch)  # relaxed ownership; the element still enforces the documented sha
+    lib, libsha = _libfile(tmp_path)
+    assert apply_tool._verify_manifest_file(lib, "d" * 64) is False   # tampered / wrong sha
+    assert apply_tool._verify_manifest_file(lib, libsha) is True      # exact documented sha
+
+
+def test_manifest_file_absent_is_rejected(monkeypatch, tmp_path: Path) -> None:
     _relaxed(monkeypatch)
-    path, sha = _write_exec(tmp_path / "pg_restore", _fake_body())
-    assert _open(path, sha, ()) is None  # no documented library manifest -> fail closed
+    assert apply_tool._verify_manifest_file(str(tmp_path / "gone.so"), "c" * 64) is False
 
 
-def test_library_tamper_returns_none(monkeypatch, tmp_path: Path) -> None:
+def test_manifest_aggregate_bypassed_only_when_relaxed_non_cloud(monkeypatch,
+                                                                 tmp_path: Path) -> None:
     _relaxed(monkeypatch)
-    path, sha = _write_exec(tmp_path / "pg_restore", _fake_body())
-    lib, _libsha = _libfile(tmp_path)
-    assert _open(path, sha, ((lib, "d" * 64),)) is None  # documented lib sha != on-disk
+    # the /usr closure is not verifiable on a non-root test runner -> accepted (enforced in the
+    # real image by CI's image-runtime job)
+    assert apply_tool._verify_manifest_files((("/nonexistent/libpq.so", "c" * 64),)) is True
 
 
-def test_absent_library_tolerated_only_when_relaxed(monkeypatch, tmp_path: Path) -> None:
-    _relaxed(monkeypatch)
-    path, sha = _write_exec(tmp_path / "pg_restore", _fake_body())
-    # a documented library that is absent locally is tolerated in the relaxed (non-cloud) test mode
-    vpr = _open(path, sha, (("/usr/lib/x86_64-linux-gnu/libpq.so.5.18", "c" * 64),))
-    assert vpr is not None
-    vpr.close()
+def test_manifest_aggregate_strict_in_cloud(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(apply_tool, "_PG_REQUIRE_ROOT_OWNED", True)
+    monkeypatch.setenv("DEPLOYMENT_MODE", "cloud")
+    assert apply_tool._verify_manifest_files((("/nonexistent/libpq.so", "c" * 64),)) is False
+    assert apply_tool._verify_manifest_files(()) is False  # empty manifest fails closed
 
 
 @root_only
