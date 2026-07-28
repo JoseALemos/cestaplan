@@ -64,12 +64,17 @@ TRUST_ROOT_FILENAME = "authorization-trust-root.json"
 # Fixed, baked path — never substituted by a runtime env var in production.
 BUILD_AUTHORIZATION_TRUST_ROOT_PATH = "/app/authorization-trust-root.json"
 
+# The committed APT lock — a build input: COPYed to /app, consumed by verify_lock at build time and
+# part of the immutable runtime bundle. Measured in every scope so ANY byte change moves all three
+# provenance hashes.
+PG_RUNTIME_LOCK_FILENAME = "postgresql-client-18-runtime.lock.json"
+
 # Build-affecting, runtime-relevant files hashed in EVERY scope (Dockerfile + trust-root move all
 # three hashes, so a toolchain or trust-root change can never leave the hashes unchanged). README.md
 # is a BUILD INPUT — pyproject's `readme` points at it and it is COPYed before `uv sync`, so it can
 # affect the installed package; it is measured in every scope so a README change moves all three
-# hashes (§4v4).
-_BUILD_FILES = ["Dockerfile", TRUST_ROOT_FILENAME, "README.md"]
+# hashes (§4v4). The pg runtime lock is likewise a build input, covered in every scope.
+_BUILD_FILES = ["Dockerfile", TRUST_ROOT_FILENAME, "README.md", PG_RUNTIME_LOCK_FILENAME]
 SOURCE_TREE_INCLUDES = ["src", "migrations", "alembic.ini", "pyproject.toml", "uv.lock",
                         *_BUILD_FILES]
 API_ARTIFACT_INCLUDES = ["src/cestaplan_api", "src/cestaplan_engine", "migrations", "alembic.ini",
@@ -301,8 +306,18 @@ def _validate_pg_runtime(doc: Any) -> dict[str, Any]:
             "postgresql_runtime_manifest_hash": mhash}
 
 
-PG_RUNTIME_LOCK_FILENAME = "postgresql-client-18-runtime.lock.json"
+# dependency_closure_hash is computed EXCLUSIVELY over these four (unchanged); the full byte
+# identity of the lock is bound separately via the three provenance scope hashes (_BUILD_FILES).
 _LOCK_CORE_FIELDS = ("architecture", "codename", "distribution", "packages")
+# The lock is a REVIEWED constant: exact field set, platform, source and schema are pinned.
+_LOCK_ALLOWED_FIELDS = frozenset({
+    "_comment", "schema_version", "distribution", "codename", "architecture", "source", "packages",
+    "dependency_closure_hash"})
+_LOCK_SCHEMA_VERSION = 1
+_LOCK_DISTRIBUTION = "debian"
+_LOCK_CODENAME = "trixie"
+_LOCK_ARCHITECTURE = "amd64"
+_LOCK_SOURCE = "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main"
 
 
 def _pg_lock_closure_hash(lock: Mapping[str, Any]) -> str:
@@ -310,20 +325,47 @@ def _pg_lock_closure_hash(lock: Mapping[str, Any]) -> str:
     return hashlib.sha256((canonical_json(core) + "\n").encode()).hexdigest()
 
 
+def _lock_no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ProvenanceError("pg_lock_duplicate_key", "")
+    return dict(pairs)
+
+
+def _lock_reject_constant(const: str) -> Any:
+    raise ProvenanceError("pg_lock_non_finite", const)  # NaN / Infinity / -Infinity
+
+
 def load_pg_runtime_lock(path: str | Path) -> dict[str, Any]:
-    """Load + self-verify the committed APT lock (fail-closed). The lock pins the PGDG-sourced
-    closure (postgresql-client-18/libpq5/postgresql-client-common) so APT cannot silently install a
-    different set; the base-image libraries are pinned by the base image digest and captured in the
-    runtime file manifest instead."""
+    """Load + strictly self-verify the committed APT lock (fail-closed). The lock pins the
+    PGDG-sourced closure (postgresql-client-18/libpq5/postgresql-client-common) so APT cannot
+    silently install a different set; the base-image libraries are pinned by the base image digest
+    and captured in the runtime file manifest instead. The lock is a REVIEWED constant: the exact
+    field set, platform, source, schema and (canonical, ordered, de-duplicated) package contract are
+    enforced, duplicate JSON keys and NaN/Infinity are rejected, and dependency_closure_hash must be
+    correct."""
     try:
-        lock = json.loads(Path(path).read_bytes())
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
         raise ProvenanceError("pg_lock_unreadable", "") from exc
+    try:
+        lock = json.loads(raw, object_pairs_hook=_lock_no_duplicate_keys,
+                          parse_constant=_lock_reject_constant)
+    except json.JSONDecodeError as exc:
+        raise ProvenanceError("pg_lock_invalid", "") from exc
     if not isinstance(lock, dict):
         raise ProvenanceError("pg_lock_invalid", "")
-    for k in (*_LOCK_CORE_FIELDS, "dependency_closure_hash"):
-        if k not in lock:
-            raise ProvenanceError("pg_lock_field_missing", k)
+    if set(lock) != _LOCK_ALLOWED_FIELDS:  # no unknown field, no missing field
+        raise ProvenanceError("pg_lock_fields_mismatch", "")
+    if lock["schema_version"] != _LOCK_SCHEMA_VERSION or isinstance(lock["schema_version"], bool):
+        raise ProvenanceError("pg_lock_schema_unsupported", "")
+    if (lock["distribution"] != _LOCK_DISTRIBUTION or lock["codename"] != _LOCK_CODENAME
+            or lock["architecture"] != _LOCK_ARCHITECTURE):
+        raise ProvenanceError("pg_lock_platform_invalid", "")
+    if lock["source"] != _LOCK_SOURCE:
+        raise ProvenanceError("pg_lock_source_invalid", "")
+    if not isinstance(lock["_comment"], str) or not lock["_comment"].strip():
+        raise ProvenanceError("pg_lock_comment_invalid", "")
     if not isinstance(lock["packages"], list) or not lock["packages"]:
         raise ProvenanceError("pg_lock_packages_invalid", "")
     for pkg in lock["packages"]:

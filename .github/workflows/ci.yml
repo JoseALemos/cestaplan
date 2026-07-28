@@ -342,11 +342,13 @@ jobs:
               "provenance_no_rename": cannot_rename(bp),
               "trust_no_modify": cannot_write(tr), "trust_no_delete": cannot_delete(tr),
               "trust_no_rename": cannot_rename(tr), "code_no_modify": cannot_write(code),
-              # §4v4: the image bakes ONLY the document (no .sha256 sidecar), and README.md — a build
-              # input for uv — is measured by the provenance scopes.
+              # §4v4: the image bakes ONLY the document (no .sha256 sidecar); README.md (a uv build
+              # input) and the APT lock (a build input consumed by verify_lock) are both measured by
+              # the provenance scopes.
               "provenance_exists": os.path.isfile(bp),
               "sha256_sidecar_absent": not os.path.exists(bp + ".sha256"),
-              "readme_covered": "README.md" in manifest_paths}
+              "readme_covered": "README.md" in manifest_paths,
+              "lock_covered": g.PG_RUNTIME_LOCK_FILENAME in manifest_paths}
           try:
               t = "/tmp/permtest"; open(t, "w").write("x"); os.remove(t); tmp_ok = True
           except OSError:

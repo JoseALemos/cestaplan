@@ -69,7 +69,19 @@ def _bundle(root: Path) -> Path:
     (root / "README.md").write_text("# CestaPlan API\n")  # §4v4: a build input in every scope
     (root / "authorization-trust-root.json").write_text(
         '{"authorized_ed25519_public_keys":[],"schema_version":1}\n')
+    (root / g.PG_RUNTIME_LOCK_FILENAME).write_text(_LOCK_TEXT)  # a build input in every scope
     return root
+
+
+# A representative APT lock body; the bundle only needs the FILE to exist (the provenance scopes
+# hash its bytes). Loader-contract tests craft their own lock content separately.
+_LOCK_TEXT = (
+    '{"_comment":"test lock","schema_version":1,"distribution":"debian","codename":"trixie",'
+    '"architecture":"amd64",'
+    '"source":"https://apt.postgresql.org/pub/repos/apt trixie-pgdg main",'
+    '"packages":[{"package":"libpq5","version":"18.4-1.pgdg13+1"},'
+    '{"package":"postgresql-client-18","version":"18.4-1.pgdg13+1"}],'
+    '"dependency_closure_hash":"placeholder"}\n')
 
 
 def _doc(base: Path, commit: str = _COMMIT) -> dict:
@@ -369,10 +381,7 @@ def test_dockerfile_copies_are_covered() -> None:  # §4v4
     dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
     measured = {inc.split("/")[0] for inc in
                 (*g.SOURCE_TREE_INCLUDES, *g.API_ARTIFACT_INCLUDES, *g.WORKER_ARTIFACT_INCLUDES)}
-    # The APT lock is a build-time verification input (compared to the INSTALLED closure); its
-    # identity is bound transitively via the measured postgresql_runtime_* fields, so it need not be
-    # in a uv-affecting scope.
-    allowlist: set[str] = {"postgresql-client-18-runtime.lock.json"}
+    allowlist: set[str] = set()  # (empty) documented files copied to /app that don't affect it
     copied: list[str] = []
     for line in dockerfile.splitlines():
         s = line.strip()
@@ -639,3 +648,154 @@ def test_pg_runtime_lock_rejects_tampered_hash(tmp_path: Path) -> None:
     with pytest.raises(g.ProvenanceError) as ei:
         g.load_pg_runtime_lock(p)
     assert ei.value.code == "pg_lock_hash_mismatch"
+
+
+# ---- §5 lock as an immutable build input covered by all three provenance scopes ----
+def _valid_lock() -> dict:
+    lock = {
+        "_comment": "reviewed lock",
+        "schema_version": 1,
+        "distribution": "debian",
+        "codename": "trixie",
+        "architecture": "amd64",
+        "source": "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main",
+        "packages": [
+            {"package": "libpq5", "version": "18.4-1.pgdg13+1"},
+            {"package": "postgresql-client-18", "version": "18.4-1.pgdg13+1"},
+            {"package": "postgresql-client-common", "version": "293.pgdg13+1"}]}
+    lock["dependency_closure_hash"] = g._pg_lock_closure_hash(lock)
+    return lock
+
+
+def _write_lock(tmp_path: Path, lock: dict) -> Path:
+    p = tmp_path / "lock.json"
+    p.write_text(json.dumps(lock))
+    return p
+
+
+def test_lock_is_in_all_three_provenance_scopes() -> None:
+    for includes in (g.SOURCE_TREE_INCLUDES, g.API_ARTIFACT_INCLUDES, g.WORKER_ARTIFACT_INCLUDES):
+        assert g.PG_RUNTIME_LOCK_FILENAME in includes
+    assert g._BUILD_FILES == [
+        "Dockerfile", g.TRUST_ROOT_FILENAME, "README.md", g.PG_RUNTIME_LOCK_FILENAME]
+
+
+def _lock_change_moves_all_three(base: Path, mutate) -> None:
+    before = _doc(base)
+    lockp = base / g.PG_RUNTIME_LOCK_FILENAME
+    lockp.write_text(mutate(lockp.read_text()))
+    after = _doc(base)
+    for k in ("source_tree_hash", "api_artifact_hash", "worker_artifact_hash"):
+        assert after[k] != before[k], k
+
+
+def test_lock_comment_change_moves_all_three_hashes(tmp_path: Path) -> None:
+    def mutate(text: str) -> str:
+        d = json.loads(text)
+        d["_comment"] = d["_comment"] + " (edited)"
+        return json.dumps(d)
+    _lock_change_moves_all_three(_bundle(tmp_path), mutate)
+
+
+def test_lock_whitespace_byte_change_moves_all_three_hashes(tmp_path: Path) -> None:
+    _lock_change_moves_all_three(_bundle(tmp_path), lambda text: text + "\n")  # one extra byte
+
+
+def test_lock_version_change_moves_all_three_hashes(tmp_path: Path) -> None:
+    _lock_change_moves_all_three(
+        _bundle(tmp_path), lambda text: text.replace("18.4-1.pgdg13+1", "18.5-1.pgdg13+1"))
+
+
+def test_generation_with_lock_is_byte_deterministic(tmp_path: Path) -> None:
+    base = _bundle(tmp_path)
+    assert g.render_document(_doc(base)) == g.render_document(_doc(base))
+    # the lock is actually one of the measured source-tree files
+    paths = {e["path"] for e in build_manifest(base, g.SOURCE_TREE_INCLUDES)}
+    assert g.PG_RUNTIME_LOCK_FILENAME in paths
+
+
+# ---- §3 strict lock loader contract ----
+def test_valid_crafted_lock_loads(tmp_path: Path) -> None:
+    out = g.load_pg_runtime_lock(_write_lock(tmp_path, _valid_lock()))
+    assert [p["package"] for p in out["packages"]] == [
+        "libpq5", "postgresql-client-18", "postgresql-client-common"]
+
+
+def test_lock_unknown_field_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    lock["surprise"] = 1
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_fields_mismatch"
+
+
+def test_lock_missing_field_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    del lock["source"]
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_fields_mismatch"
+
+
+def test_lock_wrong_schema_version_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    lock["schema_version"] = 2
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_schema_unsupported"
+
+
+def test_lock_wrong_source_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    lock["source"] = "https://evil.example/apt trixie-pgdg main"
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_source_invalid"
+
+
+def test_lock_wrong_platform_blocks(tmp_path: Path) -> None:
+    for field, bad in (("distribution", "ubuntu"), ("codename", "bookworm"),
+                       ("architecture", "arm64")):
+        lock = _valid_lock()
+        lock[field] = bad
+        with pytest.raises(g.ProvenanceError) as ei:
+            g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+        assert ei.value.code == "pg_lock_platform_invalid", field
+
+
+def test_lock_empty_comment_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    lock["_comment"] = "   "
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_comment_invalid"
+
+
+def test_lock_duplicate_json_key_blocks(tmp_path: Path) -> None:
+    p = tmp_path / "lock.json"
+    p.write_text('{"schema_version": 1, "schema_version": 1, "distribution": "debian"}')
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(p)
+    assert ei.value.code == "pg_lock_duplicate_key"
+
+
+def test_lock_non_finite_blocks(tmp_path: Path) -> None:
+    for token in ("NaN", "Infinity", "-Infinity"):
+        p = tmp_path / "lock.json"
+        p.write_text('{"schema_version": ' + token + '}')
+        with pytest.raises(g.ProvenanceError) as ei:
+            g.load_pg_runtime_lock(p)
+        assert ei.value.code == "pg_lock_non_finite", token
+
+
+def test_lock_bad_closure_hash_blocks(tmp_path: Path) -> None:
+    lock = _valid_lock()
+    lock["dependency_closure_hash"] = "0" * 64
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(_write_lock(tmp_path, lock))
+    assert ei.value.code == "pg_lock_hash_mismatch"
+
+
+def test_committed_lock_still_loads() -> None:
+    lock = g.load_pg_runtime_lock(Path("postgresql-client-18-runtime.lock.json"))
+    assert lock["dependency_closure_hash"] == g._pg_lock_closure_hash(lock)
