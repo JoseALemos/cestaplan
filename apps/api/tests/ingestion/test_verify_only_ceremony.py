@@ -60,6 +60,48 @@ def _isession() -> Session:
     return Session(bind=engine.connect(), expire_on_commit=False)
 
 
+_FAKE_PG_RESTORE = (
+    "#!/bin/sh\n"
+    'case "$1" in\n'
+    '  --version) echo "pg_restore (PostgreSQL) 18.4";;\n'
+    '  --list) echo "; Dumped from database version: 18";;\n'
+    "  *) exit 1;;\n"
+    "esac\n"
+    "exit 0\n"
+)
+
+
+def _relaxed_verify_pg_restore_binary(expected_sha256, *, expected_major, path):
+    """Test double for apply_tool._verify_pg_restore_binary: full fail-closed contract EXCEPT the
+    strict root-owned gate is relaxed to 'root OR the current euid' so the ceremony happy paths run
+    under a NON-root CI runner. The strict gate is covered by the root-only unit tests in
+    tests/ingestion/test_pg_restore_binary_verification.py and by CI's image-runtime job."""
+    import stat as _s
+    if not isinstance(expected_sha256, str) or not apply_tool._SHA256_RE.match(expected_sha256):
+        return False, None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False, None
+    try:
+        st = os.fstat(fd)
+        if (_s.S_ISLNK(st.st_mode) or not _s.S_ISREG(st.st_mode)
+                or st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022)):
+            return False, None
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+        if h.hexdigest() != expected_sha256:
+            return False, None
+    finally:
+        os.close(fd)
+    ver = subprocess.run([path, "--version"], capture_output=True, text=True,
+                         errors="replace", timeout=30, check=False)
+    if ver.returncode != 0 or apply_tool._major(ver.stdout.strip()) != expected_major:
+        return False, None
+    return True, path
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _module_backup():
     fd, path = tempfile.mkstemp(suffix=".dump")
@@ -68,16 +110,30 @@ def _module_backup():
     subprocess.run(["pg_dump", "-Fc", "--schema-only", "--dbname", uri, "-f", path],
                    check=True, capture_output=True, timeout=120)
     os.chmod(path, 0o600)
+    prfd, prpath = tempfile.mkstemp(suffix="_pg_restore")  # FAKE pinned pg 18 client (root, 0755)
+    os.write(prfd, _FAKE_PG_RESTORE.encode())
+    os.close(prfd)
+    os.chmod(prpath, 0o755)
     _BACKUP["path"] = path
     _BACKUP["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    probe = _isession()
-    try:
-        _BACKUP["pg_major"] = apply_tool._major(
-            probe.execute(text("SHOW server_version")).scalar())
-    finally:
-        probe.close()
+    _BACKUP["pg_major"] = "18"
+    _BACKUP["pg_restore_path"] = prpath
+    _BACKUP["pg_restore_sha256"] = hashlib.sha256(Path(prpath).read_bytes()).hexdigest()
+    prev = os.environ.get("CESTAPLAN_PG_RESTORE_PATH")
+    os.environ["CESTAPLAN_PG_RESTORE_PATH"] = prpath
+    real_sv = apply_tool._server_version
+    apply_tool._server_version = lambda db: "18"
+    real_verify = apply_tool._verify_pg_restore_binary
+    apply_tool._verify_pg_restore_binary = _relaxed_verify_pg_restore_binary
     yield
+    apply_tool._verify_pg_restore_binary = real_verify
+    apply_tool._server_version = real_sv
+    if prev is None:
+        os.environ.pop("CESTAPLAN_PG_RESTORE_PATH", None)
+    else:
+        os.environ["CESTAPLAN_PG_RESTORE_PATH"] = prev
     os.unlink(path)
+    os.unlink(prpath)
 
 
 def _canon(obj: Any) -> str:
@@ -115,12 +171,16 @@ def _live_counts(db: Session) -> tuple[int, int]:
 
 def _write_doc(d: Path, trust_hash: str, *, alembic: str) -> tuple[str, str]:
     doc = {
-        "schema_version": 2, "commit_sha": _COMMIT, "source_tree_hash": _SRC,
+        "schema_version": 3, "commit_sha": _COMMIT, "source_tree_hash": _SRC,
         "api_artifact_hash": _API, "worker_artifact_hash": _WRK, "alembic_revision": alembic,
         "generator_version": g.GENERATOR_VERSION,
         "toolchain_contract_version": g.TOOLCHAIN_CONTRACT_VERSION,
         "python_base_image_digest": g.PYTHON_BASE_IMAGE_DIGEST,
-        "uv_image_digest": g.UV_IMAGE_DIGEST, "authorization_trust_root_hash": trust_hash}
+        "uv_image_digest": g.UV_IMAGE_DIGEST, "authorization_trust_root_hash": trust_hash,
+        "postgresql_client_package": "postgresql-client-18",
+        "postgresql_client_package_version": "18.4-1.pgdg13+1",
+        "pg_restore_major": "18", "pg_restore_version": "18.4",
+        "pg_restore_binary_sha256": _BACKUP["pg_restore_sha256"], "pg_dump_binary_sha256": "e" * 64}
     raw = g.render_document(doc)
     p = d / "build-provenance.json"
     p.write_bytes(raw)
@@ -425,22 +485,28 @@ def _be(path, *, sha=None, ref=_BACKUP_REF, created=None):
 
 
 def _verify(be):
-    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]))
+    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]),
+                     expected_pg_restore_sha256=_BACKUP["pg_restore_sha256"])
 
 
 def _verify_race(be, mutate, monkeypatch):
     real = oe.os.read
-    state = {"n": 0}
+    # The pg_restore binary hash and the --version/--list subprocess pipes also flow through
+    # os.read; identify the DUMP stream by its content prefix so the mutation races the dump hash
+    # (not the binary hash) regardless of how many unrelated reads precede it.
+    dump_head = Path(_BACKUP["path"]).read_bytes()[:64]
+    state = {"fired": False}
 
     def racing(fd, n):
         d = real(fd, n)
-        if d and state["n"] == 0:
-            state["n"] = 1
+        if d and not state["fired"] and d[:64] == dump_head:
+            state["fired"] = True
             mutate()
         return d
 
     monkeypatch.setattr(oe.os, "read", racing)
-    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]))
+    return be.verify(datetime.now(UTC), server_version=str(_BACKUP["pg_major"]),
+                     expected_pg_restore_sha256=_BACKUP["pg_restore_sha256"])
 
 
 def test_backup_valid_dump(tmp_path):
@@ -623,7 +689,8 @@ def test_backup_chmod_after_open_blocks(tmp_path, monkeypatch):
 
 def test_backup_db_version_absent_blocks(tmp_path):
     dump = _copy_dump(tmp_path)
-    ok, ev = _be(dump).verify(datetime.now(UTC), server_version=None)
+    ok, ev = _be(dump).verify(datetime.now(UTC), server_version=None,
+                              expected_pg_restore_sha256=_BACKUP["pg_restore_sha256"])
     assert ok is False and ev["compatibility_ok"] is False
 
 
@@ -651,7 +718,8 @@ def test_backup_pg_restore_version_absent_blocks(tmp_path, monkeypatch):
 
 def test_backup_version_mismatch_blocks(tmp_path):
     dump = _copy_dump(tmp_path)
-    ok, ev = _be(dump).verify(datetime.now(UTC), server_version="99")  # DB major != the rest
+    ok, ev = _be(dump).verify(datetime.now(UTC), server_version="99",  # DB major != the rest
+                              expected_pg_restore_sha256=_BACKUP["pg_restore_sha256"])
     assert ok is False and ev["compatibility_ok"] is False
 
 

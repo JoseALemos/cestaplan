@@ -17,6 +17,14 @@ from cestaplan_api.provenance import generator as g
 from cestaplan_api.provenance.manifest import ProvenanceError, build_manifest, file_excluded
 
 _COMMIT = "a" * 40
+_PG = {  # synthetic pinned pg 18 client identity (measured for real only inside the image)
+    "postgresql_client_package": "postgresql-client-18",
+    "postgresql_client_package_version": "18.4-1.pgdg13+1",
+    "pg_restore_major": "18",
+    "pg_restore_version": "18.4",
+    "pg_restore_binary_sha256": "d" * 64,
+    "pg_dump_binary_sha256": "e" * 64,
+}
 _MIGRATION = (
     '"""m"""\n'
     "revision: str = '360a55cb6abb'\n"
@@ -49,7 +57,8 @@ def _bundle(root: Path) -> Path:
 
 
 def _doc(base: Path, commit: str = _COMMIT) -> dict:
-    return g.generate_provenance_document(base, commit, g.detect_alembic_head(base / "migrations"))
+    return g.generate_provenance_document(
+        base, commit, g.detect_alembic_head(base / "migrations"), _PG)
 
 
 def test_generation_is_byte_deterministic(tmp_path: Path) -> None:
@@ -62,7 +71,7 @@ def test_all_three_scope_hashes_are_valid_and_distinct(tmp_path: Path) -> None:
     hashes = {doc["source_tree_hash"], doc["api_artifact_hash"], doc["worker_artifact_hash"]}
     assert len(hashes) == 3
     assert all(len(h) == 64 and all(c in "0123456789abcdef" for c in h) for h in hashes)
-    assert doc["schema_version"] == 2 and doc["generator_version"] == "build-provenance-v1"
+    assert doc["schema_version"] == 3 and doc["generator_version"] == "build-provenance-v1"
     assert doc["commit_sha"] == _COMMIT and doc["alembic_revision"] == "360a55cb6abb"
     assert doc["toolchain_contract_version"] == g.TOOLCHAIN_CONTRACT_VERSION
     assert doc["python_base_image_digest"] == g.PYTHON_BASE_IMAGE_DIGEST
@@ -200,7 +209,7 @@ def test_api_only_change_moves_only_api_hash(tmp_path: Path) -> None:  # §4.4
     before = _doc(base)
     (base / "migrations/versions/0002_m.py").write_text(
         _MIGRATION.replace("360a55cb6abb", "abcdef123456").replace("None", "'360a55cb6abb'"))
-    after = g.generate_provenance_document(base, _COMMIT, "abcdef123456")
+    after = g.generate_provenance_document(base, _COMMIT, "abcdef123456", _PG)
     assert after["api_artifact_hash"] != before["api_artifact_hash"]
     assert after["worker_artifact_hash"] == before["worker_artifact_hash"]
     assert after["source_tree_hash"] != before["source_tree_hash"]
@@ -361,7 +370,7 @@ def test_malformed_commit_is_blocked(tmp_path: Path) -> None:
     base = _bundle(tmp_path)
     for bad in ("", "xyz", "A" * 40, "a" * 39, "a" * 41):
         with pytest.raises(ProvenanceError) as ei:
-            g.generate_provenance_document(base, bad, "360a55cb6abb")
+            g.generate_provenance_document(base, bad, "360a55cb6abb", _PG)
         assert ei.value.code == "commit_sha_invalid"
 
 
@@ -381,16 +390,19 @@ def test_alembic_head_not_unique_is_blocked(tmp_path: Path) -> None:
     assert ei.value.code == "alembic_head_not_unique"
 
 
-def test_cli_writes_document_and_is_reproducible(tmp_path: Path) -> None:
+def test_cli_writes_document_and_is_reproducible(tmp_path: Path, monkeypatch) -> None:
     base = _bundle(tmp_path)
     out1 = tmp_path / "p1.json"
     out2 = tmp_path / "p2.json"
+    # measure_pg_client reads the real pg 18 client (only present inside the image); inject the
+    # synthetic identity so the CLI's determinism is testable without the binaries.
+    monkeypatch.setattr("cestaplan_api.provenance.generate.measure_pg_client", lambda: dict(_PG))
     from cestaplan_api.provenance.generate import main
     assert main(["--base", str(base), "--commit-sha", _COMMIT, "--out", str(out1)]) == 0
     assert main(["--base", str(base), "--commit-sha", _COMMIT, "--out", str(out2)]) == 0
     assert out1.read_bytes() == out2.read_bytes()
     doc = json.loads(out1.read_text())
-    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 2
+    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 3
 
 
 def test_generation_holds_under_optimize(tmp_path: Path) -> None:
@@ -398,9 +410,66 @@ def test_generation_holds_under_optimize(tmp_path: Path) -> None:
     code = (
         "from cestaplan_api.provenance import generator as g\n"
         "try:\n"
-        f"    g.generate_provenance_document({str(base)!r}, 'bad', '360a55cb6abb')\n"
+        f"    g.generate_provenance_document({str(base)!r}, 'bad', '360a55cb6abb', {{}})\n"
         "    print('NO_RAISE')\n"
         "except g.ProvenanceError as e:\n"
         "    print('RAISED', e.code)\n")
     out = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True)
     assert "RAISED commit_sha_invalid" in out.stdout
+
+
+# ---- schema_version 3: pinned PostgreSQL 18 client identity (§5/§8) ----
+def test_pg_client_fields_in_document(tmp_path: Path) -> None:
+    doc = _doc(_bundle(tmp_path))
+    assert doc["postgresql_client_package"] == "postgresql-client-18"
+    assert doc["pg_restore_major"] == "18"
+    assert doc["pg_restore_version"] == "18.4"
+    assert doc["postgresql_client_package_version"] == "18.4-1.pgdg13+1"
+    assert doc["pg_restore_binary_sha256"] == "d" * 64
+    assert doc["pg_dump_binary_sha256"] == "e" * 64
+
+
+def test_validate_pg_client_accepts_valid() -> None:
+    assert g._validate_pg_client(_PG) == _PG
+
+
+def test_validate_pg_client_missing_field_blocks() -> None:
+    bad = {k: v for k, v in _PG.items() if k != "pg_restore_binary_sha256"}
+    with pytest.raises(ProvenanceError):
+        g._validate_pg_client(bad)
+
+
+def test_validate_pg_client_major_17_blocks() -> None:
+    with pytest.raises(ProvenanceError) as ei:
+        g._validate_pg_client({**_PG, "pg_restore_major": "17", "pg_restore_version": "17.5"})
+    assert ei.value.code == "pg_restore_major_invalid"
+
+
+def test_validate_pg_client_major_19_blocks() -> None:
+    with pytest.raises(ProvenanceError):
+        g._validate_pg_client({**_PG, "pg_restore_major": "19", "pg_restore_version": "19.1"})
+
+
+def test_validate_pg_client_wrong_package_blocks() -> None:
+    with pytest.raises(ProvenanceError) as ei:
+        g._validate_pg_client({**_PG, "postgresql_client_package": "postgresql-client-17"})
+    assert ei.value.code == "pg_client_package_invalid"
+
+
+def test_validate_pg_client_bad_sha_blocks() -> None:
+    with pytest.raises(ProvenanceError):
+        g._validate_pg_client({**_PG, "pg_restore_binary_sha256": "XY" + "d" * 62})
+
+
+def test_two_generations_identical_with_pg(tmp_path: Path) -> None:
+    base = _bundle(tmp_path)
+    assert g.render_document(_doc(base)) == g.render_document(_doc(base))
+
+
+def test_pg_binary_change_moves_document_hash(tmp_path: Path) -> None:
+    base = _bundle(tmp_path)
+    before = g.document_sha256(_doc(base))
+    after = g.document_sha256(g.generate_provenance_document(
+        base, _COMMIT, g.detect_alembic_head(base / "migrations"),
+        {**_PG, "pg_restore_binary_sha256": "f" * 64}))
+    assert before != after

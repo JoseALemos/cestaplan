@@ -104,10 +104,11 @@ def _bake_trust_root(tmp_path_factory):
         pkg_path=str(d / "pkg.json"), sig_path=str(d / "pkg.sig"), fp=_AUTH_FP)
     prev = {k: os.environ.get(k) for k in (
         "BUILD_AUTHORIZATION_TRUST_ROOT_PATH", "AUTHORIZATION_PACKAGE_PATH",
-        "AUTHORIZATION_SIGNATURE_PATH")}
+        "AUTHORIZATION_SIGNATURE_PATH", "CESTAPLAN_PG_RESTORE_PATH")}
     os.environ["BUILD_AUTHORIZATION_TRUST_ROOT_PATH"] = _AUTH["trust_root_path"]
     os.environ["AUTHORIZATION_PACKAGE_PATH"] = _AUTH["pkg_path"]
     os.environ["AUTHORIZATION_SIGNATURE_PATH"] = _AUTH["sig_path"]
+    os.environ["CESTAPLAN_PG_RESTORE_PATH"] = _BACKUP["pg_restore_path"]  # the FAKE pg 18 client
     try:
         yield
     finally:
@@ -163,25 +164,81 @@ def _seal_ctx_package(ctx: Any, plan_hash: str, *, sk: Ed25519PrivateKey | None 
     return pkg["authorization_package_hash"]
 
 
+_FAKE_PG_RESTORE = (
+    "#!/bin/sh\n"
+    'case "$1" in\n'
+    '  --version) echo "pg_restore (PostgreSQL) 18.4";;\n'
+    '  --list) echo "; Dumped from database version: 18";;\n'
+    "  *) exit 1;;\n"
+    "esac\n"
+    "exit 0\n"
+)
+
+
+def _relaxed_verify_pg_restore_binary(expected_sha256, *, expected_major, path):
+    """Test double for apply_tool._verify_pg_restore_binary. Keeps the full fail-closed contract
+    (regular file, no symlink, not group/other writable, SHA==doc, --version major==18) EXCEPT the
+    strict root-owned gate is relaxed to 'root OR the current euid', so the backup happy paths run
+    under a NON-root CI runner. The strict root-owned gate is covered directly by the root-only unit
+    tests in test_pg_restore_binary_verification.py and by CI's image-runtime job."""
+    import stat as _s
+    if not isinstance(expected_sha256, str) or not apply_tool._SHA256_RE.match(expected_sha256):
+        return False, None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False, None
+    try:
+        st = os.fstat(fd)
+        if (_s.S_ISLNK(st.st_mode) or not _s.S_ISREG(st.st_mode)
+                or st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022)):
+            return False, None
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+        if h.hexdigest() != expected_sha256:
+            return False, None
+    finally:
+        os.close(fd)
+    ver = subprocess.run([path, "--version"], capture_output=True, text=True,
+                         errors="replace", timeout=30, check=False)
+    if ver.returncode != 0 or apply_tool._major(ver.stdout.strip()) != expected_major:
+        return False, None
+    return True, path
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _module_backup():
-    """A REAL pg_dump (custom, schema-only) so BackupEvidence.verify() actually passes (§9)."""
+    """A REAL pg_dump (custom, schema-only) + a FAKE pinned pg 18 client (a 0755 script, major 18,
+    echoing a version-18 --list) so BackupEvidence.verify()'s binary + version checks pass without a
+    real pg 18 install. The strict root-owned gate is relaxed via a test double (see above); the
+    real client + root-owned gate are exercised in CI's image-runtime job. Everything is normalized
+    to major 18 (evidence + a stubbed server_version) so the compatibility gate holds.
+    """
     fd, path = tempfile.mkstemp(suffix=".dump")
     os.close(fd)
     uri = Settings().database_url.replace("+psycopg", "")
     subprocess.run(["pg_dump", "-Fc", "--schema-only", "--dbname", uri, "-f", path],
                    check=True, capture_output=True, timeout=120)
     os.chmod(path, 0o600)
+    prfd, prpath = tempfile.mkstemp(suffix="_pg_restore")
+    os.write(prfd, _FAKE_PG_RESTORE.encode())
+    os.close(prfd)
+    os.chmod(prpath, 0o755)  # root-owned (tests run as root), not group/other writable
     _BACKUP["path"] = path
     _BACKUP["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    probe = _isession()
-    try:
-        _BACKUP["pg_major"] = apply_tool._major(
-            probe.execute(text("SHOW server_version")).scalar())
-    finally:
-        probe.close()
+    _BACKUP["pg_major"] = "18"  # simulate a pg 18 runtime (the binary contract requires major 18)
+    _BACKUP["pg_restore_path"] = prpath
+    _BACKUP["pg_restore_sha256"] = hashlib.sha256(Path(prpath).read_bytes()).hexdigest()
+    real_server_version = apply_tool._server_version
+    apply_tool._server_version = lambda db: "18"  # normalize the observed DB major to 18
+    real_verify = apply_tool._verify_pg_restore_binary
+    apply_tool._verify_pg_restore_binary = _relaxed_verify_pg_restore_binary
     yield
+    apply_tool._verify_pg_restore_binary = real_verify
+    apply_tool._server_version = real_server_version
     os.unlink(path)
+    os.unlink(prpath)
 
 
 def _backup_evidence(now: datetime) -> Any:
@@ -243,7 +300,8 @@ def _ctx(db: Session, *, backup: Any = "default", m: Any = None, **over):
     # The observed trust-root hash equals the LIVE (ephemeral) trust-root the fixture baked.
     obs = apply_tool.BuildProvenance(
         _COMMIT, _SRC, _API, _WRK, _DOC, alembic_revision=live_alembic,
-        generator_version=_GENVER, authorization_trust_root_hash=_AUTH["trust_hash"])
+        generator_version=_GENVER, authorization_trust_root_hash=_AUTH["trust_hash"],
+        pg_restore_binary_sha256=_BACKUP["pg_restore_sha256"], pg_restore_major="18")
     be = _backup_evidence(now) if backup == "default" else backup
     base = {
         "app_commit_sha": _COMMIT, "deployed_api_sha": _COMMIT, "deployed_worker_sha": _COMMIT,
@@ -2137,7 +2195,8 @@ def test_sanitize_storage_reference_keeps_valid() -> None:  # §4v5
 def _obsprov(commit=_COMMIT, alembic=None, trust=None):
     return apply_tool.BuildProvenance(
         commit, _SRC, _API, _WRK, _DOC, alembic_revision=alembic,
-        generator_version=_GENVER, authorization_trust_root_hash=trust or _AUTH["trust_hash"])
+        generator_version=_GENVER, authorization_trust_root_hash=trust or _AUTH["trust_hash"],
+        pg_restore_binary_sha256=_BACKUP["pg_restore_sha256"], pg_restore_major="18")
 
 
 def test_backup_gate_passes_when_bound_to_package(db_session: Session) -> None:  # §1.1
@@ -2459,13 +2518,17 @@ def test_failed_run_null_authorization_when_absent(committed_dup_lane) -> None: 
 def _write_doc(tmp_path, **override):
     from cestaplan_api.provenance import generator as g
     doc = {
-        "schema_version": 2, "commit_sha": _COMMIT, "source_tree_hash": _SRC,
+        "schema_version": 3, "commit_sha": _COMMIT, "source_tree_hash": _SRC,
         "api_artifact_hash": _API, "worker_artifact_hash": _WRK, "alembic_revision": "360a55cb6abb",
         "generator_version": g.GENERATOR_VERSION,
         "toolchain_contract_version": g.TOOLCHAIN_CONTRACT_VERSION,
         "python_base_image_digest": g.PYTHON_BASE_IMAGE_DIGEST,
         "uv_image_digest": g.UV_IMAGE_DIGEST,
-        "authorization_trust_root_hash": _AUTH["trust_hash"]}
+        "authorization_trust_root_hash": _AUTH["trust_hash"],
+        "postgresql_client_package": "postgresql-client-18",
+        "postgresql_client_package_version": "18.4-1.pgdg13+1",
+        "pg_restore_major": "18", "pg_restore_version": "18.4",
+        "pg_restore_binary_sha256": "d" * 64, "pg_dump_binary_sha256": "e" * 64}
     doc.update(override)
     p = tmp_path / "build-provenance.json"
     p.write_bytes(g.render_document(doc))

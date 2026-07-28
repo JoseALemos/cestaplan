@@ -24,16 +24,23 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from cestaplan_api.provenance.manifest import ProvenanceError, build_manifest, manifest_hash
 
-# schema_version 2 adds the toolchain digests + trust-root hash so the document cannot stay the same
-# when the base image, uv version or authorization trust-root change (v2).
-EVIDENCE_DOCUMENT_SCHEMA_VERSION = 2
+# schema_version 3 adds the pinned PostgreSQL 18 CLIENT identity (package + version + measured
+# pg_restore/pg_dump binary sha256s) so the document cannot stay the same when the shipped client
+# binary or its version changes — the runtime BackupEvidence verifies pg_restore against it (v3).
+EVIDENCE_DOCUMENT_SCHEMA_VERSION = 3
 GENERATOR_VERSION = "build-provenance-v1"
+
+# --- Pinned PostgreSQL 18 client (MUST match apps/api/Dockerfile; measured at build) ----
+POSTGRESQL_CLIENT_PACKAGE = "postgresql-client-18"
+PG_CLIENT_MAJOR = "18"
+PG_CLIENT_BIN_DIR = "/usr/lib/postgresql/18/bin"
 
 # --- Pinned toolchain (MUST match apps/api/Dockerfile exactly; CI asserts equality) ---------------
 TOOLCHAIN_CONTRACT_VERSION = "toolchain-v1"
@@ -63,6 +70,74 @@ WORKER_ARTIFACT_INCLUDES = ["src/cestaplan_api", "src/cestaplan_engine", "src/ce
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _REVISION_RE = re.compile(r"^[0-9a-z_]{6,64}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PG_PKGVER_RE = re.compile(r"^18\.[0-9A-Za-z.+~:-]{1,60}$")  # e.g. 18.4-1.pgdg13+1
+_PG_VER_RE = re.compile(r"^18\.[0-9]+$")                     # normalized major.minor, e.g. 18.4
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def measure_pg_client(bin_dir: str | Path = PG_CLIENT_BIN_DIR) -> dict[str, str]:
+    """Measure the ACTUAL installed PostgreSQL 18 client (build time, inside the image): the binary
+    sha256s of pg_restore/pg_dump, their normalized versions and the exact dpkg package version.
+    Fail-closed (ProvenanceError) if a binary is missing, the major is not 18, or the package is
+    unknown — the values are read from the artifact, never invented."""
+    d = Path(bin_dir)
+    pr, pd = d / "pg_restore", d / "pg_dump"
+    if not pr.is_file() or not pd.is_file():
+        raise ProvenanceError("pg_client_missing", "")
+
+    def _ver(exe: Path) -> tuple[str, str]:
+        r = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                           errors="replace", timeout=30, check=False)
+        if r.returncode != 0:
+            raise ProvenanceError("pg_client_version_failed", "")
+        m = re.search(r"\(PostgreSQL\)\s+(\d+)\.(\d+)", r.stdout)
+        if not m:
+            raise ProvenanceError("pg_client_version_unparsed", "")
+        return m.group(1), f"{m.group(1)}.{m.group(2)}"
+
+    pr_major, pr_ver = _ver(pr)
+    pd_major, _pd_ver = _ver(pd)
+    if pr_major != PG_CLIENT_MAJOR or pd_major != PG_CLIENT_MAJOR:
+        raise ProvenanceError("pg_client_major_mismatch", "")
+    dq = subprocess.run(["dpkg-query", "-W", "-f=${Version}", POSTGRESQL_CLIENT_PACKAGE],
+                        capture_output=True, text=True, errors="replace", timeout=30, check=False)
+    if dq.returncode != 0 or not dq.stdout.strip():
+        raise ProvenanceError("pg_client_package_unknown", "")
+    return {
+        "postgresql_client_package": POSTGRESQL_CLIENT_PACKAGE,
+        "postgresql_client_package_version": dq.stdout.strip(),
+        "pg_restore_major": pr_major,
+        "pg_restore_version": pr_ver,
+        "pg_restore_binary_sha256": _sha256_file(pr),
+        "pg_dump_binary_sha256": _sha256_file(pd),
+    }
+
+
+def _validate_pg_client(pg: Any) -> dict[str, str]:
+    if not isinstance(pg, dict):
+        raise ProvenanceError("pg_client_invalid", "")
+    if pg.get("postgresql_client_package") != POSTGRESQL_CLIENT_PACKAGE:
+        raise ProvenanceError("pg_client_package_invalid", "")
+    if not _PG_PKGVER_RE.match(str(pg.get("postgresql_client_package_version", ""))):
+        raise ProvenanceError("pg_client_package_version_invalid", "")
+    if pg.get("pg_restore_major") != PG_CLIENT_MAJOR:
+        raise ProvenanceError("pg_restore_major_invalid", "")
+    if not _PG_VER_RE.match(str(pg.get("pg_restore_version", ""))):
+        raise ProvenanceError("pg_restore_version_invalid", "")
+    for f in ("pg_restore_binary_sha256", "pg_dump_binary_sha256"):
+        if not _SHA256_RE.match(str(pg.get(f, ""))):
+            raise ProvenanceError(f"{f}_invalid", "")
+    return {k: pg[k] for k in (
+        "postgresql_client_package", "postgresql_client_package_version", "pg_restore_major",
+        "pg_restore_version", "pg_restore_binary_sha256", "pg_dump_binary_sha256")}
 
 
 def resolve_commit_sha(sources: Mapping[str, str | None]) -> str:
@@ -109,11 +184,13 @@ def detect_alembic_head(migrations_dir: str | Path) -> str:
     return next(iter(heads))
 
 
-def generate_provenance_document(base: str | Path, commit_sha: str,
-                                 alembic_revision: str) -> dict[str, Any]:
-    """Build the canonical provenance document. Fail-closed on a missing/invalid commit or revision.
-    Contains NO timestamps or non-reproducible metadata; the toolchain digests come from reviewed
-    constants that must match the Dockerfile (CI asserts equality)."""
+def generate_provenance_document(base: str | Path, commit_sha: str, alembic_revision: str,
+                                 pg_client: dict[str, str]) -> dict[str, Any]:
+    """Build the canonical provenance document (schema_version 3). Fail-closed on a missing/invalid
+    commit, revision, toolchain digest or PostgreSQL client identity. Contains NO timestamps or
+    non-reproducible metadata; the toolchain digests come from reviewed constants and the pg-client
+    fields are MEASURED from the installed binaries (``measure_pg_client``) — both baked identically
+    into the API and worker images."""
     if not isinstance(commit_sha, str) or not _COMMIT_RE.match(commit_sha):
         raise ProvenanceError("commit_sha_invalid", "")
     if not isinstance(alembic_revision, str) or not _REVISION_RE.match(alembic_revision):
@@ -121,6 +198,7 @@ def generate_provenance_document(base: str | Path, commit_sha: str,
     for digest in (PYTHON_BASE_IMAGE_DIGEST, UV_IMAGE_DIGEST):
         if not _DIGEST_RE.match(digest):
             raise ProvenanceError("toolchain_digest_invalid", "")
+    pg = _validate_pg_client(pg_client)
     from cestaplan_api.provenance.trust_root import trust_root_hash
     trust_hash = trust_root_hash(Path(base) / TRUST_ROOT_FILENAME)
     src = manifest_hash(build_manifest(base, SOURCE_TREE_INCLUDES))
@@ -138,6 +216,7 @@ def generate_provenance_document(base: str | Path, commit_sha: str,
         "python_base_image_digest": PYTHON_BASE_IMAGE_DIGEST,
         "uv_image_digest": UV_IMAGE_DIGEST,
         "authorization_trust_root_hash": trust_hash,
+        **pg,
     }
 
 
