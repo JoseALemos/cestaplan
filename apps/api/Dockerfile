@@ -8,11 +8,67 @@
 #   worker  -> python -m cestaplan_worker.main
 #   migrate -> alembic upgrade head   (Railway pre-deploy command / compose)
 
+# ---------- Shared base: python + pinned PostgreSQL 18 CLIENT tools (no server) ----------
+# fix(runtime): BackupEvidence executes pg_restore over /proc/self/fd/<fd>; the image must ship the
+# pg_restore / pg_dump CLIENT binaries at the exact MAJOR 18. Installed from the OFFICIAL PostgreSQL
+# Apt Repository (apt.postgresql.org) with the official signing key, pinned to an EXACT version — no
+# floating tag, no server, no fallback major. Both the builder (so the provenance generator measures
+# the very binaries that ship) and the runtime inherit this stage, so they contain identical tools.
+# Toolchain pinned by tag + digest (immutable-build-provenance): these digests MUST match the
+# constants in cestaplan_api/provenance/generator.py exactly (CI asserts equality; forbids a floating
+# tag or a digest-less FROM). Never float the base image, uv or the PostgreSQL client version.
+# The PGDG-sourced closure is pinned to EXACT versions (matching postgresql-client-18-runtime.lock.json)
+# so APT can never silently resolve a different set (e.g. a newer libpq5). The base libraries (libc6,
+# liblz4-1, libreadline8t64, libssl3t64, libzstd1, zlib1g, sensible-utils) are frozen by the base
+# image digest; their file identity is measured in-image and bound to build-provenance.json.
+ARG POSTGRESQL_CLIENT_18_VERSION="18.4-1.pgdg13+1"
+ARG LIBPQ5_VERSION="18.4-1.pgdg13+1"
+ARG POSTGRESQL_CLIENT_COMMON_VERSION="293.pgdg13+1"
+ARG PGDG_KEY_SHA256="0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76"
+
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS pg-client-base
+ARG POSTGRESQL_CLIENT_18_VERSION
+ARG LIBPQ5_VERSION
+ARG POSTGRESQL_CLIENT_COMMON_VERSION
+ARG PGDG_KEY_SHA256
+# Install ONLY the pinned client closure, verifying the base distro, the official key hash and the
+# EXACT package versions; assert the binaries are major 18, dynamically resolvable and that NO server
+# binary is present; then drop the download tools + apt lists (keep ca-certificates for runtime HTTPS).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    . /etc/os-release; \
+    test "$VERSION_CODENAME" = "trixie"; \
+    ARCH="$(dpkg --print-architecture)"; test "$ARCH" = "amd64"; \
+    install -d -m 0755 /usr/share/keyrings; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc; \
+    echo "${PGDG_KEY_SHA256}  /usr/share/keyrings/pgdg.asc" | sha256sum -c -; \
+    printf 'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: %s-pgdg\nComponents: main\nSigned-By: /usr/share/keyrings/pgdg.asc\nArchitectures: %s\n' "$VERSION_CODENAME" "$ARCH" > /etc/apt/sources.list.d/pgdg.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        "postgresql-client-common=${POSTGRESQL_CLIENT_COMMON_VERSION}" \
+        "libpq5=${LIBPQ5_VERSION}" \
+        "postgresql-client-18=${POSTGRESQL_CLIENT_18_VERSION}"; \
+    dpkg-query -W -f='${Version}' postgresql-client-18 | grep -qx "${POSTGRESQL_CLIENT_18_VERSION}"; \
+    dpkg-query -W -f='${Version}' libpq5 | grep -qx "${LIBPQ5_VERSION}"; \
+    dpkg-query -W -f='${Version}' postgresql-client-common | grep -qx "${POSTGRESQL_CLIENT_COMMON_VERSION}"; \
+    test -x /usr/lib/postgresql/18/bin/pg_restore; \
+    test -x /usr/lib/postgresql/18/bin/pg_dump; \
+    /usr/lib/postgresql/18/bin/pg_restore --version | grep -Eq 'pg_restore \(PostgreSQL\) 18\.'; \
+    /usr/lib/postgresql/18/bin/pg_dump --version | grep -Eq 'pg_dump \(PostgreSQL\) 18\.'; \
+    ! ldd /usr/lib/postgresql/18/bin/pg_restore | grep -q 'not found'; \
+    ! ldd /usr/lib/postgresql/18/bin/pg_dump | grep -q 'not found'; \
+    test ! -e /usr/lib/postgresql/18/bin/postgres; \
+    test ! -e /usr/lib/postgresql/18/bin/pg_ctl; \
+    test ! -e /usr/lib/postgresql/18/bin/postmaster; \
+    test ! -d /var/lib/postgresql/18/main; \
+    apt-get purge -y curl gnupg; \
+    apt-get autoremove -y --purge; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/*
+ENV PATH="/usr/lib/postgresql/18/bin:${PATH}"
+
 # ---------- Builder: resolve and install dependencies with uv ----------
-# Toolchain pinned by tag + digest (feat immutable-build-provenance v2). These digests MUST match
-# the constants in cestaplan_api/provenance/generator.py exactly (CI asserts equality and forbids a
-# floating tag or a digest-less FROM). Never float the base image or uv version.
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS builder
+FROM pg-client-base AS builder
 
 # uv provides fast, reproducible, lockfile-driven installs — pinned to a version + digest.
 COPY --from=ghcr.io/astral-sh/uv:0.9.8@sha256:08f409e1d53e77dfb5b65c788491f8ca70fe1d2d459f41c89afa2fcbef998abe /uv /uvx /bin/
@@ -35,7 +91,14 @@ COPY apps/api/migrations ./migrations
 COPY apps/api/alembic.ini ./alembic.ini
 COPY apps/api/Dockerfile ./Dockerfile
 COPY apps/api/authorization-trust-root.json ./authorization-trust-root.json
+COPY apps/api/postgresql-client-18-runtime.lock.json ./postgresql-client-18-runtime.lock.json
 RUN uv sync --frozen --no-dev
+
+# Verify the INSTALLED PostgreSQL 18 client closure matches the committed lock EXACTLY (fail-closed;
+# no fallback, no regeneration). Runs before provenance generation so a drifted closure stops the
+# build here.
+RUN /app/.venv/bin/python -m cestaplan_api.provenance.verify_lock \
+        /app/postgresql-client-18-runtime.lock.json
 
 # 3) Immutable build provenance: a canonical, reproducible document over the runtime bundle.
 #    The commit is resolved from BUILD_COMMIT_SHA > RAILWAY_GIT_COMMIT_SHA > APP_COMMIT_SHA; every
@@ -54,8 +117,8 @@ RUN BUILD_COMMIT_SHA="$BUILD_COMMIT_SHA" \
     /app/.venv/bin/python -m cestaplan_api.provenance.generate \
         --base /app --out /app/build-provenance.json
 
-# ---------- Runtime: slim, non-root, IMMUTABLE /app ----------
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
+# ---------- Runtime: slim, non-root, IMMUTABLE /app (with pinned pg 18 client) ----------
+FROM pg-client-base AS runtime
 
 # Unprivileged user with its OWN writable home (NOT /app); any runtime scratch goes to /tmp or $HOME.
 RUN groupadd --system app \
@@ -71,7 +134,9 @@ COPY --from=builder /app /app
 # rename any file — including build-provenance.json, the trust-root, code, migrations and .venv.
 RUN chown -R root:root /app && chmod -R a-w /app
 
-ENV PATH="/app/.venv/bin:$PATH" \
+# PATH puts the pinned pg 18 client bin FIRST, then the app venv; BackupEvidence still resolves
+# pg_restore by its FIXED absolute path and verifies it, never relying on PATH selection.
+ENV PATH="/usr/lib/postgresql/18/bin:/app/.venv/bin:$PATH" \
     HOME=/home/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

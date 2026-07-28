@@ -1,0 +1,14 @@
+{
+  "_comment": "Canonical, reviewable lock of the PGDG-sourced PostgreSQL 18 client closure installed by apps/api/Dockerfile. It pins the packages that are NOT provided by the fixed python:3.12-slim base image digest, so APT can never silently resolve a different closure (e.g. a newer libpq5). The base libraries (libc6, liblz4-1, libreadline8t64, libssl3t64, libzstd1, zlib1g, sensible-utils) come from the pinned base image digest and are NOT re-installed here; their file-level identity (path + sha256 + owning package + version) is measured inside the image and bound to build-provenance.json via postgresql_runtime_files / postgresql_runtime_manifest_hash. dependency_closure_hash = sha256(canonical_json({architecture,codename,distribution,packages}) + '\\n'). The build FAILS closed if an installed version differs from this lock or if this hash does not match; there is no fallback and no automatic regeneration.",
+  "schema_version": 1,
+  "distribution": "debian",
+  "codename": "trixie",
+  "architecture": "amd64",
+  "source": "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main",
+  "packages": [
+    {"package": "libpq5", "version": "18.4-1.pgdg13+1"},
+    {"package": "postgresql-client-18", "version": "18.4-1.pgdg13+1"},
+    {"package": "postgresql-client-common", "version": "293.pgdg13+1"}
+  ],
+  "dependency_closure_hash": "bf647b9593aba98b4c3d55450dec0e5a4d92dcf1248b7370074fad604e90e845"
+}

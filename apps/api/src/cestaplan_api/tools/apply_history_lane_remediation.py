@@ -19,6 +19,7 @@ build provenance is available, ``apply_ready`` is false with blocker
 from __future__ import annotations
 
 import argparse
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -192,6 +193,15 @@ class BuildProvenance:
     alembic_revision: str | None = None
     generator_version: str | None = None
     authorization_trust_root_hash: str | None = None  # trust-root hash recorded in the document
+    # Pinned pg 18 client identity measured at build; BackupEvidence verifies the runtime binary
+    # against this exact sha256 + major (§5-runtime).
+    pg_restore_binary_sha256: str | None = None
+    pg_restore_major: str | None = None
+    # Full runtime dependency/library closure measured at build (schema 4). VerifiedPgRestore
+    # re-verifies each documented library file (path→sha256) against the runtime before/after
+    # executing pg_restore, so a swapped or tampered .so fails closed (§6-runtime/v2).
+    pg_runtime_files: tuple[tuple[str, str], ...] = ()   # (path, sha256), sorted
+    pg_runtime_manifest_hash: str | None = None
 
 
 @dataclass(slots=True)
@@ -241,17 +251,30 @@ def load_build_provenance(path: str | None = None) -> BuildProvenance:
         PYTHON_BASE_IMAGE_DIGEST,
         TOOLCHAIN_CONTRACT_VERSION,
         UV_IMAGE_DIGEST,
+        ProvenanceError,
+        _validate_pg_client,
+        _validate_pg_runtime,
         render_document,
     )
-    # STRICT (§3v2/§7v3): exact fields, exact schema/generator/toolchain-contract, the python + uv
-    # digests EXACTLY equal to the reviewed constants, valid commit/hashes/revision, and bytes ==
-    # render_document(doc). Any deviation fails closed (empty BuildProvenance) even if the field is
-    # present and well-formed (a canonical document with a different python/uv digest is rejected).
+    # STRICT (§3v2/§7v3/§5-runtime/§4-runtime-v2): exact fields (incl. the pinned pg 18 client
+    # identity AND the full runtime dependency/library manifest), exact schema/generator/toolchain-
+    # contract, python + uv digests EXACTLY equal to the reviewed constants, valid
+    # commit/hashes/revision/pg-client/pg-runtime, and bytes == render_document(doc). Any deviation
+    # fails closed (empty BuildProvenance).
     required = {"schema_version", "commit_sha", "source_tree_hash", "api_artifact_hash",
                 "worker_artifact_hash", "alembic_revision", "generator_version",
                 "toolchain_contract_version", "python_base_image_digest", "uv_image_digest",
-                "authorization_trust_root_hash"}
+                "authorization_trust_root_hash", "postgresql_client_package",
+                "postgresql_client_package_version", "pg_restore_major", "pg_restore_version",
+                "pg_restore_binary_sha256", "pg_dump_binary_sha256",
+                "postgresql_runtime_dependencies", "postgresql_runtime_files",
+                "postgresql_runtime_manifest_hash"}
     if not isinstance(doc, dict) or set(doc) != required:
+        return BuildProvenance()
+    try:
+        _validate_pg_client(doc)   # major 18, package + version + binary sha256s well-formed
+        runtime = _validate_pg_runtime(doc)  # deps/files ordered, covered, manifest hash correct
+    except ProvenanceError:
         return BuildProvenance()
     if (doc["schema_version"] != EVIDENCE_DOCUMENT_SCHEMA_VERSION
             or doc["generator_version"] != GENERATOR_VERSION
@@ -266,13 +289,19 @@ def load_build_provenance(path: str | None = None) -> BuildProvenance:
                     and bool(re.match(r"^[0-9a-z_]{6,64}$", doc["alembic_revision"])))
             or render_document(doc) != raw):
         return BuildProvenance()
+    pg_runtime_files = tuple(
+        (fe["path"], fe["sha256"]) for fe in runtime["postgresql_runtime_files"])
     return BuildProvenance(
         commit_sha=doc["commit_sha"], source_tree_hash=doc["source_tree_hash"],
         api_artifact_hash=doc["api_artifact_hash"],
         worker_artifact_hash=doc["worker_artifact_hash"],
         document_hash=hashlib.sha256(raw).hexdigest(),
         alembic_revision=doc["alembic_revision"], generator_version=doc["generator_version"],
-        authorization_trust_root_hash=doc["authorization_trust_root_hash"])
+        authorization_trust_root_hash=doc["authorization_trust_root_hash"],
+        pg_restore_binary_sha256=doc["pg_restore_binary_sha256"],
+        pg_restore_major=doc["pg_restore_major"],
+        pg_runtime_files=pg_runtime_files,
+        pg_runtime_manifest_hash=doc["postgresql_runtime_manifest_hash"])
 
 
 def _valid_sha256(v: str | None) -> bool:
@@ -287,6 +316,195 @@ def _valid_commit(v: str | None) -> bool:
 # Real backup evidence (spec §9)
 # --------------------------------------------------------------------------- #
 _BACKUP_MAX_AGE_SECONDS = 6 * 3600
+# The pinned pg 18 client binary — a FIXED absolute operational path (never a PATH lookup).
+PG_RESTORE_DEFAULT_PATH = "/usr/lib/postgresql/18/bin/pg_restore"
+PG_RESTORE_BIN_DIR = "/usr/lib/postgresql/18/bin"
+PG_RESTORE_REQUIRED_MAJOR = "18"
+# STRICT-by-default: the binary + every ancestor directory + every library file MUST be root-owned
+# (uid 0). ONLY the tests (on a non-root CI runner) set this False, and even then the relaxation is
+# refused in cloud/production by `_pg_owner_ok`/`_pg_dirs_secure`, so production is never weakened.
+_PG_REQUIRE_ROOT_OWNED = True
+
+
+def _pg_restore_operational_path() -> str:
+    """The FIXED operational pg_restore path. In cloud/production the CESTAPLAN_PG_RESTORE_PATH
+    override is IGNORED (self_hosted / tests only)."""
+    if not _is_cloud():
+        override = os.environ.get("CESTAPLAN_PG_RESTORE_PATH")
+        if override:
+            return override
+    return PG_RESTORE_DEFAULT_PATH
+
+
+def _pg_owner_ok(st_uid: int) -> bool:
+    """Root-owned is required. The ONLY relaxation (a non-root test runner) accepts the euid,
+    and NEVER applies in cloud/production — so a production binary planted by the app user is always
+    rejected."""
+    if st_uid == 0:
+        return True
+    return (not _PG_REQUIRE_ROOT_OWNED) and (not _is_cloud()) and st_uid == os.geteuid()
+
+
+def _pg_dirs_secure(dir_stats: list[os.stat_result]) -> bool:
+    """Every ancestor directory from ``/`` down must be a root-owned, non-group/other-writable
+    directory. Relaxed only for a non-root test runner (never in cloud/production); the strict path
+    is exercised by CI's image-runtime job against the real /usr tree."""
+    import stat as statmod
+    if not _PG_REQUIRE_ROOT_OWNED and not _is_cloud():
+        return True
+    return all(statmod.S_ISDIR(st.st_mode) and st.st_uid == 0 and not (st.st_mode & 0o022)
+               for st in dir_stats)
+
+
+def _verify_manifest_file(path: str, expected_sha256: str) -> bool:
+    """One documented runtime library: open O_NOFOLLOW, require a regular, root-owned (or the euid
+    under the test relaxation), non-group/other-writable file whose sha256 equals the documented
+    value. Fail-closed — an absent or tampered file returns False."""
+    import stat as statmod
+    if not _SHA256_RE.match(str(expected_sha256)):
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if (statmod.S_ISLNK(st.st_mode) or not statmod.S_ISREG(st.st_mode)
+                or not _pg_owner_ok(st.st_uid) or (st.st_mode & 0o022)):
+            return False
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+        return h.hexdigest() == expected_sha256
+    finally:
+        os.close(fd)
+
+
+def _verify_manifest_files(files: tuple[tuple[str, str], ...]) -> bool:
+    """Verify EVERY documented library file against the runtime. In the relaxed (non-root,
+    non-cloud) test mode the /usr closure is neither present nor trusted-owned — and a CI runner may
+    even ship a DIFFERENT PostgreSQL at those canonical paths — so it is not verifiable here and is
+    accepted; it is enforced strictly in cloud/production and by CI's image-runtime job (the real
+    image). Element enforcement (`_verify_manifest_file`) stays strict for direct tamper/absent
+    unit tests."""
+    if not _PG_REQUIRE_ROOT_OWNED and not _is_cloud():
+        return True
+    return bool(files) and all(_verify_manifest_file(p, s) for p, s in files)
+
+
+@dataclass(slots=True)
+class VerifiedPgRestore:
+    """A fully-verified pg_restore held OPEN as a descriptor. Execution runs the binary via
+    ``/proc/self/fd/<fd>`` with ``pass_fds`` — the path is NEVER re-resolved/re-opened by name, so
+    a post-verification swap of the path or a rename of a parent directory cannot change the
+    executable actually run (§6-runtime/v2). Before AND after every subprocess the held fd's full
+    identity, its sha256 and the documented library manifest are re-checked; any drift fails closed.
+    """
+
+    fd: int = field(repr=False)
+    major: str
+    _identity: tuple[int, ...] = field(repr=False)
+    _sha256: str = field(repr=False)
+    _files: tuple[tuple[str, str], ...] = field(repr=False)
+
+    def _consistent(self) -> bool:
+        from cestaplan_api.provenance.operational_evidence import stat_identity
+        try:
+            st = os.fstat(self.fd)
+        except OSError:
+            return False
+        if stat_identity(st) != tuple(self._identity):
+            return False
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            h = hashlib.sha256()
+            while chunk := os.read(self.fd, 1 << 20):
+                h.update(chunk)
+        except OSError:
+            return False
+        if h.hexdigest() != self._sha256:
+            return False
+        return _verify_manifest_files(self._files)
+
+    def run(self, args: list[str], *, pass_dump_fd: int | None = None,
+            timeout: int) -> subprocess.CompletedProcess[str] | None:
+        """Execute the verified binary via /proc/self/fd/<fd>. Returns the completed process, or
+        None if the fd/sha/library manifest changed around the call, or on any exec error."""
+        if not self._consistent():
+            return None
+        pass_fds = (self.fd,) if pass_dump_fd is None else (self.fd, pass_dump_fd)
+        try:
+            r = subprocess.run([f"/proc/self/fd/{self.fd}", *args], pass_fds=pass_fds,
+                               capture_output=True, text=True, errors="replace", timeout=timeout,
+                               check=False)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        if not self._consistent():
+            return None
+        return r
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            os.close(self.fd)
+
+
+def open_verified_pg_restore(
+        *, expected_sha256: str | None, expected_major: str,
+        runtime_files: tuple[tuple[str, str], ...], path: str) -> VerifiedPgRestore | None:
+    """Open the FIXED pg_restore path with a symlink-free, descriptor-relative traversal from ``/``
+    (O_DIRECTORY|O_NOFOLLOW per parent; O_RDONLY|O_NOFOLLOW|O_CLOEXEC on the file), verify it fully
+    (ancestors + file root-owned & not group/other writable, regular, executable, sha256 == doc,
+    library manifest matches, major == 18) and RETURN it with the fd held open. Fail-closed (None);
+    never a path in an error."""
+    import stat as statmod
+
+    from cestaplan_api.provenance.operational_evidence import (
+        CeremonyFileError,
+        _cloexec,
+        _flag,
+        _resolve_parent_dirfd,
+        stat_identity,
+    )
+    if not isinstance(expected_sha256, str) or not _SHA256_RE.match(expected_sha256):
+        return None
+    try:
+        parent_fd, name, dir_stats = _resolve_parent_dirfd(path)
+    except (CeremonyFileError, OSError, ValueError):
+        return None
+    try:
+        if not _pg_dirs_secure(dir_stats):
+            return None
+        try:
+            fd = os.open(name, os.O_RDONLY | _flag("O_NOFOLLOW") | _cloexec(), dir_fd=parent_fd)
+        except OSError:
+            return None
+    finally:
+        os.close(parent_fd)
+    keep = False
+    try:
+        st = os.fstat(fd)
+        if (statmod.S_ISLNK(st.st_mode) or not statmod.S_ISREG(st.st_mode)
+                or not _pg_owner_ok(st.st_uid) or (st.st_mode & 0o022)
+                or not (st.st_mode & 0o111)):
+            return None
+        identity = stat_identity(st)
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+        if h.hexdigest() != expected_sha256:
+            return None
+        if not _verify_manifest_files(runtime_files):
+            return None
+        vpr = VerifiedPgRestore(fd=fd, major=expected_major, _identity=identity,
+                                _sha256=expected_sha256, _files=runtime_files)
+        ver = vpr.run(["--version"], timeout=30)
+        if ver is None or ver.returncode != 0 or _major(ver.stdout.strip()) != expected_major:
+            return None
+        keep = True
+        return vpr
+    finally:
+        if not keep:
+            os.close(fd)
 
 
 def _major(version: str | None) -> str | None:
@@ -371,8 +589,10 @@ class BackupEvidence:
     expected_postgres_version: str | None = None  # the server major we require compatibility with
     storage_reference: str | None = None  # sanitized
 
-    def verify(self, now: datetime, *,
-               server_version: str | None = None) -> tuple[bool, dict[str, Any]]:
+    def verify(self, now: datetime, *, server_version: str | None = None,
+               expected_pg_restore_sha256: str | None = None,
+               expected_pg_runtime_files: tuple[tuple[str, str], ...] = ()) -> \
+            tuple[bool, dict[str, Any]]:
         import stat as statmod
 
         from cestaplan_api.provenance.operational_evidence import (
@@ -385,12 +605,19 @@ class BackupEvidence:
         ev: dict[str, Any] = {
             "path_present": False, "regular_file": False, "permissions_not_public": False,
             "size_positive": False, "sha256_matches": False, "second_sha256_matches": False,
-            "pg_restore_list_verified": False, "identity_stable": False,
+            "pg_restore_binary_ok": False, "pg_restore_list_verified": False,
+            "identity_stable": False,
             "within_window": False, "compatibility_ok": False, "reference_sanitized": True,
             "size_bytes": 0, "observed_sha256": None, "expected_postgres_version": _major(
                 self.expected_postgres_version), "observed_pg_restore_version": None,
             "observed_database_version": _major(server_version), "dump_database_version": None,
             "storage_reference_sanitized": None, "storage_reference_hash": None}
+        # §6-runtime/v2: open + fully verify pg_restore ONCE, keeping the verified fd open; every
+        # subprocess runs THAT descriptor via /proc/self/fd, never the path by name (no TOCTOU).
+        vpr = open_verified_pg_restore(
+            expected_sha256=expected_pg_restore_sha256, expected_major=PG_RESTORE_REQUIRED_MAJOR,
+            runtime_files=expected_pg_runtime_files, path=_pg_restore_operational_path())
+        ev["pg_restore_binary_ok"] = vpr is not None
         # A reference that is present but not sanitizable blocks the backup entirely (§4v4).
         if self.storage_reference is not None:
             _san = sanitize_storage_reference(self.storage_reference)
@@ -403,6 +630,8 @@ class BackupEvidence:
         try:
             dump = secure_open_dump(self.path)
         except CeremonyFileError:
+            if vpr is not None:
+                vpr.close()
             return False, ev
         try:
             st0 = os.fstat(dump.fd)
@@ -417,25 +646,22 @@ class BackupEvidence:
             ev["observed_sha256"] = first_sha
             ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
                 first_sha == self.expected_sha256.removeprefix("sha256:")
-            try:
-                # errors="replace": a corrupt/adversarial dump may make pg_restore emit non-UTF-8
-                # bytes; decoding must never raise — the verify fails closed on returncode/identity.
-                ver = subprocess.run(["pg_restore", "--version"], capture_output=True, text=True,
-                                     errors="replace", timeout=30, check=False)
+            if vpr is not None:
+                # errors="replace" inside VerifiedPgRestore.run: a corrupt dump may make pg_restore
+                # emit non-UTF-8 bytes; decoding must never raise — verify fails closed instead.
+                ver = vpr.run(["--version"], timeout=30)
                 ev["observed_pg_restore_version"] = _major(ver.stdout.strip()) \
-                    if ver.returncode == 0 else None
+                    if ver is not None and ver.returncode == 0 else None
                 if not os.path.isdir(PROC_SELF_FD):
                     ev["pg_restore_list_verified"] = False  # cannot pass the fd -> fail closed
                 else:
                     os.lseek(dump.fd, 0, os.SEEK_SET)
-                    lst = subprocess.run(  # examine the SAME descriptor, not a re-opened path
-                        ["pg_restore", "--list", f"{PROC_SELF_FD}/{dump.fd}"],
-                        pass_fds=(dump.fd,), capture_output=True, text=True, errors="replace",
-                        timeout=60, check=False)
-                    ev["pg_restore_list_verified"] = lst.returncode == 0 and bool(lst.stdout)
-                    ev["dump_database_version"] = _dump_db_version(lst.stdout)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                ev["pg_restore_list_verified"] = False
+                    # examine the SAME dump descriptor via the verified pg_restore fd.
+                    lst = vpr.run(["--list", f"{PROC_SELF_FD}/{dump.fd}"], pass_dump_fd=dump.fd,
+                                  timeout=60)
+                    ev["pg_restore_list_verified"] = (
+                        lst is not None and lst.returncode == 0 and bool(lst.stdout))
+                    ev["dump_database_version"] = _dump_db_version(lst.stdout) if lst else None
             # §2v3: re-hash the SAME fd AFTER pg_restore and require it equals the first hash, so a
             # content change during the subprocess is caught even if identity granularity misses it.
             second_sha = stream_sha256_fd(dump.fd)
@@ -446,6 +672,8 @@ class BackupEvidence:
                 stat_identity(st0) == stat_identity(st1) == stat_identity(after))
         finally:
             dump.close()
+            if vpr is not None:
+                vpr.close()
         # §2v3: STRICT compatibility — all four majors must be non-NULL AND exactly equal (no
         # set+discard(None), which would silently tolerate a missing version).
         majors = (ev["expected_postgres_version"], ev["observed_database_version"],
@@ -455,8 +683,9 @@ class BackupEvidence:
         ev["within_window"] = 0 <= age <= _BACKUP_MAX_AGE_SECONDS
         ok = all(ev[k] for k in (
             "path_present", "regular_file", "permissions_not_public", "size_positive",
-            "sha256_matches", "second_sha256_matches", "pg_restore_list_verified",
-            "identity_stable", "within_window", "compatibility_ok", "reference_sanitized"))
+            "sha256_matches", "second_sha256_matches", "pg_restore_binary_ok",
+            "pg_restore_list_verified", "identity_stable", "within_window", "compatibility_ok",
+            "reference_sanitized"))
         return ok, ev
 
 
@@ -948,7 +1177,10 @@ def _backup_gate(
     # source for the backup-age decision — never ctx.now.
     if ctx.backup is None:
         return False, {"backup_present": False}
-    ok, ev = ctx.backup.verify(operation_now, server_version=_server_version(db))
+    ok, ev = ctx.backup.verify(
+        operation_now, server_version=_server_version(db),
+        expected_pg_restore_sha256=ctx.observed_provenance.pg_restore_binary_sha256,
+        expected_pg_runtime_files=ctx.observed_provenance.pg_runtime_files)
     # §1v2: the backup must be the one the SIGNED package authorized — same expected SHA (and the
     # observed file SHA equals it), same sanitized storage reference and same reference hash.
     bound = (
@@ -1527,7 +1759,10 @@ def _backup_gate_observed(db: Session, ctx: ApplyContext, now: datetime) -> bool
     backup — the request proposes its SHA + reference; the signer binds them into the package."""
     if ctx.backup is None:
         return False
-    ok, _ev = ctx.backup.verify(now, server_version=_server_version(db))
+    ok, _ev = ctx.backup.verify(
+        now, server_version=_server_version(db),
+        expected_pg_restore_sha256=ctx.observed_provenance.pg_restore_binary_sha256,
+        expected_pg_runtime_files=ctx.observed_provenance.pg_runtime_files)
     return ok
 
 

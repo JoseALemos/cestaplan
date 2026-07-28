@@ -18,6 +18,8 @@ from pathlib import Path
 from cestaplan_api.provenance.generator import (
     detect_alembic_head,
     generate_provenance_document,
+    measure_pg_client,
+    measure_pg_runtime,
     render_document,
     resolve_commit_sha,
 )
@@ -48,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"FAIL: commit resolution failed: {exc.code}") from exc
     revision = a.alembic_revision or detect_alembic_head(base / "migrations")
     try:
-        doc = generate_provenance_document(base, commit, revision)
+        pg_client = measure_pg_client()   # measured from the installed pg 18 client (fail-closed)
+        pg_runtime = measure_pg_runtime()  # full runtime dependency/library closure (fail-closed)
+        doc = generate_provenance_document(base, commit, revision, pg_client, pg_runtime)
     except ProvenanceError as exc:
         raise SystemExit(f"FAIL: provenance generation failed: {exc.code}") from exc
     data = render_document(doc)
