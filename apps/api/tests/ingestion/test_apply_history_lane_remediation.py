@@ -2640,21 +2640,24 @@ def test_reval_package_disappears(db_session: Session) -> None:  # §2v4.4
     assert _revalidated(ctx) is False
 
 
-def test_reval_package_changed_between_reads(db_session: Session, monkeypatch) -> None:  # §2v4.5
+def test_reval_package_changed_between_reads(db_session: Session, monkeypatch) -> None:  # §2v5
     _m, ctx = _valid_sealed_ctx(db_session)
-    from cestaplan_api.provenance import authorization as az
-    real_read = Path.read_bytes
-    good = Path(_AUTH["pkg_path"]).read_bytes()
-    tampered = (_canonical({**json.loads(good), "operator_reference": "ops/x"}) + "\n").encode()
-    calls = {"n": 0}
+    # §10v5: the package is read fail-closed via secure_read_bytes (O_NOFOLLOW + fstat around it).
+    # Rewrite the file mid-read so the after-read fstat differs -> file_changed_during_read.
+    from cestaplan_api.provenance import operational_evidence as oe
+    tampered = (_canonical({**json.loads(Path(_AUTH["pkg_path"]).read_bytes()),
+                            "operator_reference": "ops/x"}) + "\n").encode()
+    real_read = os.read
+    state = {"done": False}
 
-    def racing_read(self):
-        if str(self) == _AUTH["pkg_path"]:
-            calls["n"] += 1
-            return good if calls["n"] == 1 else tampered  # differ between the two reads
-        return real_read(self)
+    def racing_read(fd, n):
+        data = real_read(fd, n)
+        if data and not state["done"]:
+            state["done"] = True
+            Path(_AUTH["pkg_path"]).write_bytes(tampered)  # change size + mtime mid-read
+        return data
 
-    monkeypatch.setattr(az.Path, "read_bytes", racing_read)
+    monkeypatch.setattr(oe.os, "read", racing_read)
     assert _revalidated(ctx) is False
 
 

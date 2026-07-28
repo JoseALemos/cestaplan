@@ -363,7 +363,9 @@ class BackupEvidence:
     """A verified pre-apply backup. ``verify()`` checks the artifact on disk — never a bare
     boolean (spec §9)."""
 
-    path: str
+    # §4v5: the local dump path is NEVER rendered (repr=False) — it must not leak into logs, a
+    # context repr, a report or a signed package.
+    path: str = field(repr=False)
     expected_sha256: str
     created_at: datetime
     expected_postgres_version: str | None = None  # the server major we require compatibility with
@@ -371,9 +373,19 @@ class BackupEvidence:
 
     def verify(self, now: datetime, *,
                server_version: str | None = None) -> tuple[bool, dict[str, Any]]:
+        import stat as statmod
+
+        from cestaplan_api.provenance.operational_evidence import (
+            PROC_SELF_FD,
+            CeremonyFileError,
+            secure_open_dump,
+            stat_identity,
+            stream_sha256_fd,
+        )
         ev: dict[str, Any] = {
             "path_present": False, "regular_file": False, "permissions_not_public": False,
-            "size_positive": False, "sha256_matches": False, "pg_restore_list_verified": False,
+            "size_positive": False, "sha256_matches": False, "second_sha256_matches": False,
+            "pg_restore_list_verified": False, "identity_stable": False,
             "within_window": False, "compatibility_ok": False, "reference_sanitized": True,
             "size_bytes": 0, "observed_sha256": None, "expected_postgres_version": _major(
                 self.expected_postgres_version), "observed_pg_restore_version": None,
@@ -385,42 +397,66 @@ class BackupEvidence:
             ev["reference_sanitized"] = _san is not None
             ev["storage_reference_sanitized"] = _san
             ev["storage_reference_hash"] = _storage_reference_hash(_san)
-        p = Path(self.path)
-        if not p.exists():
-            return False, ev
-        ev["path_present"] = True
-        ev["regular_file"] = p.is_file()
-        st = p.stat()
-        ev["permissions_not_public"] = (st.st_mode & 0o077) == 0
-        ev["size_bytes"] = st.st_size
-        ev["size_positive"] = st.st_size > 0
-        if not (ev["regular_file"] and ev["size_positive"]):
-            return False, ev
-        ev["observed_sha256"] = _stream_sha256(p)  # streaming, never the whole dump in memory
-        ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
-            ev["observed_sha256"] == self.expected_sha256.removeprefix("sha256:")
+        # §2v2: stat, hash AND pg_restore all act on ONE securely-opened inode (no symlink
+        # component, O_NOFOLLOW); a substitution/truncation/in-place edit at any point fails closed.
+        # The path is never placed in ev or in an error.
         try:
-            ver = subprocess.run(["pg_restore", "--version"], capture_output=True, text=True,
-                                 timeout=30, check=False)
-            ev["observed_pg_restore_version"] = _major(ver.stdout.strip()) if ver.returncode == 0 \
-                else None
-            lst = subprocess.run(["pg_restore", "--list", self.path], capture_output=True,
-                                 text=True, timeout=60, check=False)
-            ev["pg_restore_list_verified"] = lst.returncode == 0 and bool(lst.stdout)
-            ev["dump_database_version"] = _dump_db_version(lst.stdout)
-        except (OSError, subprocess.SubprocessError):
-            ev["pg_restore_list_verified"] = False
-        # Compatibility is EXPLICIT: dump/database/pg_restore majors must all agree with expected.
-        majors = {ev["expected_postgres_version"], ev["observed_database_version"],
-                  ev["dump_database_version"], ev["observed_pg_restore_version"]}
-        majors.discard(None)
-        ev["compatibility_ok"] = len(majors) == 1 and ev["expected_postgres_version"] is not None
+            dump = secure_open_dump(self.path)
+        except CeremonyFileError:
+            return False, ev
+        try:
+            st0 = os.fstat(dump.fd)
+            ev["path_present"] = True
+            # §2v3: RE-DERIVE these from st0 (do not assume secure_open_dump's checks still hold — a
+            # chmod after the open must surface here as a blocking gate).
+            ev["regular_file"] = statmod.S_ISREG(st0.st_mode)
+            ev["permissions_not_public"] = (st0.st_mode & 0o077) == 0
+            ev["size_bytes"] = st0.st_size
+            ev["size_positive"] = st0.st_size > 0
+            first_sha = stream_sha256_fd(dump.fd)  # from the held fd, streaming
+            ev["observed_sha256"] = first_sha
+            ev["sha256_matches"] = _valid_sha256(self.expected_sha256) and \
+                first_sha == self.expected_sha256.removeprefix("sha256:")
+            try:
+                # errors="replace": a corrupt/adversarial dump may make pg_restore emit non-UTF-8
+                # bytes; decoding must never raise — the verify fails closed on returncode/identity.
+                ver = subprocess.run(["pg_restore", "--version"], capture_output=True, text=True,
+                                     errors="replace", timeout=30, check=False)
+                ev["observed_pg_restore_version"] = _major(ver.stdout.strip()) \
+                    if ver.returncode == 0 else None
+                if not os.path.isdir(PROC_SELF_FD):
+                    ev["pg_restore_list_verified"] = False  # cannot pass the fd -> fail closed
+                else:
+                    os.lseek(dump.fd, 0, os.SEEK_SET)
+                    lst = subprocess.run(  # examine the SAME descriptor, not a re-opened path
+                        ["pg_restore", "--list", f"{PROC_SELF_FD}/{dump.fd}"],
+                        pass_fds=(dump.fd,), capture_output=True, text=True, errors="replace",
+                        timeout=60, check=False)
+                    ev["pg_restore_list_verified"] = lst.returncode == 0 and bool(lst.stdout)
+                    ev["dump_database_version"] = _dump_db_version(lst.stdout)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                ev["pg_restore_list_verified"] = False
+            # §2v3: re-hash the SAME fd AFTER pg_restore and require it equals the first hash, so a
+            # content change during the subprocess is caught even if identity granularity misses it.
+            second_sha = stream_sha256_fd(dump.fd)
+            ev["second_sha256_matches"] = second_sha == first_sha
+            st1 = os.fstat(dump.fd)
+            after = dump.reopen_stat()  # descriptor-relative re-open; require identical identity
+            ev["identity_stable"] = (
+                stat_identity(st0) == stat_identity(st1) == stat_identity(after))
+        finally:
+            dump.close()
+        # §2v3: STRICT compatibility — all four majors must be non-NULL AND exactly equal (no
+        # set+discard(None), which would silently tolerate a missing version).
+        majors = (ev["expected_postgres_version"], ev["observed_database_version"],
+                  ev["dump_database_version"], ev["observed_pg_restore_version"])
+        ev["compatibility_ok"] = all(v is not None for v in majors) and len(set(majors)) == 1
         age = (now - self.created_at).total_seconds()
         ev["within_window"] = 0 <= age <= _BACKUP_MAX_AGE_SECONDS
         ok = all(ev[k] for k in (
             "path_present", "regular_file", "permissions_not_public", "size_positive",
-            "sha256_matches", "pg_restore_list_verified", "within_window", "compatibility_ok",
-            "reference_sanitized"))
+            "sha256_matches", "second_sha256_matches", "pg_restore_list_verified",
+            "identity_stable", "within_window", "compatibility_ok", "reference_sanitized"))
         return ok, ev
 
 
@@ -458,6 +494,12 @@ class ApplyContext:
     authorization_plan_hash: str | None = None
     authorization_validated_at: datetime | None = None
     authorization_valid: bool = False
+    # --- Ceremony-pinned file paths (§6v5): the EXACT package/signature/trust-root files the
+    # under-lock revalidation must re-read, so a later env change cannot redirect it. NEVER rendered
+    # (repr=False) or persisted — a local path must not leak into logs, reports or audit. ---
+    _ceremony_package_path: str | None = field(default=None, repr=False)
+    _ceremony_signature_path: str | None = field(default=None, repr=False)
+    _ceremony_trust_root_path: str | None = field(default=None, repr=False)
 
     # These are OWNED by the signed package on the operational path — a caller may not override them
     # via from_environment (tests inject them by building ApplyContext(...) directly).
@@ -496,46 +538,93 @@ class ApplyContext:
         status, pkg = _load_authorization(plan_hash, now)
         base.authorization = status
         if pkg is not None:
-            base.expected_provenance = ExpectedProvenance(**pkg.expected_provenance_fields())
-            base.expected_main_sha = pkg.main_commit_sha
-            base.expected_alembic = pkg.alembic_revision
-            base.expected_product_price = pkg.expected_product_price
-            base.expected_active_mappings = pkg.expected_active_mappings
-            base.operator_reference = pkg.operator_reference
-            base.authorization_id = pkg.authorization_id
-            base.authorization_package_hash = pkg.authorization_package_hash
-            base.authorization_key_fingerprint = pkg.public_key_fingerprint
-            base.authorization_generated_at = pkg.generated_at
-            base.authorization_expires_at = pkg.expires_at
-            base.expected_backup_sha256 = pkg.backup_expected_sha256
-            base.expected_backup_storage_reference = pkg.backup_storage_reference
-            base.expected_backup_storage_reference_hash = pkg.backup_storage_reference_hash
-            base.authorization_plan_hash = pkg.plan_hash
-            base.authorization_validated_at = now
-            base.authorization_valid = True
+            _apply_package_to_context(base, pkg, now)
+        return base
+
+    @classmethod
+    def from_ceremony_files(
+            cls, *, plan_hash: str, operational_evidence_path: str,
+            authorization_package_path: str | None = None,
+            authorization_signature_path: str | None = None) -> ApplyContext:
+        """Build the context for the verify-only authorization ceremony (§5v5) from explicit files.
+
+        The build-provenance + trust-root come from the FIXED baked paths; the BackupEvidence and
+        deployed API/worker commits come from the OBSERVED operational-evidence file (never a source
+        of expected values); APP_COMMIT_SHA stays an independent observed fact. The signed package
+        (if supplied) is loaded ONLY through the verified loader against the EXACT pinned files, and
+        is the sole source of every expected value + the authorization identity. No package-owned
+        field can be overridden. The exact package/signature/trust-root paths are pinned on the
+        context so the under-lock revalidation re-reads those same files, not the environment."""
+        from cestaplan_api.provenance.operational_evidence import load_operational_evidence
+        # §4v2: normalize every ceremony path to an ABSOLUTE path ONCE; the same absolute strings
+        # are pinned on the context and used by the under-lock revalidation, so nothing drifts.
+        evidence_abs = os.path.abspath(operational_evidence_path)
+        pkg_abs = os.path.abspath(authorization_package_path) \
+            if authorization_package_path is not None else None
+        sig_abs = os.path.abspath(authorization_signature_path) \
+            if authorization_signature_path is not None else None
+        ev = load_operational_evidence(evidence_abs)
+        bp_path, tr_path = _runtime_provenance_paths()
+        tr_abs = os.path.abspath(tr_path) if tr_path else tr_path
+        base = cls(
+            app_commit_sha=os.environ.get("APP_COMMIT_SHA"),  # independent OBSERVED fact
+            deployed_api_sha=ev.deployed_api_sha,
+            deployed_worker_sha=ev.deployed_worker_sha,
+            observed_provenance=load_build_provenance(bp_path),
+            backup=BackupEvidence(
+                path=ev.backup_path, expected_sha256=ev.backup_expected_sha256,
+                created_at=ev.backup_created_at,
+                expected_postgres_version=ev.backup_expected_postgres_version,
+                storage_reference=ev.backup_storage_reference))
+        base._ceremony_trust_root_path = tr_abs
+        now = _now_utc()
+        status, pkg = _load_authorization(
+            plan_hash, now, package_path=pkg_abs, signature_path=sig_abs,
+            trust_root_path=tr_abs, use_env_paths=False)
+        base.authorization = status
+        if pkg_abs is not None and sig_abs is not None:
+            base._ceremony_package_path = pkg_abs
+            base._ceremony_signature_path = sig_abs
+        if pkg is not None:
+            _apply_package_to_context(base, pkg, now)
         return base
 
 
 def _load_authorization(plan_hash: str | None, now: datetime, *,
+                        package_path: str | None = None, signature_path: str | None = None,
+                        trust_root_path: str | None = None, use_env_paths: bool = True,
                         trust_root_keys: list[str] | None = None) -> tuple[dict[str, Any], Any]:
-    """Load + verify the sealed authorization package (feat provenance v2). The authorized keys come
-    ONLY from the BAKED trust-root file (never a runtime env var); ``trust_root_keys`` is a test
-    test-injection hook, unused on the operational path. No package/plan_hash -> absent. Any failure
-    -> sanitized status + None, so expected provenance stays empty and apply_ready stays false."""
+    """Load + verify the sealed authorization package (feat provenance v2/v5). The authorized keys
+    come ONLY from a BAKED trust-root file (never a runtime env var). Explicit ``package_path`` /
+    ``signature_path`` / ``trust_root_path`` pin the EXACT files (used by the ceremony context so a
+    later env change can never redirect the under-lock revalidation, §6v5); ``use_env_paths`` keeps
+    ``from_environment`` backward-compatible. Package + signature are read fail-closed (O_NOFOLLOW,
+    regular-file, race-safe). ``trust_root_keys`` is a test hook. No package/plan_hash -> absent;
+    any failure -> sanitized status + None, so expected provenance stays empty and apply_ready
+    false."""
     from cestaplan_api.provenance import (
         AuthorizationError,
         TrustRootError,
-        load_authorization_package_from_files,
+        load_authorization_package,
         load_trust_root,
     )
-    pkg_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
-    sig_path = os.environ.get("AUTHORIZATION_SIGNATURE_PATH")
-    if not pkg_path or not sig_path or plan_hash is None:
+    from cestaplan_api.provenance.operational_evidence import (
+        MAX_PACKAGE_BYTES,
+        MAX_SIGNATURE_BYTES,
+        CeremonyFileError,
+        secure_read_bytes,
+    )
+    if package_path is None and use_env_paths:
+        package_path = os.environ.get("AUTHORIZATION_PACKAGE_PATH")
+    if signature_path is None and use_env_paths:
+        signature_path = os.environ.get("AUTHORIZATION_SIGNATURE_PATH")
+    if not package_path or not signature_path or plan_hash is None:
         return {"package_present": False}, None
     if trust_root_keys is not None:
         keys = trust_root_keys
     else:
-        trust_path = _runtime_provenance_paths()[1]  # fixed in cloud/production (§2v3)
+        trust_path = trust_root_path if trust_root_path is not None \
+            else _runtime_provenance_paths()[1]  # fixed in cloud/production (§2v3)
         if not trust_path or not Path(trust_path).is_file():
             return {"package_present": True, "signature_valid": False,
                     "error_code": "trust_root_missing"}, None
@@ -544,11 +633,20 @@ def _load_authorization(plan_hash: str | None, now: datetime, *,
         except TrustRootError as exc:
             return {"package_present": True, "signature_valid": False,
                     "error_code": exc.code}, None
-    if not Path(pkg_path).is_file() or not Path(sig_path).is_file():
+    if not os.path.lexists(package_path) or not os.path.lexists(signature_path):
         return {"package_present": False, "error_code": "package_files_missing"}, None
+    try:  # fail-closed, symlink-rejecting, race-safe, size-capped reads of the pinned files (§10v5)
+        pkg_bytes = secure_read_bytes(package_path, max_bytes=MAX_PACKAGE_BYTES)
+        sig_text = secure_read_bytes(
+            signature_path, max_bytes=MAX_SIGNATURE_BYTES).decode("utf-8").strip()
+    except CeremonyFileError as exc:
+        return {"package_present": True, "signature_valid": False, "error_code": exc.code}, None
+    except (OSError, UnicodeDecodeError):
+        return {"package_present": True, "signature_valid": False,
+                "error_code": "package_unreadable"}, None
     try:
-        pkg = load_authorization_package_from_files(
-            pkg_path, sig_path, authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
+        pkg = load_authorization_package(
+            pkg_bytes, sig_text, authorized_public_keys=keys, now=now, expected_plan_hash=plan_hash)
     except AuthorizationError as exc:
         sig_codes = {"signature_not_authorized", "signature_malformed", "no_authorized_public_keys"}
         return {"package_present": True, "signature_valid": exc.code not in sig_codes,
@@ -556,6 +654,29 @@ def _load_authorization(plan_hash: str | None, now: datetime, *,
     return {"package_present": True, "signature_valid": True, "expired": False,
             "authorization_id": pkg.authorization_id,
             "key_fingerprint": pkg.public_key_fingerprint}, pkg
+
+
+def _apply_package_to_context(base: ApplyContext, pkg: Any, now: datetime) -> None:
+    """Copy the EXPECTED values + authorization identity from a verified package into the context.
+    The signed package is the ONLY source of these (§3v3) — shared by from_environment + ceremony.
+    """
+    base.expected_provenance = ExpectedProvenance(**pkg.expected_provenance_fields())
+    base.expected_main_sha = pkg.main_commit_sha
+    base.expected_alembic = pkg.alembic_revision
+    base.expected_product_price = pkg.expected_product_price
+    base.expected_active_mappings = pkg.expected_active_mappings
+    base.operator_reference = pkg.operator_reference
+    base.authorization_id = pkg.authorization_id
+    base.authorization_package_hash = pkg.authorization_package_hash
+    base.authorization_key_fingerprint = pkg.public_key_fingerprint
+    base.authorization_generated_at = pkg.generated_at
+    base.authorization_expires_at = pkg.expires_at
+    base.expected_backup_sha256 = pkg.backup_expected_sha256
+    base.expected_backup_storage_reference = pkg.backup_storage_reference
+    base.expected_backup_storage_reference_hash = pkg.backup_storage_reference_hash
+    base.authorization_plan_hash = pkg.plan_hash
+    base.authorization_validated_at = now
+    base.authorization_valid = True
 
 
 def _document_toolchain_ok() -> dict[str, bool]:
@@ -1182,7 +1303,15 @@ def _authorization_revalidated(ctx: ApplyContext, operation_now: datetime) -> bo
     if ctx.authorization_plan_hash is None or ctx.expected_provenance is None:
         return False
     try:
-        status, pkg = _load_authorization(ctx.authorization_plan_hash, operation_now)
+        if ctx._ceremony_package_path is not None:
+            # Ceremony context: re-read the EXACT pinned files; env can never redirect this (§6v5).
+            status, pkg = _load_authorization(
+                ctx.authorization_plan_hash, operation_now,
+                package_path=ctx._ceremony_package_path,
+                signature_path=ctx._ceremony_signature_path,
+                trust_root_path=ctx._ceremony_trust_root_path, use_env_paths=False)
+        else:
+            status, pkg = _load_authorization(ctx.authorization_plan_hash, operation_now)
     except Exception:  # fail-closed on any loader/IO error
         return False
     if pkg is None or not status.get("signature_valid"):
@@ -1324,6 +1453,151 @@ def verify_only(db: Session, m: dict[str, Any], ctx: ApplyContext,
     _require_postgres(db)
     planner.readonly_preflight(db)
     return _verify_report(db, m, ctx, settings)
+
+
+# --------------------------------------------------------------------------- #
+# Verify-only authorization ceremony (§5-§8v5) — read-only adapter that prepares
+# an UNSIGNED request and later verifies a signed package. It NEVER signs, decrypts
+# a key, imports a private key, or writes remediation data.
+# --------------------------------------------------------------------------- #
+CEREMONY_REQUEST_SCHEMA_VERSION = 1
+CEREMONY_PACKAGE_SCHEMA_VERSION = 1
+_OPERATOR_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@ /-]{0,127}$")
+
+
+def _ceremony_canonical(obj: Any) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
+
+
+def _deterministic_authorization_id(plan_hash: str) -> str:
+    return "remediation-" + hashlib.sha256(
+        ("remediation-authorization-id::" + plan_hash).encode()).hexdigest()[:32]
+
+
+def _enrolled_key_fingerprint() -> str | None:
+    """The fingerprint of the SINGLE enrolled trust-root key, or None if not exactly one."""
+    from cestaplan_api.provenance import TrustRootError, load_trust_root
+    path = _runtime_provenance_paths()[1]
+    if not path or not Path(path).is_file():
+        return None
+    try:
+        keys = load_trust_root(path)
+    except TrustRootError:
+        return None
+    if len(keys) != 1:
+        return None
+    try:
+        return hashlib.sha256(bytes.fromhex(keys[0])).hexdigest()[:16]
+    except ValueError:
+        return None
+
+
+def _ceremony_preflight_gates(db: Session, m: dict[str, Any], ctx: ApplyContext,
+                              settings: Settings, now: datetime) -> list[tuple[str, bool]]:
+    """Every read-only gate a request must pass, using the OBSERVED build as the proposed expected
+    values (no package needed). The signed package re-establishes these later under the lock."""
+    o = ctx.observed_provenance
+    app = ctx.app_commit_sha
+    live_trust = _observed_trust_root_hash()
+    gates: list[tuple[str, bool]] = [
+        ("plan_hash_intact", _recompute_plan_hash(m) == m["plan_hash"]),
+        ("plan_not_expired", _plan_age_ok(m, now)),
+        ("supported_actions_only", _actions_supported(m)),
+        ("writer_contract_v2", _writer_contract_gate()[0]),
+        ("app_commit_present", _valid_commit(app)),
+        ("api_worker_aligned",
+         _valid_commit(app) and ctx.deployed_api_sha == app and ctx.deployed_worker_sha == app),
+        ("build_doc_commit_matches_app", _eq_commit(o.commit_sha, app)),
+        ("build_doc_alembic_matches_live",
+         o.alembic_revision is not None and o.alembic_revision == _alembic_revision(db)),
+        ("trust_root_matches_document",
+         _valid_sha256(live_trust) and live_trust == o.authorization_trust_root_hash),
+        ("enrolled_key_present", _enrolled_key_fingerprint() is not None),
+        *_document_toolchain_ok().items(),
+        *_environment_gates(db, settings, ctx),
+        *_drift_gates(db, m),
+        ("backup_verified", _backup_gate_observed(db, ctx, now)),
+    ]
+    return gates
+
+
+def _backup_gate_observed(db: Session, ctx: ApplyContext, now: datetime) -> bool:
+    """The real backup artifact must verify (SHA/perms/pg_restore/version/age). This is the OBSERVED
+    backup — the request proposes its SHA + reference; the signer binds them into the package."""
+    if ctx.backup is None:
+        return False
+    ok, _ev = ctx.backup.verify(now, server_version=_server_version(db))
+    return ok
+
+
+def prepare_authorization_request(
+        db: Session, m: dict[str, Any], ctx: ApplyContext, *, operator_reference: str,
+        settings: Settings | None = None) -> dict[str, Any]:
+    """Produce an UNSIGNED authorization request (§7v5): pins the REPEATABLE READ, READ ONLY
+    snapshot then delegates to the read-only report. ZERO writes."""
+    _require_postgres(db)
+    planner.readonly_preflight(db)
+    return _prepare_request_report(db, m, ctx, operator_reference=operator_reference,
+                                   settings=settings)
+
+
+def _prepare_request_report(
+        db: Session, m: dict[str, Any], ctx: ApplyContext, *, operator_reference: str,
+        settings: Settings | None = None) -> dict[str, Any]:
+    """The request body over the pinned snapshot. It is NOT a package and NOT an authorization: no
+    generated_at/expires_at/package_hash/signature. Every read-only gate must pass first. ZERO
+    writes. The local backup path never enters the request or the report."""
+    _require_postgres(db)
+    _require_manifest_shape(m)
+    settings = settings or Settings()
+    now = _now_utc()
+    o = ctx.observed_provenance
+    # Propose the OBSERVED build + live counts as the expected values, so the reused gates evaluate
+    # the very values the request will carry.
+    ctx.expected_alembic = o.alembic_revision
+    ctx.expected_product_price = int(db.scalar(select(func.count()).select_from(ProductPrice)) or 0)
+    ctx.expected_active_mappings = int(db.scalar(
+        select(func.count()).select_from(ProviderIngredientMapping).where(
+            ProviderIngredientMapping.active.is_(True))) or 0)
+    if not (isinstance(operator_reference, str) and _OPERATOR_REF_RE.match(operator_reference)):
+        raise ApplyManifestInvalid("operator_reference_invalid")
+    gates = _ceremony_preflight_gates(db, m, ctx, settings, now)
+    blocking = sorted(code for code, ok in gates if not ok)
+    fp = _enrolled_key_fingerprint()
+    if blocking or fp is None or ctx.backup is None or not _valid_commit(o.commit_sha) \
+            or not _valid_sha256(o.authorization_trust_root_hash):
+        return {"prepared": False, "request_blockers": blocking, "request": None}
+    request = {
+        "request_schema_version": CEREMONY_REQUEST_SCHEMA_VERSION,
+        "package_schema_version": CEREMONY_PACKAGE_SCHEMA_VERSION,
+        "authorization_id": _deterministic_authorization_id(m["plan_hash"]),
+        "plan_hash": m["plan_hash"],
+        "main_commit_sha": ctx.app_commit_sha,
+        "alembic_revision": o.alembic_revision,
+        "expected_commit_sha": o.commit_sha,
+        "expected_source_hash": o.source_tree_hash,
+        "expected_api_artifact_hash": o.api_artifact_hash,
+        "expected_worker_artifact_hash": o.worker_artifact_hash,
+        "expected_document_hash": o.document_hash,
+        "expected_product_price": ctx.expected_product_price,
+        "expected_active_mappings": ctx.expected_active_mappings,
+        "operator_reference": operator_reference,
+        "backup_expected_sha256": ctx.backup.expected_sha256,  # OBSERVED sha, never the path
+        "backup_storage_reference": ctx.backup.storage_reference,
+        "authorized_key_fingerprint": fp,
+        "authorization_trust_root_hash": o.authorization_trust_root_hash,
+    }
+    request["request_hash"] = hashlib.sha256(_ceremony_canonical(request).encode()).hexdigest()
+    return {"prepared": True, "request_blockers": [], "request": request}
+
+
+def verify_authorization_ceremony(db: Session, m: dict[str, Any],
+                                  ctx: ApplyContext) -> dict[str, Any]:
+    """Full verify-only over a ceremony context (signed package + real backup). Read-only; ZERO
+    writes; sanitized report. apply_ready may reach true when EVERY gate is valid — apply is never
+    executed here, and the CLI keeps blocking --apply/--restore/--simulate in cloud."""
+    return verify_only(db, m, ctx, settings=Settings())
 
 
 def _verify_report(db: Session, m: dict[str, Any], ctx: ApplyContext,
@@ -2244,28 +2518,138 @@ def _assert_counts_preserved(before: dict[str, int], after: dict[str, int]) -> N
 
 
 # --------------------------------------------------------------------------- #
-# CLI — production allows ONLY --verify-only (spec §12)
+# CLI — production allows ONLY read-only modes (spec §12; ceremony §5v2)
 # --------------------------------------------------------------------------- #
+# Stable, documented ceremony exit codes (§5v2):
+EXIT_OK = 0             # full validation (prepared + written, or apply_ready=true)
+EXIT_GATES_BLOCKING = 2  # a gate blocks (prepared=false / apply_ready=false)
+EXIT_INVALID_INPUT = 3   # invalid file/evidence/package/signature/output
+EXIT_UNEXPECTED = 4      # sanitized unexpected operational error
+
+
+def _emit_ceremony_report(report: dict[str, Any], code: int) -> int:
+    """Print the sanitized JSON report (never a path or secret) and return the exit code."""
+    json.dump(report, sys.stdout, indent=2, default=str)
+    sys.stdout.write("\n")
+    return code
+
+
+def _emit_ceremony_error(code: int) -> int:
+    """Emit ONLY a sanitized error code — no traceback, no path, no secret."""
+    msg = {EXIT_INVALID_INPUT: "invalid_ceremony_input"}.get(code, "unexpected_error")
+    json.dump({"apply_ready": False, "error": msg}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return code
+
+
+def _load_ceremony_manifest(path: str) -> dict[str, Any]:
+    """Load a plan manifest for a ceremony mode fail-closed (§4v3): symlink-rejecting, race-safe,
+    size-capped read; valid JSON object with a well-formed plan_hash. Every failure is a sanitized
+    ApplyManifestInvalid (caught by the CLI -> EXIT_INVALID_INPUT), never a path or traceback."""
+    from cestaplan_api.provenance.operational_evidence import MAX_MANIFEST_BYTES, secure_read_bytes
+    raw = secure_read_bytes(path, max_bytes=MAX_MANIFEST_BYTES)  # raises CeremonyFileError (caught)
+    try:
+        m = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ApplyManifestInvalid("manifest_not_json") from exc
+    if not isinstance(m, dict):
+        raise ApplyManifestInvalid("manifest_not_object")
+    ph = m.get("plan_hash")
+    if not isinstance(ph, str) or re.fullmatch(r"[0-9a-f]{64}", ph) is None:
+        raise ApplyManifestInvalid("manifest_plan_hash_invalid")
+    return m
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - thin CLI wrapper
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest-path", required=True)
+    p.add_argument("--operational-evidence-path")
+    p.add_argument("--operator-reference")
+    p.add_argument("--output-path")
+    p.add_argument("--authorization-package-path")
+    p.add_argument("--authorization-signature-path")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--verify-only", action="store_true")
     mode.add_argument("--simulate", action="store_true")
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--restore", metavar="RUN_PUBLIC_ID")
+    mode.add_argument("--prepare-authorization-request", action="store_true")
+    mode.add_argument("--verify-authorization-ceremony", action="store_true")
     a = p.parse_args(argv)
-    manifest = load_manifest(a.manifest_path)
-    # §1v4: the CLI never injects a clock; every mode derives its time from _now_utc() internally.
-    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"))
     cloud = os.environ.get("DEPLOYMENT_MODE", "").lower() in ("cloud", "production")
+    # §4v3: block apply/restore (and simulate-in-cloud) BEFORE the manifest is ever read.
     if a.apply or a.restore:
         raise SystemExit(
-            "ABORT: --apply/--restore are not authorized in this phase. Only --verify-only "
-            "(read-only) may run against production.")
+            "ABORT: --apply/--restore are not authorized in this phase. Only read-only modes "
+            "(--verify-only / --prepare-authorization-request / --verify-authorization-ceremony) "
+            "may run against production.")
     if a.simulate and cloud:
         raise SystemExit(
-            "ABORT: --simulate is not allowed in cloud/production; only --verify-only runs here.")
+            "ABORT: --simulate is not allowed in cloud/production; only verify-only runs here.")
+
+    if a.prepare_authorization_request:
+        if not a.operational_evidence_path or not a.operator_reference or not a.output_path:
+            raise SystemExit("ABORT: prepare requires --operational-evidence-path, "
+                             "--operator-reference and --output-path.")
+        from cestaplan_api.provenance.operational_evidence import (
+            CeremonyFileError,
+            secure_create_request_file,
+        )
+        # §1v4/§4v3: the CLI never injects a clock; the manifest is loaded inside the SAME sanitized
+        # try as evidence, so a bad manifest -> EXIT_INVALID_INPUT (no path/traceback).
+        try:
+            manifest = _load_ceremony_manifest(a.manifest_path)
+            ctx = ApplyContext.from_ceremony_files(
+                plan_hash=manifest["plan_hash"],
+                operational_evidence_path=a.operational_evidence_path)
+            with SessionLocal() as db:
+                out = prepare_authorization_request(
+                    db, manifest, ctx, operator_reference=a.operator_reference)
+                db.rollback()  # read-only snapshot; NEVER a write
+        except (CeremonyFileError, ApplyError):
+            return _emit_ceremony_error(EXIT_INVALID_INPUT)  # sanitized; no path/traceback
+        except Exception:
+            return _emit_ceremony_error(EXIT_UNEXPECTED)
+        if out.get("prepared") and out.get("request") is not None:
+            payload = (_ceremony_canonical(out["request"]) + "\n").encode()  # canonical + newline
+            try:  # §1v2: exclusive, symlink-free, fsynced create — never over an existing file
+                secure_create_request_file(a.output_path, payload)
+            except CeremonyFileError:
+                return _emit_ceremony_report(
+                    {"prepared": True, "output_written": False}, EXIT_INVALID_INPUT)
+            return _emit_ceremony_report(
+                {"prepared": True, "request_blockers": [], "output_written": True}, EXIT_OK)
+        # Blocked by gates -> non-zero, and NEVER create the output file.
+        return _emit_ceremony_report(
+            {"prepared": False, "request_blockers": out.get("request_blockers", []),
+             "output_written": False}, EXIT_GATES_BLOCKING)
+
+    if a.verify_authorization_ceremony:
+        if not a.operational_evidence_path or not a.authorization_package_path \
+                or not a.authorization_signature_path:
+            raise SystemExit("ABORT: verify-ceremony requires --operational-evidence-path, "
+                             "--authorization-package-path and --authorization-signature-path.")
+        from cestaplan_api.provenance.operational_evidence import CeremonyFileError
+        try:
+            manifest = _load_ceremony_manifest(a.manifest_path)  # sanitized; inside the try (§4v3)
+            ctx = ApplyContext.from_ceremony_files(
+                plan_hash=manifest["plan_hash"],
+                operational_evidence_path=a.operational_evidence_path,
+                authorization_package_path=a.authorization_package_path,
+                authorization_signature_path=a.authorization_signature_path)
+            with SessionLocal() as db:
+                out = verify_authorization_ceremony(db, manifest, ctx)
+                db.rollback()
+        except (CeremonyFileError, ApplyError):
+            return _emit_ceremony_error(EXIT_INVALID_INPUT)
+        except Exception:
+            return _emit_ceremony_error(EXIT_UNEXPECTED)
+        code = EXIT_OK if out.get("apply_ready") else EXIT_GATES_BLOCKING
+        return _emit_ceremony_report(out, code)
+
+    # verify-only / simulate: unchanged behaviour — load the manifest as before (§4v3).
+    manifest = load_manifest(a.manifest_path)
+    ctx = ApplyContext.from_environment(plan_hash=manifest.get("plan_hash"))
     with SessionLocal() as db:  # verify_only/simulate pin the read-only snapshot themselves (§10)
         out = verify_only(db, manifest, ctx) if a.verify_only else simulate(db, manifest, ctx)
         db.rollback()
