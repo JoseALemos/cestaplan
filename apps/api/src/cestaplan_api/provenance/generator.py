@@ -31,16 +31,26 @@ from typing import Any
 
 from cestaplan_api.provenance.manifest import ProvenanceError, build_manifest, manifest_hash
 
-# schema_version 3 adds the pinned PostgreSQL 18 CLIENT identity (package + version + measured
-# pg_restore/pg_dump binary sha256s) so the document cannot stay the same when the shipped client
-# binary or its version changes — the runtime BackupEvidence verifies pg_restore against it (v3).
-EVIDENCE_DOCUMENT_SCHEMA_VERSION = 3
+# schema_version 3 added the pinned PostgreSQL 18 CLIENT identity (package + version + measured
+# pg_restore/pg_dump binary sha256s). schema_version 4 adds the FULL runtime dependency/library
+# closure (postgresql_runtime_dependencies + postgresql_runtime_files + postgresql_runtime_manifest_
+# hash), measured in-image, so the document cannot stay the same when any shipped library, package
+# version or file sha changes — the runtime VerifiedPgRestore re-verifies the closure against it.
+EVIDENCE_DOCUMENT_SCHEMA_VERSION = 4
 GENERATOR_VERSION = "build-provenance-v1"
 
 # --- Pinned PostgreSQL 18 client (MUST match apps/api/Dockerfile; measured at build) ----
 POSTGRESQL_CLIENT_PACKAGE = "postgresql-client-18"
 PG_CLIENT_MAJOR = "18"
 PG_CLIENT_BIN_DIR = "/usr/lib/postgresql/18/bin"
+PG_CLIENT_BINARIES = ("pg_restore", "pg_dump")
+# The build target is amd64; arch-independent packages (e.g. postgresql-client-common) are "all".
+_PG_ARCH = "amd64"
+_PG_ARCH_ALLOWED = frozenset({"amd64", "all"})
+# Purely-virtual kernel objects have no backing file/package — the ONLY allowlisted ldd entries.
+_PG_VDSO_ALLOWLIST = frozenset({"linux-vdso.so.1", "linux-gate.so.1"})
+_PG_PKG_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+~:-]{0,80}$")
+_ABS_PATH_RE = re.compile(r"^/[^\x00]*$")
 
 # --- Pinned toolchain (MUST match apps/api/Dockerfile exactly; CI asserts equality) ---------------
 TOOLCHAIN_CONTRACT_VERSION = "toolchain-v1"
@@ -140,6 +150,218 @@ def _validate_pg_client(pg: Any) -> dict[str, str]:
         "pg_restore_version", "pg_restore_binary_sha256", "pg_dump_binary_sha256")}
 
 
+def _pg_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60,
+                          check=False)
+
+
+def _pg_dpkg_owner(path: str) -> str:
+    """The Debian package that OWNS an on-disk file, via ``dpkg -S`` (fail-closed if unowned)."""
+    r = _pg_run(["dpkg-query", "-S", path])
+    if r.returncode != 0 or not r.stdout.strip():
+        raise ProvenanceError("pg_runtime_file_unowned", "")
+    # Lines look like "pkg[:arch][, pkg2]: /abs/path"; pick the one whose path matches exactly.
+    for line in r.stdout.splitlines():
+        pkgs, sep, p = line.rpartition(": ")
+        if sep and p.strip() == path:
+            return pkgs.split(",")[0].strip().split(":")[0]
+    raise ProvenanceError("pg_runtime_file_unowned", "")
+
+
+def _pg_pkg_version_arch(pkg: str) -> tuple[str, str]:
+    r = _pg_run(["dpkg-query", "-W", "-f=${Version}\t${Architecture}", pkg])
+    parts = r.stdout.split("\t")
+    if r.returncode != 0 or len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        raise ProvenanceError("pg_runtime_pkg_unknown", "")
+    return parts[0].strip(), parts[1].strip()
+
+
+def _pg_ldd_paths(binary: str) -> list[str]:
+    """Absolute paths of the shared objects ``binary`` actually resolves to (fail-closed on any
+    'not found' or unexpected line). Purely-virtual kernel objects (linux-vdso) are skipped."""
+    r = _pg_run(["ldd", binary])
+    if r.returncode != 0:
+        raise ProvenanceError("pg_runtime_ldd_failed", "")
+    out: list[str] = []
+    for raw in r.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        name = line.split()[0]
+        if name in _PG_VDSO_ALLOWLIST or name.startswith("linux-vdso"):
+            continue
+        if "=>" in line:
+            rhs = line.split("=>", 1)[1].strip()
+            if rhs.startswith("not found"):
+                raise ProvenanceError("pg_runtime_lib_unresolved", "")
+            path = rhs.split(" (")[0].strip()
+            if not path and name.startswith("/"):
+                path = name  # "name => (0x..)": the soname is itself an absolute path
+        elif name.startswith("/"):
+            path = name  # e.g. the dynamic loader: "/lib64/ld-linux-x86-64.so.2 (0x..)"
+        else:
+            raise ProvenanceError("pg_runtime_ldd_unparsed", "")
+        if not path.startswith("/"):
+            raise ProvenanceError("pg_runtime_lib_unresolved", "")
+        out.append(path)
+    return out
+
+
+def measure_pg_runtime(bin_dir: str | Path = PG_CLIENT_BIN_DIR) -> dict[str, Any]:
+    """Measure the FULL runtime closure of the pinned pg_restore/pg_dump (build time, in the image):
+    every shared object they resolve to, the Debian package that owns each file, its exact version +
+    architecture, and the sha256 of each RESOLVED (symlink-free) regular file. Fail-closed on any
+    unresolved ldd entry, unowned file, unknown package or unexpected architecture. Deterministic
+    (sorted, de-duplicated) so two generations in the same image produce identical bytes."""
+    d = Path(bin_dir)
+    resolved: set[str] = set()
+    for name in PG_CLIENT_BINARIES:
+        b = d / name
+        if not b.is_file():
+            raise ProvenanceError("pg_client_missing", "")
+        resolved.add(str(Path(str(b)).resolve()))
+        for lib in _pg_ldd_paths(str(b)):
+            resolved.add(str(Path(lib).resolve()))
+    files: list[dict[str, str]] = []
+    pkgs: dict[str, tuple[str, str]] = {}
+    for rp in sorted(resolved):
+        p = Path(rp)
+        if p.is_symlink() or not p.is_file():
+            raise ProvenanceError("pg_runtime_file_irregular", "")
+        pkg = _pg_dpkg_owner(rp)
+        version, arch = _pg_pkg_version_arch(pkg)
+        if arch not in _PG_ARCH_ALLOWED:
+            raise ProvenanceError("pg_runtime_arch_unexpected", "")
+        pkgs[pkg] = (version, arch)
+        files.append({"package": pkg, "path": rp, "sha256": _sha256_file(p)})
+    deps = [{"architecture": a, "package": pkg, "version": v}
+            for pkg, (v, a) in sorted(pkgs.items())]
+    files.sort(key=lambda e: (e["path"], e["package"]))
+    core = {"postgresql_runtime_dependencies": deps, "postgresql_runtime_files": files}
+    return {**core, "postgresql_runtime_manifest_hash": _pg_runtime_manifest_hash(core)}
+
+
+def _pg_runtime_manifest_hash(core: Mapping[str, Any]) -> str:
+    """Canonical sha256 over the ordered dependency + file manifest (a sub-hash the loader
+    recomputes, so a mutated version/library/sha is detected independently of the document hash)."""
+    payload = {"postgresql_runtime_dependencies": core["postgresql_runtime_dependencies"],
+               "postgresql_runtime_files": core["postgresql_runtime_files"]}
+    return hashlib.sha256((canonical_json(payload) + "\n").encode()).hexdigest()
+
+
+def _validate_pg_runtime(doc: Any) -> dict[str, Any]:
+    """Strict validation of the runtime manifest fields (schema 4). Rejects a missing field, a
+    non-list, an unordered or duplicated entry, a missing version, an unexpected architecture, an
+    invalid sha, a relative path, an uncovered binary, or a wrong manifest hash. Returns the exact
+    three fields on success."""
+    if not isinstance(doc, dict):
+        raise ProvenanceError("pg_runtime_invalid", "")
+    deps = doc.get("postgresql_runtime_dependencies")
+    files = doc.get("postgresql_runtime_files")
+    mhash = doc.get("postgresql_runtime_manifest_hash")
+    if not isinstance(deps, list) or not deps or not isinstance(files, list) or not files:
+        raise ProvenanceError("pg_runtime_manifest_missing", "")
+    dep_keys = []
+    for dep in deps:
+        if (not isinstance(dep, dict) or set(dep) != {"architecture", "package", "version"}):
+            raise ProvenanceError("pg_runtime_dependency_malformed", "")
+        if dep["architecture"] not in _PG_ARCH_ALLOWED:
+            raise ProvenanceError("pg_runtime_arch_unexpected", "")
+        if not isinstance(dep["package"], str) or not dep["package"]:
+            raise ProvenanceError("pg_runtime_dependency_malformed", "")
+        if not _PG_PKG_VERSION_RE.match(str(dep["version"])):
+            raise ProvenanceError("pg_runtime_version_invalid", "")
+        dep_keys.append(dep["package"])
+    if dep_keys != sorted(dep_keys) or len(dep_keys) != len(set(dep_keys)):
+        raise ProvenanceError("pg_runtime_dependencies_unordered", "")
+    dep_pkgs = set(dep_keys)
+    file_keys = []
+    covered_paths = set()
+    for fe in files:
+        if not isinstance(fe, dict) or set(fe) != {"package", "path", "sha256"}:
+            raise ProvenanceError("pg_runtime_file_malformed", "")
+        if not isinstance(fe["path"], str) or not _ABS_PATH_RE.match(fe["path"]):
+            raise ProvenanceError("pg_runtime_path_invalid", "")
+        if not _SHA256_RE.match(str(fe["sha256"])):
+            raise ProvenanceError("pg_runtime_sha_invalid", "")
+        if fe["package"] not in dep_pkgs:  # every file's owner must be a declared dependency
+            raise ProvenanceError("pg_runtime_file_uncovered", "")
+        file_keys.append((fe["path"], fe["package"]))
+        covered_paths.add(fe["path"])
+    if file_keys != sorted(file_keys) or len(file_keys) != len(set(file_keys)):
+        raise ProvenanceError("pg_runtime_files_unordered", "")
+    # Both pinned binaries must be covered by the file manifest.
+    for name in PG_CLIENT_BINARIES:
+        if f"{PG_CLIENT_BIN_DIR}/{name}" not in covered_paths:
+            raise ProvenanceError("pg_runtime_binary_uncovered", "")
+    core = {"postgresql_runtime_dependencies": deps, "postgresql_runtime_files": files}
+    if not _SHA256_RE.match(str(mhash)) or _pg_runtime_manifest_hash(core) != mhash:
+        raise ProvenanceError("pg_runtime_manifest_hash_mismatch", "")
+    return {"postgresql_runtime_dependencies": deps, "postgresql_runtime_files": files,
+            "postgresql_runtime_manifest_hash": mhash}
+
+
+PG_RUNTIME_LOCK_FILENAME = "postgresql-client-18-runtime.lock.json"
+_LOCK_CORE_FIELDS = ("architecture", "codename", "distribution", "packages")
+
+
+def _pg_lock_closure_hash(lock: Mapping[str, Any]) -> str:
+    core = {k: lock[k] for k in _LOCK_CORE_FIELDS}
+    return hashlib.sha256((canonical_json(core) + "\n").encode()).hexdigest()
+
+
+def load_pg_runtime_lock(path: str | Path) -> dict[str, Any]:
+    """Load + self-verify the committed APT lock (fail-closed). The lock pins the PGDG-sourced
+    closure (postgresql-client-18/libpq5/postgresql-client-common) so APT cannot silently install a
+    different set; the base-image libraries are pinned by the base image digest and captured in the
+    runtime file manifest instead."""
+    try:
+        lock = json.loads(Path(path).read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProvenanceError("pg_lock_unreadable", "") from exc
+    if not isinstance(lock, dict):
+        raise ProvenanceError("pg_lock_invalid", "")
+    for k in (*_LOCK_CORE_FIELDS, "dependency_closure_hash"):
+        if k not in lock:
+            raise ProvenanceError("pg_lock_field_missing", k)
+    if not isinstance(lock["packages"], list) or not lock["packages"]:
+        raise ProvenanceError("pg_lock_packages_invalid", "")
+    for pkg in lock["packages"]:
+        if (not isinstance(pkg, dict) or set(pkg) != {"package", "version"}
+                or not isinstance(pkg["package"], str) or not pkg["package"]
+                or not _PG_PKG_VERSION_RE.match(str(pkg["version"]))):
+            raise ProvenanceError("pg_lock_package_malformed", "")
+    names = [p["package"] for p in lock["packages"]]
+    if names != sorted(names) or len(names) != len(set(names)):
+        raise ProvenanceError("pg_lock_packages_unordered", "")
+    if _pg_lock_closure_hash(lock) != lock["dependency_closure_hash"]:
+        raise ProvenanceError("pg_lock_hash_mismatch", "")
+    return lock
+
+
+def _read_os_release(path: str | Path = "/etc/os-release") -> tuple[str, str]:
+    fields: dict[str, str] = {}
+    for line in Path(path).read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, _, v = line.partition("=")
+            fields[k.strip()] = v.strip().strip('"')
+    return fields.get("ID", ""), fields.get("VERSION_CODENAME", "")
+
+
+def verify_pg_runtime_lock(lock: Mapping[str, Any], *, distribution: str, codename: str,
+                           architecture: str) -> None:
+    """Fail-closed comparison of the INSTALLED closure against the committed lock (build time). Each
+    locked package's dpkg-recorded version must match EXACTLY; the platform must match; no fallback,
+    no automatic regeneration."""
+    if (lock["distribution"] != distribution or lock["codename"] != codename
+            or lock["architecture"] != architecture):
+        raise ProvenanceError("pg_lock_platform_mismatch", "")
+    for pkg in lock["packages"]:
+        installed, _arch = _pg_pkg_version_arch(pkg["package"])
+        if installed != pkg["version"]:
+            raise ProvenanceError("pg_lock_version_mismatch", pkg["package"])
+
+
 def resolve_commit_sha(sources: Mapping[str, str | None]) -> str:
     """Resolve the build commit from BUILD_COMMIT_SHA / RAILWAY_GIT_COMMIT_SHA / APP_COMMIT_SHA in
     that priority order (v2/§5). Every present value must be 40-hex; if two are present and DIFFER
@@ -185,12 +407,14 @@ def detect_alembic_head(migrations_dir: str | Path) -> str:
 
 
 def generate_provenance_document(base: str | Path, commit_sha: str, alembic_revision: str,
-                                 pg_client: dict[str, str]) -> dict[str, Any]:
-    """Build the canonical provenance document (schema_version 3). Fail-closed on a missing/invalid
-    commit, revision, toolchain digest or PostgreSQL client identity. Contains NO timestamps or
-    non-reproducible metadata; the toolchain digests come from reviewed constants and the pg-client
-    fields are MEASURED from the installed binaries (``measure_pg_client``) — both baked identically
-    into the API and worker images."""
+                                 pg_client: dict[str, str],
+                                 pg_runtime: dict[str, Any]) -> dict[str, Any]:
+    """Build the canonical provenance document (schema_version 4). Fail-closed on a missing/invalid
+    commit, revision, toolchain digest, PostgreSQL client identity or runtime dependency manifest.
+    Contains NO timestamps or non-reproducible metadata; the toolchain digests come from reviewed
+    constants while the pg-client fields AND the full runtime dependency/library manifest are
+    MEASURED from the installed image (``measure_pg_client`` + ``measure_pg_runtime``) — both baked
+    identically into the API and worker images."""
     if not isinstance(commit_sha, str) or not _COMMIT_RE.match(commit_sha):
         raise ProvenanceError("commit_sha_invalid", "")
     if not isinstance(alembic_revision, str) or not _REVISION_RE.match(alembic_revision):
@@ -199,6 +423,7 @@ def generate_provenance_document(base: str | Path, commit_sha: str, alembic_revi
         if not _DIGEST_RE.match(digest):
             raise ProvenanceError("toolchain_digest_invalid", "")
     pg = _validate_pg_client(pg_client)
+    runtime = _validate_pg_runtime(pg_runtime)
     from cestaplan_api.provenance.trust_root import trust_root_hash
     trust_hash = trust_root_hash(Path(base) / TRUST_ROOT_FILENAME)
     src = manifest_hash(build_manifest(base, SOURCE_TREE_INCLUDES))
@@ -217,6 +442,7 @@ def generate_provenance_document(base: str | Path, commit_sha: str, alembic_revi
         "uv_image_digest": UV_IMAGE_DIGEST,
         "authorization_trust_root_hash": trust_hash,
         **pg,
+        **runtime,
     }
 
 

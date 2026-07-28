@@ -25,6 +25,22 @@ _PG = {  # synthetic pinned pg 18 client identity (measured for real only inside
     "pg_restore_binary_sha256": "d" * 64,
     "pg_dump_binary_sha256": "e" * 64,
 }
+# synthetic runtime dependency/library closure (measured for real only inside the image, schema 4)
+_PG_RUNTIME_DEPS = [
+    {"architecture": "amd64", "package": "libpq5", "version": "18.4-1.pgdg13+1"},
+    {"architecture": "amd64", "package": "postgresql-client-18", "version": "18.4-1.pgdg13+1"}]
+_PG_RUNTIME_FILES = [
+    {"package": "postgresql-client-18", "path": "/usr/lib/postgresql/18/bin/pg_dump",
+     "sha256": "a" * 64},
+    {"package": "postgresql-client-18", "path": "/usr/lib/postgresql/18/bin/pg_restore",
+     "sha256": "b" * 64},
+    {"package": "libpq5", "path": "/usr/lib/x86_64-linux-gnu/libpq.so.5.18", "sha256": "c" * 64}]
+
+
+def _pg_runtime() -> dict:
+    core = {"postgresql_runtime_dependencies": [dict(d) for d in _PG_RUNTIME_DEPS],
+            "postgresql_runtime_files": [dict(f) for f in _PG_RUNTIME_FILES]}
+    return {**core, "postgresql_runtime_manifest_hash": g._pg_runtime_manifest_hash(core)}
 _MIGRATION = (
     '"""m"""\n'
     "revision: str = '360a55cb6abb'\n"
@@ -58,7 +74,7 @@ def _bundle(root: Path) -> Path:
 
 def _doc(base: Path, commit: str = _COMMIT) -> dict:
     return g.generate_provenance_document(
-        base, commit, g.detect_alembic_head(base / "migrations"), _PG)
+        base, commit, g.detect_alembic_head(base / "migrations"), _PG, _pg_runtime())
 
 
 def test_generation_is_byte_deterministic(tmp_path: Path) -> None:
@@ -71,7 +87,7 @@ def test_all_three_scope_hashes_are_valid_and_distinct(tmp_path: Path) -> None:
     hashes = {doc["source_tree_hash"], doc["api_artifact_hash"], doc["worker_artifact_hash"]}
     assert len(hashes) == 3
     assert all(len(h) == 64 and all(c in "0123456789abcdef" for c in h) for h in hashes)
-    assert doc["schema_version"] == 3 and doc["generator_version"] == "build-provenance-v1"
+    assert doc["schema_version"] == 4 and doc["generator_version"] == "build-provenance-v1"
     assert doc["commit_sha"] == _COMMIT and doc["alembic_revision"] == "360a55cb6abb"
     assert doc["toolchain_contract_version"] == g.TOOLCHAIN_CONTRACT_VERSION
     assert doc["python_base_image_digest"] == g.PYTHON_BASE_IMAGE_DIGEST
@@ -209,7 +225,7 @@ def test_api_only_change_moves_only_api_hash(tmp_path: Path) -> None:  # §4.4
     before = _doc(base)
     (base / "migrations/versions/0002_m.py").write_text(
         _MIGRATION.replace("360a55cb6abb", "abcdef123456").replace("None", "'360a55cb6abb'"))
-    after = g.generate_provenance_document(base, _COMMIT, "abcdef123456", _PG)
+    after = g.generate_provenance_document(base, _COMMIT, "abcdef123456", _PG, _pg_runtime())
     assert after["api_artifact_hash"] != before["api_artifact_hash"]
     assert after["worker_artifact_hash"] == before["worker_artifact_hash"]
     assert after["source_tree_hash"] != before["source_tree_hash"]
@@ -353,7 +369,10 @@ def test_dockerfile_copies_are_covered() -> None:  # §4v4
     dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
     measured = {inc.split("/")[0] for inc in
                 (*g.SOURCE_TREE_INCLUDES, *g.API_ARTIFACT_INCLUDES, *g.WORKER_ARTIFACT_INCLUDES)}
-    allowlist: set[str] = set()  # (empty) documented files copied to /app that don't affect it
+    # The APT lock is a build-time verification input (compared to the INSTALLED closure); its
+    # identity is bound transitively via the measured postgresql_runtime_* fields, so it need not be
+    # in a uv-affecting scope.
+    allowlist: set[str] = {"postgresql-client-18-runtime.lock.json"}
     copied: list[str] = []
     for line in dockerfile.splitlines():
         s = line.strip()
@@ -370,7 +389,7 @@ def test_malformed_commit_is_blocked(tmp_path: Path) -> None:
     base = _bundle(tmp_path)
     for bad in ("", "xyz", "A" * 40, "a" * 39, "a" * 41):
         with pytest.raises(ProvenanceError) as ei:
-            g.generate_provenance_document(base, bad, "360a55cb6abb", _PG)
+            g.generate_provenance_document(base, bad, "360a55cb6abb", _PG, _pg_runtime())
         assert ei.value.code == "commit_sha_invalid"
 
 
@@ -397,12 +416,13 @@ def test_cli_writes_document_and_is_reproducible(tmp_path: Path, monkeypatch) ->
     # measure_pg_client reads the real pg 18 client (only present inside the image); inject the
     # synthetic identity so the CLI's determinism is testable without the binaries.
     monkeypatch.setattr("cestaplan_api.provenance.generate.measure_pg_client", lambda: dict(_PG))
+    monkeypatch.setattr("cestaplan_api.provenance.generate.measure_pg_runtime", _pg_runtime)
     from cestaplan_api.provenance.generate import main
     assert main(["--base", str(base), "--commit-sha", _COMMIT, "--out", str(out1)]) == 0
     assert main(["--base", str(base), "--commit-sha", _COMMIT, "--out", str(out2)]) == 0
     assert out1.read_bytes() == out2.read_bytes()
     doc = json.loads(out1.read_text())
-    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 3
+    assert doc["commit_sha"] == _COMMIT and doc["schema_version"] == 4
 
 
 def test_generation_holds_under_optimize(tmp_path: Path) -> None:
@@ -410,7 +430,7 @@ def test_generation_holds_under_optimize(tmp_path: Path) -> None:
     code = (
         "from cestaplan_api.provenance import generator as g\n"
         "try:\n"
-        f"    g.generate_provenance_document({str(base)!r}, 'bad', '360a55cb6abb', {{}})\n"
+        f"    g.generate_provenance_document({str(base)!r}, 'bad', '360a55cb6abb', {{}}, {{}})\n"
         "    print('NO_RAISE')\n"
         "except g.ProvenanceError as e:\n"
         "    print('RAISED', e.code)\n")
@@ -418,7 +438,7 @@ def test_generation_holds_under_optimize(tmp_path: Path) -> None:
     assert "RAISED commit_sha_invalid" in out.stdout
 
 
-# ---- schema_version 3: pinned PostgreSQL 18 client identity (§5/§8) ----
+# ---- schema_version 4: pinned PostgreSQL 18 client identity (§5/§8) ----
 def test_pg_client_fields_in_document(tmp_path: Path) -> None:
     doc = _doc(_bundle(tmp_path))
     assert doc["postgresql_client_package"] == "postgresql-client-18"
@@ -471,5 +491,151 @@ def test_pg_binary_change_moves_document_hash(tmp_path: Path) -> None:
     before = g.document_sha256(_doc(base))
     after = g.document_sha256(g.generate_provenance_document(
         base, _COMMIT, g.detect_alembic_head(base / "migrations"),
-        {**_PG, "pg_restore_binary_sha256": "f" * 64}))
+        {**_PG, "pg_restore_binary_sha256": "f" * 64}, _pg_runtime()))
     assert before != after
+
+
+# ---- schema_version 4: full runtime dependency/library manifest (§2/§3/§4) ----
+def _runtime(deps, files) -> dict:
+    core = {"postgresql_runtime_dependencies": deps, "postgresql_runtime_files": files}
+    return {**core, "postgresql_runtime_manifest_hash": g._pg_runtime_manifest_hash(core)}
+
+
+def test_pg_runtime_fields_in_document(tmp_path: Path) -> None:
+    doc = _doc(_bundle(tmp_path))
+    assert doc["postgresql_runtime_dependencies"] == _PG_RUNTIME_DEPS
+    assert doc["postgresql_runtime_files"] == _PG_RUNTIME_FILES
+    assert g._SHA256_RE.match(doc["postgresql_runtime_manifest_hash"])
+    # the manifest hash is exactly the canonical hash over deps+files
+    assert doc["postgresql_runtime_manifest_hash"] == g._pg_runtime_manifest_hash(
+        {"postgresql_runtime_dependencies": _PG_RUNTIME_DEPS,
+         "postgresql_runtime_files": _PG_RUNTIME_FILES})
+
+
+def test_pg_runtime_library_change_moves_document_hash(tmp_path: Path) -> None:
+    base = _bundle(tmp_path)
+    before = g.document_sha256(_doc(base))
+    mutated = [dict(f) for f in _PG_RUNTIME_FILES]
+    mutated[-1] = {**mutated[-1], "sha256": "f" * 64}  # a single library sha changes
+    after = g.document_sha256(g.generate_provenance_document(
+        base, _COMMIT, g.detect_alembic_head(base / "migrations"), _PG,
+        _runtime([dict(d) for d in _PG_RUNTIME_DEPS], mutated)))
+    assert before != after
+
+
+def test_pg_runtime_two_generations_identical() -> None:
+    a = g._pg_runtime_manifest_hash({"postgresql_runtime_dependencies": _PG_RUNTIME_DEPS,
+                                     "postgresql_runtime_files": _PG_RUNTIME_FILES})
+    b = g._pg_runtime_manifest_hash({"postgresql_runtime_dependencies": _PG_RUNTIME_DEPS,
+                                     "postgresql_runtime_files": _PG_RUNTIME_FILES})
+    assert a == b
+
+
+def test_validate_pg_runtime_accepts_valid() -> None:
+    rt = _pg_runtime()
+    out = g._validate_pg_runtime(rt)
+    assert out["postgresql_runtime_manifest_hash"] == rt["postgresql_runtime_manifest_hash"]
+
+
+def test_validate_pg_runtime_rejects_missing_field() -> None:
+    doc = _pg_runtime()
+    del doc["postgresql_runtime_files"]
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(doc)
+    assert ei.value.code == "pg_runtime_manifest_missing"
+
+
+def test_validate_pg_runtime_rejects_unordered_deps() -> None:
+    deps = list(reversed([dict(d) for d in _PG_RUNTIME_DEPS]))
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime(deps, [dict(f) for f in _PG_RUNTIME_FILES]))
+    assert ei.value.code == "pg_runtime_dependencies_unordered"
+
+
+def test_validate_pg_runtime_rejects_duplicate_dep() -> None:
+    deps = [dict(_PG_RUNTIME_DEPS[0]), dict(_PG_RUNTIME_DEPS[0]), dict(_PG_RUNTIME_DEPS[1])]
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime(deps, [dict(f) for f in _PG_RUNTIME_FILES]))
+    assert ei.value.code == "pg_runtime_dependencies_unordered"
+
+
+def test_validate_pg_runtime_rejects_missing_version() -> None:
+    deps = [dict(d) for d in _PG_RUNTIME_DEPS]
+    deps[0] = {**deps[0], "version": ""}
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime(deps, [dict(f) for f in _PG_RUNTIME_FILES]))
+    assert ei.value.code == "pg_runtime_version_invalid"
+
+
+def test_validate_pg_runtime_rejects_bad_arch() -> None:
+    deps = [dict(d) for d in _PG_RUNTIME_DEPS]
+    deps[0] = {**deps[0], "architecture": "arm64"}
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime(deps, [dict(f) for f in _PG_RUNTIME_FILES]))
+    assert ei.value.code == "pg_runtime_arch_unexpected"
+
+
+def test_validate_pg_runtime_rejects_bad_sha() -> None:
+    files = [dict(f) for f in _PG_RUNTIME_FILES]
+    files[0] = {**files[0], "sha256": "nothex"}
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime([dict(d) for d in _PG_RUNTIME_DEPS], files))
+    assert ei.value.code == "pg_runtime_sha_invalid"
+
+
+def test_validate_pg_runtime_rejects_relative_path() -> None:
+    files = [dict(f) for f in _PG_RUNTIME_FILES]
+    files[0] = {**files[0], "path": "usr/lib/postgresql/18/bin/pg_dump"}  # no leading /
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime([dict(d) for d in _PG_RUNTIME_DEPS], files))
+    assert ei.value.code in ("pg_runtime_path_invalid", "pg_runtime_files_unordered")
+
+
+def test_validate_pg_runtime_rejects_uncovered_binary() -> None:
+    files = [dict(f) for f in _PG_RUNTIME_FILES if "pg_restore" not in f["path"]]
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime([dict(d) for d in _PG_RUNTIME_DEPS], files))
+    assert ei.value.code == "pg_runtime_binary_uncovered"
+
+
+def test_validate_pg_runtime_rejects_file_owner_not_a_dependency() -> None:
+    files = [dict(f) for f in _PG_RUNTIME_FILES]
+    files.append({"package": "libssl3t64", "path": "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+                  "sha256": "d" * 64})
+    files.sort(key=lambda e: (e["path"], e["package"]))
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(_runtime([dict(d) for d in _PG_RUNTIME_DEPS], files))
+    assert ei.value.code == "pg_runtime_file_uncovered"
+
+
+def test_validate_pg_runtime_rejects_wrong_manifest_hash() -> None:
+    doc = _pg_runtime()
+    doc["postgresql_runtime_manifest_hash"] = "0" * 64
+    with pytest.raises(g.ProvenanceError) as ei:
+        g._validate_pg_runtime(doc)
+    assert ei.value.code == "pg_runtime_manifest_hash_mismatch"
+
+
+# ---- schema_version 4: APT runtime lock (§5) ----
+def test_pg_runtime_lock_self_consistent_and_matches_dockerfile() -> None:
+    lock = g.load_pg_runtime_lock(Path("postgresql-client-18-runtime.lock.json"))
+    assert lock["distribution"] == "debian" and lock["codename"] == "trixie"
+    assert lock["architecture"] == "amd64"
+    names = [p["package"] for p in lock["packages"]]
+    assert names == sorted(names)
+    assert {"libpq5", "postgresql-client-18", "postgresql-client-common"} == set(names)
+    # the pinned client version matches the Dockerfile ARG default
+    df = Path("Dockerfile").read_text()
+    for pkg in lock["packages"]:
+        assert pkg["version"] in df
+
+
+def test_pg_runtime_lock_rejects_tampered_hash(tmp_path: Path) -> None:
+    import json as _json
+    lock = _json.loads(Path("postgresql-client-18-runtime.lock.json").read_bytes())
+    lock["dependency_closure_hash"] = "0" * 64
+    p = tmp_path / "lock.json"
+    p.write_text(_json.dumps(lock))
+    with pytest.raises(g.ProvenanceError) as ei:
+        g.load_pg_runtime_lock(p)
+    assert ei.value.code == "pg_lock_hash_mismatch"

@@ -17,15 +17,23 @@
 # Toolchain pinned by tag + digest (immutable-build-provenance): these digests MUST match the
 # constants in cestaplan_api/provenance/generator.py exactly (CI asserts equality; forbids a floating
 # tag or a digest-less FROM). Never float the base image, uv or the PostgreSQL client version.
+# The PGDG-sourced closure is pinned to EXACT versions (matching postgresql-client-18-runtime.lock.json)
+# so APT can never silently resolve a different set (e.g. a newer libpq5). The base libraries (libc6,
+# liblz4-1, libreadline8t64, libssl3t64, libzstd1, zlib1g, sensible-utils) are frozen by the base
+# image digest; their file identity is measured in-image and bound to build-provenance.json.
 ARG POSTGRESQL_CLIENT_18_VERSION="18.4-1.pgdg13+1"
+ARG LIBPQ5_VERSION="18.4-1.pgdg13+1"
+ARG POSTGRESQL_CLIENT_COMMON_VERSION="293.pgdg13+1"
 ARG PGDG_KEY_SHA256="0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76"
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS pg-client-base
 ARG POSTGRESQL_CLIENT_18_VERSION
+ARG LIBPQ5_VERSION
+ARG POSTGRESQL_CLIENT_COMMON_VERSION
 ARG PGDG_KEY_SHA256
-# Install ONLY the pinned client, verifying the base distro, the official key hash and the exact
-# package version; assert the binaries are major 18, dynamically resolvable and that NO server binary
-# is present; then drop the download tools + apt lists (keep ca-certificates for runtime HTTPS).
+# Install ONLY the pinned client closure, verifying the base distro, the official key hash and the
+# EXACT package versions; assert the binaries are major 18, dynamically resolvable and that NO server
+# binary is present; then drop the download tools + apt lists (keep ca-certificates for runtime HTTPS).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
@@ -37,8 +45,13 @@ RUN set -eux; \
     echo "${PGDG_KEY_SHA256}  /usr/share/keyrings/pgdg.asc" | sha256sum -c -; \
     printf 'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: %s-pgdg\nComponents: main\nSigned-By: /usr/share/keyrings/pgdg.asc\nArchitectures: %s\n' "$VERSION_CODENAME" "$ARCH" > /etc/apt/sources.list.d/pgdg.sources; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "postgresql-client-18=${POSTGRESQL_CLIENT_18_VERSION}"; \
+    apt-get install -y --no-install-recommends \
+        "postgresql-client-common=${POSTGRESQL_CLIENT_COMMON_VERSION}" \
+        "libpq5=${LIBPQ5_VERSION}" \
+        "postgresql-client-18=${POSTGRESQL_CLIENT_18_VERSION}"; \
     dpkg-query -W -f='${Version}' postgresql-client-18 | grep -qx "${POSTGRESQL_CLIENT_18_VERSION}"; \
+    dpkg-query -W -f='${Version}' libpq5 | grep -qx "${LIBPQ5_VERSION}"; \
+    dpkg-query -W -f='${Version}' postgresql-client-common | grep -qx "${POSTGRESQL_CLIENT_COMMON_VERSION}"; \
     test -x /usr/lib/postgresql/18/bin/pg_restore; \
     test -x /usr/lib/postgresql/18/bin/pg_dump; \
     /usr/lib/postgresql/18/bin/pg_restore --version | grep -Eq 'pg_restore \(PostgreSQL\) 18\.'; \
@@ -78,7 +91,14 @@ COPY apps/api/migrations ./migrations
 COPY apps/api/alembic.ini ./alembic.ini
 COPY apps/api/Dockerfile ./Dockerfile
 COPY apps/api/authorization-trust-root.json ./authorization-trust-root.json
+COPY apps/api/postgresql-client-18-runtime.lock.json ./postgresql-client-18-runtime.lock.json
 RUN uv sync --frozen --no-dev
+
+# Verify the INSTALLED PostgreSQL 18 client closure matches the committed lock EXACTLY (fail-closed;
+# no fallback, no regeneration). Runs before provenance generation so a drifted closure stops the
+# build here.
+RUN /app/.venv/bin/python -m cestaplan_api.provenance.verify_lock \
+        /app/postgresql-client-18-runtime.lock.json
 
 # 3) Immutable build provenance: a canonical, reproducible document over the runtime bundle.
 #    The commit is resolved from BUILD_COMMIT_SHA > RAILWAY_GIT_COMMIT_SHA > APP_COMMIT_SHA; every
