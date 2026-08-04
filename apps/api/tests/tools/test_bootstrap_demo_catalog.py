@@ -334,3 +334,56 @@ def test_prices_carry_the_demo_label_markers(db_session: Session) -> None:
     assert prices
     assert all(p.source_type == "demo" and p.is_synthetic is True for p in prices)
     assert all(p.source_type != "confirmed_external" for p in prices)
+
+
+# --------------------------------------------------------------------------- #
+# demo recipe ingredient units must be the DATASET base unit (costable), even when the
+# ingredient is REUSED from a pre-existing row whose default_unit differs.
+# --------------------------------------------------------------------------- #
+def _one_demo_recipe_ingredient(db: Session, canonical: str):
+    return db.execute(
+        select(RecipeIngredient)
+        .join(Recipe, Recipe.id == RecipeIngredient.recipe_id)
+        .where(Recipe.is_synthetic.is_(True), RecipeIngredient.canonical_name == canonical)
+    ).scalars().first()
+
+
+def test_reused_ingredient_recipe_uses_dataset_unit_not_default_unit(db_session: Session) -> None:
+    seed_demo._wipe_synthetic(db_session)
+    db_session.execute(delete(ProviderActivation))
+    db_session.flush()
+    # A pre-existing NON-synthetic "cebolla" in a human-friendly unit (dataset base unit is "g").
+    db_session.add(Ingredient(canonical_name="cebolla", display_name="Cebolla",
+                              category_code="verduras", default_unit="unidad", is_synthetic=False))
+    db_session.add(ProviderActivation(
+        provider_code="demo", data_rights_status="own_synthetic",
+        authorization_status="verified", license_basis="own_synthetic"))
+    db_session.flush()
+    boot.bootstrap(db_session, activate=True)
+    ri = _one_demo_recipe_ingredient(db_session, "cebolla")
+    assert ri is not None
+    assert ri.unit == "g"  # dataset base unit, NOT the reused row's "unidad"
+    # the reused ingredient row itself is unchanged (still non-synthetic, still "unidad").
+    ing = db_session.execute(
+        select(Ingredient).where(Ingredient.canonical_name == "cebolla")).scalar_one()
+    assert ing.is_synthetic is False and ing.default_unit == "unidad"
+
+
+def test_self_heals_existing_demo_recipe_ingredient_units(db_session: Session) -> None:
+    seed_demo._wipe_synthetic(db_session)
+    db_session.execute(delete(ProviderActivation))
+    db_session.flush()
+    db_session.add(ProviderActivation(
+        provider_code="demo", data_rights_status="own_synthetic",
+        authorization_status="verified", license_basis="own_synthetic"))
+    db_session.flush()
+    boot.bootstrap(db_session, activate=True)          # first load (correct units)
+    ri = _one_demo_recipe_ingredient(db_session, "cebolla")
+    assert ri is not None and ri.unit == "g"
+    ri.unit = "unidad"                                  # corrupt an existing demo unit
+    db_session.flush()
+    diff = boot.bootstrap(db_session, activate=True)    # re-run -> self-heal
+    assert diff.models["recipe_ingredient"].updated >= 1
+    assert diff.models["recipe_ingredient"].created == 0
+    db_session.refresh(ri)
+    assert ri.unit == "g"
