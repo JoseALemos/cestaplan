@@ -67,6 +67,17 @@ DEMO_PROVIDER_CODE = "demo"
 _RANDOM_SEED = 20260721  # SAME seed as seed_demo, so product brand names are byte-stable.
 _UNIT_PRICE_Q = Decimal("0.000001")
 _PRICE_TTL_DAYS = 30
+# The canonical base unit each ingredient is sold/measured in per the demo dataset (g|ml|unit).
+# A demo recipe MUST express its quantities in this unit — matching the demo product's package
+# unit and the conversion_factor=1 mapping — so costing resolves. When an ingredient is REUSED
+# from a pre-existing row whose declared ``default_unit`` differs (e.g. a human-friendly
+# "unidad"/"cucharadita"), the recipe must still use the dataset base unit, not that default_unit,
+# or the line becomes uncostable (recipe-unit vs product-unit mismatch, no conversion).
+_UNIT_BY_NAME: dict[str, str] = {spec["name"]: spec["unit"] for spec in seed_data.INGREDIENTS}
+
+
+def _recipe_unit(canonical_name: str, ingredient: Ingredient) -> str:
+    return _UNIT_BY_NAME.get(canonical_name) or ingredient.default_unit or "g"
 
 
 class DemoBootstrapError(RuntimeError):
@@ -362,6 +373,18 @@ def bootstrap(session: Session, *, activate: bool) -> BootstrapDiff:
         if len(existing) > 1:
             raise DemoBootstrapError("demo_recipe_identity_ambiguous", title)
         if existing:
+            # Self-heal: an earlier bootstrap may have stored a reused ingredient's declared
+            # default_unit (e.g. "unidad") instead of the dataset base unit, leaving the line
+            # uncostable. Correct ONLY the unit of this demo recipe's own ingredient rows; never
+            # touch a non-synthetic recipe. Idempotent (a no-op once units are correct).
+            for ri in session.execute(
+                select(RecipeIngredient).where(
+                    RecipeIngredient.recipe_id == existing[0].id)
+            ).scalars():
+                want = _UNIT_BY_NAME.get(ri.canonical_name)
+                if want and ri.unit != want:
+                    ri.unit = want
+                    diff.m("recipe_ingredient").updated += 1
             diff.m("recipe").reused += 1
             continue
         recipe = Recipe(
@@ -381,7 +404,7 @@ def bootstrap(session: Session, *, activate: bool) -> BootstrapDiff:
             session.add(RecipeIngredient(
                 recipe_id=recipe.id, ingredient_id=ingredient.id, canonical_name=canonical_name,
                 display_name=ingredient.display_name, quantity=_d(quantity),
-                unit=ingredient.default_unit or "g", optional=optional,
+                unit=_recipe_unit(canonical_name, ingredient), optional=optional,
                 substitution_group=subgroup,
             ))
             diff.m("recipe_ingredient").created += 1
