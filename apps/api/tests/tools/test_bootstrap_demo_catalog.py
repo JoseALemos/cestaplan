@@ -12,7 +12,7 @@ from __future__ import annotations
 import socket
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import (
@@ -25,6 +25,7 @@ from cestaplan_api.models import (
     RecipeIngredient,
     Retailer,
 )
+from cestaplan_api.scripts import seed_demo
 from cestaplan_api.seed import data as seed_data
 from cestaplan_api.services.catalog_readiness import catalog_readiness_report
 from cestaplan_api.tools import bootstrap_demo_catalog as boot
@@ -36,7 +37,17 @@ _OVERLAP_NAMES = [spec["name"] for spec in seed_data.INGREDIENTS[:17]]  # collid
 
 
 def _seed_production_like_base(db: Session) -> dict[str, object]:
-    """Recreate the prod situation inside the test transaction and return baseline counts."""
+    """Recreate the prod situation inside the test transaction and return baseline counts.
+
+    The suite's session-scoped ``_ensure_demo_seed`` fixture (tests/api) may have COMMITTED the
+    synthetic demo catalogue. We start from a clean synthetic universe *within this rolled-back
+    transaction* (wipe synthetic rows + clear activations) so the tool is exercised on a fresh
+    slate; the teardown rollback restores whatever the session seed committed. This wipe runs in
+    test SETUP only — never under the SQL listener that asserts the tool emits no DELETE.
+    """
+    seed_demo._wipe_synthetic(db)
+    db.execute(delete(ProviderActivation))
+    db.flush()
     # A real chain with a couple of real products that carry NO price (must never be touched).
     real = Retailer(slug="real-chain-x", name="Real Chain X", adapter_key="parsebot",
                     is_synthetic=False)
