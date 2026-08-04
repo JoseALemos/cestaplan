@@ -101,13 +101,24 @@ class SeedCandidateProvider:
     """Candidates ARE the seeded recipes filtered to the requested meal types."""
 
     def get_candidates(self, db: Session, request: CandidateRequest) -> CandidateBundle:
-        return CandidateBundle(build_seed_candidates(db, request.requested_types))
+        return CandidateBundle(
+            build_seed_candidates(db, request.requested_types, request.allow_list))
 
 
 def build_seed_candidates(
-    db: Session, requested_types: set[str]
+    db: Session, requested_types: set[str], allow_list: list[str] | None = None
 ) -> list[CandidateRecipeDTO]:
-    """Public seeded recipes filtered to the requested meal types (allergens derived)."""
+    """Public seeded recipes filtered to the requested meal types (allergens derived).
+
+    When ``allow_list`` is a non-empty set of canonical ingredient names PRICED by the selected
+    retailer (the caller passes the retailer-scoped catalogue), a recipe is offered ONLY when every
+    MANDATORY (non-optional) ingredient is priceable by that chain. This keeps the optimizer from
+    building a plan out of recipes the chosen chain cannot cost — which would otherwise surface as a
+    plan full of "unavailable" line costs. Optional ingredients may be unpriced (mirrors
+    ``planner_preflight._count_costable_recipes``). An empty/absent allow_list disables the filter
+    (backward-compatible: a retailer with no priced catalogue still yields candidates).
+    """
+    priceable = set(allow_list) if allow_list else None
     ingredient_allergens = {
         ing_id: set(codes or [])
         for ing_id, codes in db.execute(
@@ -125,6 +136,12 @@ def build_seed_candidates(
     for recipe in recipes:
         meal_types = set(recipe.meal_types or [])
         if requested_types and not (meal_types & requested_types):
+            continue
+
+        # Skip recipes the selected chain cannot fully cost (every mandatory ingredient priced).
+        if priceable is not None and not all(
+            ri.canonical_name in priceable for ri in recipe.ingredients if not ri.optional
+        ):
             continue
 
         ingredients: list[RecipeIngredientDTO] = []
