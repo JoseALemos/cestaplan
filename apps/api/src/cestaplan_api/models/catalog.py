@@ -327,3 +327,48 @@ class IngredientProductMapping(BaseModel):
 
     ingredient: Mapped[Ingredient] = relationship(back_populates="product_mappings")
     product: Mapped[Product] = relationship()
+
+
+class IngredientAlias(BaseModel):
+    """A known name variant that resolves to a canonical :class:`Ingredient`.
+
+    Ingredient identity was fractured: the same real ingredient existed as a slug row
+    (``aceite_oliva``) and as accented/plural/spaced rows (``aceite de oliva``). The
+    consolidation folds variants into the surviving slug and records each variant name
+    here (normalized: lowercase, accent-free, single-spaced) so future imports re-attach
+    to the survivor instead of forking a new row.
+    """
+
+    __tablename__ = "ingredient_alias"
+    __table_args__ = (Index("ux_ingredient_alias_text", "alias_text", unique=True),)
+
+    alias_text: Mapped[str] = mapped_column(Text, nullable=False)
+    ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+
+    ingredient: Mapped[Ingredient] = relationship()
+
+
+class IngredientMergeAudit(BaseModel):
+    """Reversibility record for a single ingredient fold (survivor <- variant).
+
+    Written whenever a variant row is merged into a survivor and deleted. It is the
+    source of truth the migration's ``downgrade`` reads to reconstitute the deleted row
+    and re-point the FKs, so the consolidation is reversible.
+    """
+
+    __tablename__ = "ingredient_merge_audit"
+    __table_args__ = (
+        Index("ix_ingredient_merge_audit_old", "old_ingredient_id"),
+        Index("ix_ingredient_merge_audit_new", "new_ingredient_id"),
+    )
+
+    old_ingredient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+    old_canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    merged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

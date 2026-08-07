@@ -13,6 +13,8 @@ from cestaplan_api.models.base import BaseModel, TimestampMixin, UUIDMixin
 from cestaplan_api.models.catalog import (
     DataSource,
     Ingredient,
+    IngredientAlias,
+    IngredientMergeAudit,
     IngredientProductMapping,
     Product,
     ProductNutrition,
@@ -100,6 +102,8 @@ __all__ = [
     "HouseholdInvitation",
     "HouseholdMember",
     "Ingredient",
+    "IngredientAlias",
+    "IngredientMergeAudit",
     "IngredientProductMapping",
     "MealPlan",
     "MealRequirement",
