@@ -257,18 +257,34 @@ def _assert_consolidated(engine: sa.engine.Engine) -> None:
 
         # Recipe 3002: the two olive-oil lines collapsed into one carrying the summed quantity.
         b_recipe = conn.execute(sa.text(
-            "SELECT ingredient_id, quantity FROM recipe_ingredient WHERE recipe_id = 3002"
+            "SELECT ingredient_id, quantity, canonical_name "
+            "FROM recipe_ingredient WHERE recipe_id = 3002"
         )).all()
         assert len(b_recipe) == 1
         assert b_recipe[0][0] == _ING["aceite_oliva"]
         assert b_recipe[0][1] == Decimal("10.0000")  # 8 + 2
+        assert b_recipe[0][2] == "aceite_oliva"  # normalized to the survivor slug
 
         # Recipe 3003: survivor's own line absorbed the variant line.
         c_recipe = conn.execute(sa.text(
-            "SELECT quantity FROM recipe_ingredient WHERE recipe_id = 3003"
+            "SELECT quantity, canonical_name FROM recipe_ingredient WHERE recipe_id = 3003"
         )).all()
         assert len(c_recipe) == 1
         assert c_recipe[0][0] == Decimal("35.0000")  # 20 + 15
+        assert c_recipe[0][1] == "aceitunas"
+
+        # The name-based costing gate invariant is restored: EVERY line that resolves to a
+        # fold-target survivor carries that survivor's canonical slug, not the human name.
+        name_mismatch = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM recipe_ingredient ri JOIN ingredient i "
+            "ON ri.ingredient_id = i.id "
+            "WHERE ri.ingredient_id IN (:a, :b) AND ri.canonical_name <> i.canonical_name"
+        ), {"a": _ING["aceite_oliva"], "b": _ING["aceitunas"]}).scalar_one()
+        assert name_mismatch == 0
+        # Line 5001 (recipe 3001) was the human-named variant; it now reads as the slug.
+        assert conn.execute(sa.text(
+            "SELECT canonical_name FROM recipe_ingredient WHERE id = 5001"
+        )).scalar_one() == "aceite_oliva"
 
         # Product-mapping collision: the variant duplicate on product 2002 was dropped.
         assert _mapping_targets(engine, "ingredient_product_mapping") == {
@@ -333,9 +349,14 @@ def test_migration_up_down_up_preserves_invariants(
         _assert_consolidated(engine)
         assert _quantity_sum(engine) == before_sum  # dedup preserves total quantity
 
-        # --- downgrade: EXACT restoration, per row id ---
+        # --- downgrade: EXACT restoration, per row id (ingredient_id, canonical_name, quantity) ---
         command.downgrade(cfg, _BASE)
         assert _recipe_ingredients(engine) == before_recipe
+        # The overwritten canonical_name is restored to the original human name.
+        with engine.connect() as conn:
+            assert conn.execute(sa.text(
+                "SELECT canonical_name FROM recipe_ingredient WHERE id = 5001"
+            )).scalar_one() == "aceite de oliva"
         assert _mapping_targets(engine, "ingredient_product_mapping") == before_products
         assert _mapping_targets(engine, "provider_ingredient_mapping") == before_providers
         assert _pantry_targets(engine) == before_pantry

@@ -22,8 +22,14 @@ Reversibility is exact. For every fold we persist:
   collision, and ``recipe_ingredient`` lines removed by dedup — so they are re-inserted verbatim
   (``ingredient_merge_deleted_row``).
 
-The forward pass does **not** rewrite ``recipe_ingredient.canonical_name`` (a UI-visible label);
-it changes only ``ingredient_id`` — costing joins on the id, so prices are unaffected.
+The forward pass **does** rewrite ``recipe_ingredient.canonical_name`` to the survivor slug on
+every re-pointed line, on purpose: the seed, the ``candidate_providers`` name gate and the LLM
+``allow_list`` all assume ``recipe_ingredient.canonical_name`` equals the canonical slug
+(``ingredient.canonical_name``). The 100 imported recipes broke that invariant by storing human
+names, which is exactly why the gate excludes them and they never cost. Restoring the slug on the
+line re-admits them. This does not affect the UI (it renders ``display_name``). The original human
+name is preserved per row in ``ingredient_merge_fk_relink.old_canonical_name`` for exact
+downgrade. Do not "simplify" this away.
 
 Revision ID: c7f4a1b9e2d3
 Revises: 35d510ebc887
@@ -111,6 +117,7 @@ def upgrade() -> None:
         sa.Column('source_table', sa.Text(), nullable=False),
         sa.Column('source_row_id', sa.BigInteger(), nullable=False),
         sa.Column('old_ingredient_id', sa.BigInteger(), nullable=False),
+        sa.Column('old_canonical_name', sa.Text(), nullable=True),
         sa.Column('id', sa.BigInteger(), sa.Identity(always=False), nullable=False),
         sa.Column('public_id', sa.Uuid(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True),
@@ -213,9 +220,12 @@ def _apply_consolidation(bind: sa.engine.Connection) -> None:
         ).scalar_one()
         audit_id_by_new.setdefault(merge.new_id, audit_id)
 
-        # (3) Re-point simple FKs by row id (canonical_name left untouched on recipe lines).
+        # (3) Re-point simple FKs by row id. For recipe_ingredient this also rewrites
+        # canonical_name to the survivor slug (see module docstring); the old name is kept in
+        # the relink row for exact reversal.
         for table in _SIMPLE_FK_TABLES:
-            _relink_simple(bind, audit_id, table, merge.old_id, merge.new_id)
+            _relink_simple(bind, audit_id, table, merge.old_id, merge.new_id,
+                           merge.new_canonical_name)
 
         # Mapping tables: snapshot+drop unique-index collisions, then relink the rest.
         _reconcile_mapping(
@@ -246,13 +256,32 @@ def _apply_consolidation(bind: sa.engine.Connection) -> None:
 
 
 def _relink_simple(
-    bind: sa.engine.Connection, audit_id: int, table: str, old_id: int, new_id: int
+    bind: sa.engine.Connection, audit_id: int, table: str, old_id: int, new_id: int,
+    new_canonical_name: str,
 ) -> None:
+    if table == "recipe_ingredient":
+        # Capture each line's human name, then re-point AND normalize canonical_name to the slug.
+        rows = bind.execute(
+            sa.text("SELECT id, canonical_name FROM recipe_ingredient WHERE ingredient_id = :old"),
+            {"old": old_id},
+        ).all()
+        for row_id, old_name in rows:
+            _record_relink(bind, audit_id, table, row_id, old_id, old_name)
+        if rows:
+            bind.execute(
+                sa.text(
+                    "UPDATE recipe_ingredient SET ingredient_id = :new, canonical_name = :name "
+                    "WHERE ingredient_id = :old"
+                ),
+                {"old": old_id, "new": new_id, "name": new_canonical_name},
+            )
+        return
+
     row_ids = [r[0] for r in bind.execute(
         sa.text(f"SELECT id FROM {table} WHERE ingredient_id = :old"), {"old": old_id}
     )]
     for row_id in row_ids:
-        _record_relink(bind, audit_id, table, row_id, old_id)
+        _record_relink(bind, audit_id, table, row_id, old_id, None)
     if row_ids:
         bind.execute(
             sa.text(f"UPDATE {table} SET ingredient_id = :new WHERE ingredient_id = :old"),
@@ -281,7 +310,7 @@ def _reconcile_mapping(
         sa.text(f"SELECT id FROM {table} WHERE ingredient_id = :old"), {"old": old_id}
     )]
     for row_id in row_ids:
-        _record_relink(bind, audit_id, table, row_id, old_id)
+        _record_relink(bind, audit_id, table, row_id, old_id, None)
     if row_ids:
         bind.execute(
             sa.text(f"UPDATE {table} SET ingredient_id = :new WHERE ingredient_id = :old"),
@@ -334,15 +363,18 @@ def _dedup_recipe_ingredients(
 
 
 def _record_relink(
-    bind: sa.engine.Connection, audit_id: int, table: str, row_id: int, old_id: int
+    bind: sa.engine.Connection, audit_id: int, table: str, row_id: int, old_id: int,
+    old_canonical_name: str | None,
 ) -> None:
     bind.execute(
         sa.text(
             "INSERT INTO ingredient_merge_fk_relink "
-            "(merge_audit_id, source_table, source_row_id, old_ingredient_id, public_id) "
-            "VALUES (:aid, :tbl, :rid, :old, :public_id)"
+            "(merge_audit_id, source_table, source_row_id, old_ingredient_id, "
+            " old_canonical_name, public_id) "
+            "VALUES (:aid, :tbl, :rid, :old, :oldname, :public_id)"
         ),
-        {"aid": audit_id, "tbl": table, "rid": row_id, "old": old_id, "public_id": uuid.uuid4()},
+        {"aid": audit_id, "tbl": table, "rid": row_id, "old": old_id,
+         "oldname": old_canonical_name, "public_id": uuid.uuid4()},
     )
 
 
@@ -432,17 +464,29 @@ def _revert_consolidation(bind: sa.engine.Connection) -> None:
     )):
         _restore_deleted_row(bind, "recipe_ingredient", row_data)
 
-    # 4. Revert every relink strictly by row id -> each reference returns to its origin.
-    for source_table, source_row_id, old_ingredient_id in bind.execute(sa.text(
-        "SELECT source_table, source_row_id, old_ingredient_id "
-        "FROM ingredient_merge_fk_relink ORDER BY id"
-    )):
+    # 4. Revert every relink strictly by row id -> each reference (and, for recipe lines, the
+    #    overwritten canonical_name) returns to its exact origin.
+    for source_table, source_row_id, old_ingredient_id, old_canonical_name in bind.execute(
+        sa.text(
+            "SELECT source_table, source_row_id, old_ingredient_id, old_canonical_name "
+            "FROM ingredient_merge_fk_relink ORDER BY id"
+        )
+    ):
         if source_table not in _RESTORABLE_TABLES:
             raise RuntimeError(f"unexpected relink source_table: {source_table!r}")
-        bind.execute(
-            sa.text(f"UPDATE {source_table} SET ingredient_id = :old WHERE id = :id"),
-            {"old": old_ingredient_id, "id": source_row_id},
-        )
+        if source_table == "recipe_ingredient":
+            bind.execute(
+                sa.text(
+                    "UPDATE recipe_ingredient "
+                    "SET ingredient_id = :old, canonical_name = :name WHERE id = :id"
+                ),
+                {"old": old_ingredient_id, "name": old_canonical_name, "id": source_row_id},
+            )
+        else:
+            bind.execute(
+                sa.text(f"UPDATE {source_table} SET ingredient_id = :old WHERE id = :id"),
+                {"old": old_ingredient_id, "id": source_row_id},
+            )
 
 
 def _restore_deleted_row(bind: sa.engine.Connection, table: str, row_data) -> None:

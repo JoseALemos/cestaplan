@@ -400,6 +400,11 @@ class IngredientMergeFkRelink(BaseModel):
     source_table: Mapped[str] = mapped_column(Text, nullable=False)
     source_row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     old_ingredient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Only ``recipe_ingredient`` rows carry this: the forward pass overwrites their
+    # ``canonical_name`` with the survivor slug (to restore the invariant the name-based costing
+    # gate relies on), so the original human name is preserved here for exact downgrade. NULL for
+    # every other re-pointed table (they have no ``canonical_name`` to restore).
+    old_canonical_name: Mapped[str | None] = mapped_column(Text)
 
 
 class IngredientMergeDeletedRow(BaseModel):
