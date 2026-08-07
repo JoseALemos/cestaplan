@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from cestaplan_api.ingestion.contracts import LegalStatus, enum_values
@@ -353,9 +353,13 @@ class IngredientAlias(BaseModel):
 class IngredientMergeAudit(BaseModel):
     """Reversibility record for a single ingredient fold (survivor <- variant).
 
-    Written whenever a variant row is merged into a survivor and deleted. It is the
-    source of truth the migration's ``downgrade`` reads to reconstitute the deleted row
-    and re-point the FKs, so the consolidation is reversible.
+    Written whenever a variant row is merged into a survivor and deleted. ``downgrade``
+    reads it to reconstitute the deleted row *byte-for-byte* from ``old_ingredient_snapshot``
+    (a full ``to_jsonb`` capture of the ``ingredient`` row) and, together with
+    :class:`IngredientMergeFkRelink` and :class:`IngredientMergeDeletedRow`, to re-point every
+    foreign key back to its original ingredient. The consolidation is therefore exactly
+    reversible even for groups of 3+ variants and for survivors that already had their own
+    references.
     """
 
     __tablename__ = "ingredient_merge_audit"
@@ -369,6 +373,51 @@ class IngredientMergeAudit(BaseModel):
         BigInteger, ForeignKey("ingredient.id"), nullable=False
     )
     old_canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Full ``to_jsonb(ingredient.*)`` snapshot of the deleted variant row, restored verbatim on
+    # downgrade via ``jsonb_populate_record`` (preserves display_name, category_code,
+    # default_unit, density_g_per_ml, allergen_codes, is_synthetic, public_id, timestamps).
+    old_ingredient_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     merged_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class IngredientMergeFkRelink(BaseModel):
+    """Per-row provenance of every FK re-pointed by a fold, for exact reversal.
+
+    Each row records that ``{source_table}.id = source_row_id`` had its ``ingredient_id``
+    changed from ``old_ingredient_id`` to the fold's survivor. Downgrade reverts strictly by
+    row id (never by ``WHERE ingredient_id = survivor``), so each reference returns to exactly
+    its original ingredient regardless of group size or pre-existing survivor references.
+    """
+
+    __tablename__ = "ingredient_merge_fk_relink"
+    __table_args__ = (Index("ix_ingredient_merge_relink_audit", "merge_audit_id"),)
+
+    merge_audit_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient_merge_audit.id"), nullable=False
+    )
+    source_table: Mapped[str] = mapped_column(Text, nullable=False)
+    source_row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    old_ingredient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class IngredientMergeDeletedRow(BaseModel):
+    """Full snapshot of a row physically deleted by a fold, for exact re-insertion.
+
+    Two cases are captured: (1) product/provider mapping rows dropped because re-pointing them
+    to the survivor would violate a unique index, and (2) a ``recipe_ingredient`` line removed
+    when a fold made a recipe cite the same ingredient twice (dedup, see the migration). For the
+    dedup case ``merged_into_row_id`` names the surviving line whose quantity absorbed this
+    line's, so downgrade can subtract it back before re-inserting this row verbatim.
+    """
+
+    __tablename__ = "ingredient_merge_deleted_row"
+    __table_args__ = (Index("ix_ingredient_merge_deleted_audit", "merge_audit_id"),)
+
+    merge_audit_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient_merge_audit.id"), nullable=False
+    )
+    source_table: Mapped[str] = mapped_column(Text, nullable=False)
+    row_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    merged_into_row_id: Mapped[int | None] = mapped_column(BigInteger)
