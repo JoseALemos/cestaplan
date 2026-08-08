@@ -76,7 +76,7 @@ def test_normal_product() -> None:
     assert p.currency == "EUR"
     assert p.barcode is None  # never invented
     assert p.net_content_quantity is None and p.net_content_unit is None  # §7
-    assert p.price_scope is PriceScope.UNKNOWN  # §6
+    assert p.price_scope is PriceScope.NATIONAL  # §6: dia.es online = nationwide online price
     assert p.observed_at == _NOW  # retrieval time
     assert "source_observed_at=absent" in (p.raw_source_reference or "")
 
@@ -181,5 +181,5 @@ def test_provider_parses_search_items_envelope() -> None:
     provider = ParseBotDiaProvider(client=client)
     products = list(provider.iterate_products(ProductQuery(max_products=10)))
     assert [p.external_product_id for p in products] == ["SKU1", "SKU2"]
-    assert all(p.price_scope is PriceScope.UNKNOWN for p in products)
+    assert all(p.price_scope is PriceScope.NATIONAL for p in products)
     assert all(p.sell_unit is SellUnit.PACKAGE for p in products)

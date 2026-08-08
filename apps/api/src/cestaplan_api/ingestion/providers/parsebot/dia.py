@@ -6,7 +6,9 @@ without inventing anything:
 - barcode / package_quantity / package_unit / net_content are NOT in DIA's search response,
   so they stay ``None`` (never extracted from the name — §7). The product is therefore not
   costable for recipes; that is the honest limit of this endpoint.
-- price_scope is ``unknown`` (no store/zone/postal in the response — §6), never exact_store.
+- price_scope is ``national``: the scraper reads the dia.es online store, whose prices are the
+  single nationwide online price (no per-store/zone/postal variance in the response — §6). It is
+  therefore never exact_store, but the geographic scope IS determinable (nationwide online).
 - observed_at is the retrieval time (``retrieved_at``); the source provides no timestamp, so
   ``source_observed_at`` is recorded as absent in ``raw_source_reference`` (§5).
 - a promotion is only applied when flagged AND the strikethrough price is genuinely higher;
@@ -131,7 +133,7 @@ class ParseBotDiaMapper:
             promotional_price=promotional,
             loyalty_price=loyalty,
             currency=product.prices.currency,  # taken from the response, not assumed
-            price_scope=self.map_scope(),  # unknown — no store/zone evidence
+            price_scope=self.map_scope(),  # national — dia.es online price (see map_scope)
             observed_at=retrieved_at,  # retrieval time; source provides none (§5)
             availability=self.map_availability(product),
             variable_weight=False,
@@ -176,7 +178,10 @@ class ParseBotDiaMapper:
         return None, None  # DIA search exposes no package size (§7)
 
     def map_scope(self) -> PriceScope:
-        return PriceScope.UNKNOWN  # §6: no store/postal/zone in the response
+        # §6: the scraper reads the dia.es ONLINE store, which publishes a single nationwide
+        # online price (no per-store/zone/postal split in the response). That price applies
+        # nationally, so the geographic scope is NATIONAL — determinable, though not store-exact.
+        return PriceScope.NATIONAL
 
     def _unit_price(self, prices: ParseBotDiaPrices) -> tuple[Decimal | None, str | None]:
         unit = _UNIT_ALIASES.get(prices.measure_unit.strip().lower())
