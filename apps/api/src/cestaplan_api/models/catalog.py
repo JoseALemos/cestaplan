@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from cestaplan_api.ingestion.contracts import LegalStatus, enum_values
@@ -327,3 +327,102 @@ class IngredientProductMapping(BaseModel):
 
     ingredient: Mapped[Ingredient] = relationship(back_populates="product_mappings")
     product: Mapped[Product] = relationship()
+
+
+class IngredientAlias(BaseModel):
+    """A known name variant that resolves to a canonical :class:`Ingredient`.
+
+    Ingredient identity was fractured: the same real ingredient existed as a slug row
+    (``aceite_oliva``) and as accented/plural/spaced rows (``aceite de oliva``). The
+    consolidation folds variants into the surviving slug and records each variant name
+    here (normalized: lowercase, accent-free, single-spaced) so future imports re-attach
+    to the survivor instead of forking a new row.
+    """
+
+    __tablename__ = "ingredient_alias"
+    __table_args__ = (Index("ux_ingredient_alias_text", "alias_text", unique=True),)
+
+    alias_text: Mapped[str] = mapped_column(Text, nullable=False)
+    ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+
+    ingredient: Mapped[Ingredient] = relationship()
+
+
+class IngredientMergeAudit(BaseModel):
+    """Reversibility record for a single ingredient fold (survivor <- variant).
+
+    Written whenever a variant row is merged into a survivor and deleted. ``downgrade``
+    reads it to reconstitute the deleted row *byte-for-byte* from ``old_ingredient_snapshot``
+    (a full ``to_jsonb`` capture of the ``ingredient`` row) and, together with
+    :class:`IngredientMergeFkRelink` and :class:`IngredientMergeDeletedRow`, to re-point every
+    foreign key back to its original ingredient. The consolidation is therefore exactly
+    reversible even for groups of 3+ variants and for survivors that already had their own
+    references.
+    """
+
+    __tablename__ = "ingredient_merge_audit"
+    __table_args__ = (
+        Index("ix_ingredient_merge_audit_old", "old_ingredient_id"),
+        Index("ix_ingredient_merge_audit_new", "new_ingredient_id"),
+    )
+
+    old_ingredient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    new_ingredient_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient.id"), nullable=False
+    )
+    old_canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Full ``to_jsonb(ingredient.*)`` snapshot of the deleted variant row, restored verbatim on
+    # downgrade via ``jsonb_populate_record`` (preserves display_name, category_code,
+    # default_unit, density_g_per_ml, allergen_codes, is_synthetic, public_id, timestamps).
+    old_ingredient_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    merged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class IngredientMergeFkRelink(BaseModel):
+    """Per-row provenance of every FK re-pointed by a fold, for exact reversal.
+
+    Each row records that ``{source_table}.id = source_row_id`` had its ``ingredient_id``
+    changed from ``old_ingredient_id`` to the fold's survivor. Downgrade reverts strictly by
+    row id (never by ``WHERE ingredient_id = survivor``), so each reference returns to exactly
+    its original ingredient regardless of group size or pre-existing survivor references.
+    """
+
+    __tablename__ = "ingredient_merge_fk_relink"
+    __table_args__ = (Index("ix_ingredient_merge_relink_audit", "merge_audit_id"),)
+
+    merge_audit_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient_merge_audit.id"), nullable=False
+    )
+    source_table: Mapped[str] = mapped_column(Text, nullable=False)
+    source_row_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    old_ingredient_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Only ``recipe_ingredient`` rows carry this: the forward pass overwrites their
+    # ``canonical_name`` with the survivor slug (to restore the invariant the name-based costing
+    # gate relies on), so the original human name is preserved here for exact downgrade. NULL for
+    # every other re-pointed table (they have no ``canonical_name`` to restore).
+    old_canonical_name: Mapped[str | None] = mapped_column(Text)
+
+
+class IngredientMergeDeletedRow(BaseModel):
+    """Full snapshot of a row physically deleted by a fold, for exact re-insertion.
+
+    Two cases are captured: (1) product/provider mapping rows dropped because re-pointing them
+    to the survivor would violate a unique index, and (2) a ``recipe_ingredient`` line removed
+    when a fold made a recipe cite the same ingredient twice (dedup, see the migration). For the
+    dedup case ``merged_into_row_id`` names the surviving line whose quantity absorbed this
+    line's, so downgrade can subtract it back before re-inserting this row verbatim.
+    """
+
+    __tablename__ = "ingredient_merge_deleted_row"
+    __table_args__ = (Index("ix_ingredient_merge_deleted_audit", "merge_audit_id"),)
+
+    merge_audit_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("ingredient_merge_audit.id"), nullable=False
+    )
+    source_table: Mapped[str] = mapped_column(Text, nullable=False)
+    row_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    merged_into_row_id: Mapped[int | None] = mapped_column(BigInteger)
