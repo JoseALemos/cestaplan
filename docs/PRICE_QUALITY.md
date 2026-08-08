@@ -225,11 +225,16 @@ eso su costeo es por `price_per_unit` y sólo con unidades compatibles.
 Para que el costeo DIA sea posible **y** numéricamente exacto en el flujo real (observación =
 precio del paquete, `unit_price` en la variante), el motor corrige dos puntos:
 
-1. **Persistir el precio unitario en la variante.** `provider_sync._upsert_variant` ahora guarda
-   `unit_price` / `unit_price_unit` en la `ProductVariant` al crearla **y** los refresca en cada
-   re-sync (es metadato de precio, no identidad). Antes quedaban en `None`, así que
-   `classify_variant_costing_mode` veía la variante DIA como `UNRESOLVED`. (Los caminos
-   `targeted_discovery` y `licensed_catalog` ya lo hacían; el sync principal ahora también.)
+1. **Persistir el precio unitario (y el flag de peso variable) en la variante.**
+   `provider_sync._upsert_variant` ahora guarda `unit_price` / `unit_price_unit` **y**
+   `variable_weight` en la `ProductVariant` al crearla, y los refresca en cada re-sync (metadato de
+   precio/venta, no identidad). Antes `unit_price` quedaba en `None` y `variable_weight` caía al
+   default `False`, así que `classify_variant_costing_mode` veía la variante `UNRESOLVED`. (Los
+   caminos `targeted_discovery` y `licensed_catalog` ya lo hacían; el sync principal ahora también.)
+   Esto habilita además el costeo de **peso-variable genuino** en cualquier cadena parsebot (p. ej.
+   Alcampo granel) que antes salía `UNRESOLVED`; es dato correcto, y las cadenas distintas de DIA
+   sólo se publican tras su propio gate de calidad + REVIEW_ONLY (persistir el campo no publica
+   nada por sí solo).
 
 2. **No usar el precio del PAQUETE como precio por-unidad.** La observación guarda
    `amount = product.regular_price` (p. ej. 5,04 € de un pack 6×1 L). La rama `VARIABLE_*` de

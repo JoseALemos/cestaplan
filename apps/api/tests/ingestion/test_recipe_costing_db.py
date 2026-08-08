@@ -14,6 +14,12 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cestaplan_api.ingestion.contracts import PriceScope
+from cestaplan_api.ingestion.providers.contracts import (
+    Availability,
+    ExternalCatalogProduct,
+    SellUnit,
+)
 from cestaplan_api.models import (
     ExternalProduct,
     Ingredient,
@@ -25,6 +31,7 @@ from cestaplan_api.models import (
     RecipeIngredient,
     Retailer,
 )
+from cestaplan_api.services.provider_sync import _upsert_variant
 from cestaplan_api.services.recipe_costing import cost_recipe
 
 _NOW = datetime.now(UTC)
@@ -410,6 +417,97 @@ def test_dia_single_litre_still_correct(db_session: Session) -> None:
     assert result.fully_costable is True
     leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
     assert leche.line_cost == Decimal("0.34")  # 400 ml * 0.84 €/l / 1000
+
+
+def test_dia_zero_unit_price_is_not_costable(db_session: Session) -> None:
+    # L1: a 0 €/l reference must never cost the ingredient at 0 € (which would win the cheapest
+    # race and hand out a free ingredient under DIA's name). Non-positive unit price -> uncostable.
+    rid = _dia_retailer(db_session)
+    _add_dia_leche(db_session, rid, name="Leche DIA 0", amount="0.84", unit_price="0")
+    recipe = _recipe(
+        db_session, [(_LECHE, "leche_entera", "Leche entera", "200", "ml", False)], servings=1
+    )
+    result = cost_recipe(db_session, recipe, "parsebot-dia")
+    assert result.fully_costable is False
+    assert result.total_purchase_cost is None  # never invents a 0 € line
+
+
+def test_non_dia_variable_weight_via_sync_persistence_uses_observed_price(
+    db_session: Session,
+) -> None:
+    # H1: _upsert_variant now persists unit_price for EVERY parsebot chain, enabling genuine
+    # variable-weight costing on non-DIA chains that used to be UNRESOLVED. End-to-end regression:
+    # persist a genuine variable-weight Alcampo item through _upsert_variant, then confirm it costs
+    # by the OBSERVED per-kg price (cand.price), NOT via the DIA unit-price route.
+    rid = db_session.execute(
+        select(Retailer.id).where(Retailer.slug == "alcampo")
+    ).scalar_one_or_none()
+    if rid is None:
+        r = Retailer(slug="alcampo", name="Alcampo", adapter_key="parsebot-alcampo",
+                     is_synthetic=True)
+        db_session.add(r)
+        db_session.flush()
+        rid = r.id
+
+    product = ExternalCatalogProduct(
+        provider="parsebot-alcampo",
+        retailer_slug="alcampo",
+        external_product_id="ALC-MERLUZA",
+        product_name="Merluza a granel",
+        sell_unit=SellUnit.WEIGHT,
+        regular_price=Decimal("12.00"),  # genuine variable weight: the observed price IS €/kg
+        currency="EUR",
+        price_scope=PriceScope.NATIONAL,
+        observed_at=_NOW,
+        availability=Availability.IN_STOCK,
+        variable_weight=True,
+        net_content_quantity=None,
+        net_content_unit=None,
+        unit_price=Decimal("12.00"),
+        unit_price_unit="kg",
+    )
+    variant = _upsert_variant(db_session, rid, product)  # persists unit_price via the sync path
+    assert variant.unit_price == Decimal("12.00")  # H1: persisted for the non-DIA chain too
+    db_session.add(
+        PriceObservation(
+            retailer_id=rid,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal("12.00"),  # observed €/kg sell price
+            currency="EUR",
+            observed_at=_NOW,
+            imported_at=_NOW,
+            valid_from=_NOW,
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    db_session.add(
+        ProviderIngredientMapping(
+            provider_code="parsebot-alcampo",
+            ingredient_id=_ing(db_session, _AVENA),  # reuse a seeded ingredient slot
+            canonical_ingredient_key="avena_copos",
+            retailer_slug="alcampo",
+            external_product_id="ALC-MERLUZA",
+            normalized_product_id=variant.product_id,
+            mapping_status="auto_approved",
+            mapping_method="exact_alias",
+            confidence_score=Decimal("0.96"),
+            unit_compatibility="compatible",
+            required_review=False,
+            active=True,
+        )
+    )
+    db_session.flush()
+    recipe = _recipe(
+        db_session, [(_AVENA, "avena_copos", "Granel", "150", "g", False)], servings=1
+    )
+    result = cost_recipe(db_session, recipe, "parsebot-alcampo")
+    assert result.fully_costable is True
+    line = result.lines[0]
+    assert line.costing_mode == "variable_weight"
+    assert line.line_cost == Decimal("1.80")  # 150 g * 12.00 €/kg / 1000, from the OBSERVED price
 
 
 def test_genuine_variable_weight_uses_observed_price_unchanged(db_session: Session) -> None:

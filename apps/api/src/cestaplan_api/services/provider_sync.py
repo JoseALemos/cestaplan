@@ -212,10 +212,18 @@ def _upsert_variant(
             external_product_id=external.id,
             display_name=product.product_name,
             sell_unit=product.sell_unit.value,
+            variable_weight=product.variable_weight,
             net_content_quantity=product.net_content_quantity,
             net_content_unit=product.net_content_unit.value if product.net_content_unit else None,
             # The reference unit price (e.g. DIA's 0,84 €/l) is what the unit-price costing path
-            # uses; persist it so classify_variant_costing_mode / _cost_candidate can read it.
+            # uses; persist it (with variable_weight) so classify_variant_costing_mode /
+            # _cost_candidate can read them — previously both were dropped, leaving the variant
+            # UNRESOLVED. NOTE: this persists unit_price + variable_weight for EVERY parsebot chain,
+            # which also enables genuine variable-weight costing (e.g. Alcampo bulk) that used to be
+            # UNRESOLVED. This is correct data. Only DIA gets the unit-price-costed exception; any
+            # OTHER chain is published only after its own quality gate + REVIEW_ONLY confirms its
+            # variable-weight regular_price is a real per-unit price, so persisting the fields alone
+            # never publishes anything.
             unit_price=product.unit_price,
             unit_price_unit=product.unit_price_unit,
             active=True,
@@ -223,7 +231,9 @@ def _upsert_variant(
         db.add(variant)
         db.flush()
     else:
-        # Keep the reference unit price fresh on re-sync (it is pricing metadata, not identity).
+        # Keep the sell shape + reference unit price fresh on re-sync (pricing/sell metadata that
+        # can change over time, not identity).
+        variant.variable_weight = product.variable_weight
         variant.unit_price = product.unit_price
         variant.unit_price_unit = product.unit_price_unit
     return variant
