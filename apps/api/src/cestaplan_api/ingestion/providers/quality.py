@@ -30,7 +30,10 @@ from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct
 # substituted for net-content coverage against the identical bar, never lowered. A DIA batch that
 # also lacked unit prices would still fail the floor. Every other provider keeps net-content
 # coverage as the only way to clear the floor.
-UNIT_PRICE_COSTED_PROVIDERS = frozenset({"parsebot-dia"})
+# ``apify-mercadona`` shares DIA's data model: the Apify actor exposes no net content but does
+# publish a real reference unit price ("0.84/L"), so Mercadona products are likewise costed by
+# ``unit_price`` (per-unit), not net content. The scoped substitution above applies to it too.
+UNIT_PRICE_COSTED_PROVIDERS = frozenset({"parsebot-dia", "apify-mercadona"})
 
 
 @dataclass(slots=True)
