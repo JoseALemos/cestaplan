@@ -20,10 +20,13 @@ The mapper turns the Apify Mercadona actor's dataset items into the normalized
 - an unknown schema fingerprint blocks normalization.
 
 Schema pinning: the fingerprint is computed over the REQUIRED core — the always-present,
-stable-typed fields the mapper depends on. ``ean`` and ``promotionPrice`` are ``null`` in the
-capture and legitimately nullable, so they are deliberately EXCLUDED from the core; that keeps the
-fingerprint stable when real data populates them (a string EAN / a float promo price still matches
-the pinned core), while any structural drift in a depended-on field still blocks.
+stable-typed fields the mapper depends on (``name``, ``sku``, ``price``, ``currency``,
+``scrapedAt``, ``inStock``, ``url``). ``ean``/``promotionPrice`` — and now
+``brand``/``category``/``imageUrl``/``unitPrice`` (plus the unconsumed ``unit``) — are legitimately
+nullable/variable across real captures, so they are deliberately EXCLUDED from the core; that keeps
+the fingerprint stable when a real capture is heterogeneous (a product without ``unitPrice`` or
+``brand`` still matches the pinned core and never blocks the batch), while any structural drift in a
+depended-on core field still blocks.
 """
 
 from __future__ import annotations
@@ -67,27 +70,30 @@ _UNIT_PRICE_UNITS = {
     "g": "g",
     "gramo": "g",
 }
-# The required-field ("core") projection whose structure the mapper is pinned to. ``ean`` and
-# ``promotionPrice`` are excluded on purpose (nullable in the capture — see module docstring).
+# The required-field ("core") projection whose structure the mapper is pinned to: only the
+# always-present, stable-typed fields the mapper truly depends on. ``ean``/``promotionPrice`` were
+# already excluded (nullable in the capture); ``brand``/``category``/``imageUrl``/``unitPrice`` join
+# them (same reasoning — legitimately nullable across real, heterogeneous captures, so they must not
+# block a batch). ``unit`` is not consumed by the mapper, so it is out of the core too.
 _REQUIRED = (
-    "brand",
-    "category",
     "currency",
-    "imageUrl",
     "inStock",
     "name",
     "price",
     "scrapedAt",
     "sku",
-    "unit",
-    "unitPrice",
     "url",
 )
 
 
 def _to_decimal(value: object) -> object:
-    # money arrives as a JSON number; go through str to avoid float imprecision.
-    return Decimal(str(value)) if value is not None and not isinstance(value, Decimal) else value
+    # money arrives as a JSON number (or occasionally a string with a comma decimal, e.g. "5,04");
+    # normalise the comma and go through str to avoid float imprecision.
+    if value is None or isinstance(value, Decimal):
+        return value
+    if isinstance(value, str):
+        value = value.strip().replace(",", ".")
+    return Decimal(str(value))
 
 
 Money = Annotated[Decimal, BeforeValidator(_to_decimal)]
@@ -100,24 +106,28 @@ class UnsupportedSchemaError(ProviderError):
 class ApifyMercadonaRecord(BaseModel):
     """One Apify Mercadona dataset item — derived ONLY from the observed capture.
 
-    Critical fields (present in every sampled item) are required; ``ean`` / ``promotionPrice`` are
-    nullable. ``extra="ignore"`` tolerates new fields without failing.
+    Only the depended-on core (``name``/``sku``/``price``/``currency``/``url``/``inStock``/
+    ``scrapedAt``) is required; every other field (``brand``/``category``/``unit``/``unitPrice``/
+    ``imageUrl``/``ean``/``promotionPrice``) is nullable so a heterogeneous real capture never
+    blocks the batch. ``extra="ignore"`` tolerates new fields without failing.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     name: str
-    brand: str
     sku: str
     price: Money
     currency: str
-    unit: str
-    unitPrice: str
-    category: str
     url: str
-    imageUrl: str
     inStock: bool
     scrapedAt: str
+    # Nullable, non-core fields: legitimately absent/variable across real captures, so a missing one
+    # must never block the batch (same reasoning as ean/promotionPrice).
+    brand: str | None = None
+    category: str | None = None
+    unit: str | None = None
+    unitPrice: str | None = None
+    imageUrl: str | None = None
     ean: str | None = None
     promotionPrice: Money | None = None
 
@@ -158,7 +168,7 @@ class ApifyMercadonaMapper:
     provider_code = "apify-mercadona"
     # Fingerprint of the required-field core observed in the sanitized Mercadona sample.
     supported_schema_fingerprints = (
-        "9ceac16cdf5b4eecef265f64757c4f7790263f177fb9158cd75b53a35b412002",
+        "8cf656ce8d16f8c184216900dca24827918759c8f2840c198a97a655c201280c",
     )
 
     def detect_schema(self, records: list[dict]) -> str:
@@ -190,7 +200,9 @@ class ApifyMercadonaMapper:
     ) -> ExternalCatalogProduct:
         regular = record.price
         promotional = self._promotional_price(regular, record.promotionPrice)
-        unit_price, unit_price_unit = _parse_unit_price(record.unitPrice)
+        unit_price, unit_price_unit = (
+            _parse_unit_price(record.unitPrice) if record.unitPrice else (None, None)
+        )
         observed_at = _parse_observed_at(record.scrapedAt)
         return ExternalCatalogProduct(
             provider=self.provider_code,

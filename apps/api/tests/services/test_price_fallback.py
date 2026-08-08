@@ -123,11 +123,22 @@ def test_old_price_requires_user_approval() -> None:
     assert d2.action is FallbackAction.ALTERNATE_VARIANT
 
 
-def test_incompatible_scope_is_not_used() -> None:
+def test_national_scope_satisfies_a_store_requirement() -> None:
+    # A national price applies everywhere, so it satisfies a more specific (exact_store) plan; the
+    # scope change is SURFACED, never silent.
     need = _need(required_scope="exact_store")
-    far = _cand(price_scope="national")
-    d = resolve_with_fallback(need, [far])
-    # national is broader than exact_store -> not usable -> partial (a priced candidate exists)
+    national = _cand(price_scope="national")
+    d = resolve_with_fallback(need, [national])
+    assert d.action is FallbackAction.ALTERNATE_VARIANT
+    assert any("scope changed" in w for w in d.warnings)
+
+
+def test_zonified_scope_never_satisfies_a_national_plan() -> None:
+    # HARD INVARIANT: a zonified (postal_code) price is NEVER served to a no-zone (national) plan.
+    # The candidate is priced but scope-unusable -> honest PARTIAL_COST, never a wrong price.
+    need = _need(required_scope="national")
+    zoned = _cand(price_scope="postal_code")
+    d = resolve_with_fallback(need, [zoned])
     assert d.action is FallbackAction.PARTIAL_COST
 
 

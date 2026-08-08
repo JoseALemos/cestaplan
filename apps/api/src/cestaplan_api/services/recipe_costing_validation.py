@@ -109,7 +109,9 @@ def validate_recipe_costing(
 ) -> RecipeCostingValidationReport:
     """Validate a recipe's costing readiness for ``provider_code`` (read-only, §6)."""
     now = now or datetime.now(UTC)
-    costing = cost_recipe(db, recipe, provider_code, pantry_policy=pantry_policy, now=now)
+    costing = cost_recipe(
+        db, recipe, provider_code, store_id=store_id, pantry_policy=pantry_policy, now=now
+    )
     mandatory = [line for line in costing.lines if not line.optional]
     resolved = [line for line in mandatory if line.costable]
     unresolved = [line for line in mandatory if not line.costable]

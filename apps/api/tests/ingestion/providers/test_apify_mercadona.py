@@ -39,6 +39,7 @@ from cestaplan_api.models import (
     Retailer,
 )
 from cestaplan_api.services.recipe_costing import cost_recipe
+from cestaplan_api.services.store_zone_resolution import resolve_store_for_postal
 
 _FIXTURE = (
     Path(__file__).parents[2] / "fixtures" / "providers" / "apify-mercadona" / "sanitized.json"
@@ -172,9 +173,10 @@ def _mercadona_retailer(db: Session) -> int:
     return r.id
 
 
-def _add_mercadona_leche(db: Session, rid: int) -> None:
+def _add_mercadona_leche(db: Session, rid: int, store_id: int) -> None:
     """A Mercadona 6x1L milk: observation stores the PACKAGE price (5.04 €), the variant carries
-    the real 0.84 €/l unit price — exactly the mapper's output shape (net content None)."""
+    the real 0.84 €/l unit price — exactly the mapper's output shape (net content None). The price
+    is stamped with the delivery-zone ``store_id`` (postal_code scope)."""
     product = Product(name="Leche semidesnatada Hacendado", is_synthetic=False)
     db.add(product)
     db.flush()
@@ -198,6 +200,7 @@ def _add_mercadona_leche(db: Session, rid: int) -> None:
     db.add(
         PriceObservation(
             retailer_id=rid,
+            store_id=store_id,
             product_variant_id=variant.id,
             price_scope="postal_code",
             price_type="regular",
@@ -251,12 +254,72 @@ def _recipe(db: Session, qty: str, unit: str) -> Recipe:
 
 def test_mercadona_recipe_costs_by_unit_price(db_session: Session) -> None:
     # 200 ml must cost from the 0.84 €/l unit price (0.168 -> 0.17 €), NOT the 5.04 € pack price
-    # (which would give a 6x over-cost). This exercises the UNIT_PRICE_COSTED_PROVIDERS path.
+    # (which would give a 6x over-cost). This exercises the UNIT_PRICE_COSTED_PROVIDERS path. The
+    # Mercadona price is zonified, so the plan must carry the delivery-zone store.
     rid = _mercadona_retailer(db_session)
-    _add_mercadona_leche(db_session, rid)
+    store = resolve_store_for_postal(db_session, rid, "28001")
+    _add_mercadona_leche(db_session, rid, store.id)
     recipe = _recipe(db_session, "200", "ml")
-    result = cost_recipe(db_session, recipe, "apify-mercadona")
+    result = cost_recipe(db_session, recipe, "apify-mercadona", store_id=store.id)
     assert result.fully_costable is True
     leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
     assert leche.costing_mode == "variable_volume"
     assert leche.line_cost == Decimal("0.17")
+
+
+def test_mercadona_zone_price_never_crosses_to_another_zone(db_session: Session) -> None:
+    # HARD INVARIANT: a price captured in one delivery zone is NEVER served to a plan of another
+    # zone, nor to a no-zone (national) plan. In those cases the recipe is simply NOT costed —
+    # never costed with the wrong zone's price.
+    rid = _mercadona_retailer(db_session)
+    zone_cordoba = resolve_store_for_postal(db_session, rid, "14006")
+    zone_madrid = resolve_store_for_postal(db_session, rid, "28001")
+    _add_mercadona_leche(db_session, rid, zone_cordoba.id)  # price captured only in 14006
+    recipe = _recipe(db_session, "200", "ml")
+
+    # Same zone -> costed correctly.
+    same = cost_recipe(db_session, recipe, "apify-mercadona", store_id=zone_cordoba.id)
+    assert same.fully_costable is True
+
+    # Different zone -> no price (store_id value-match yields nothing), never the 14006 price.
+    other = cost_recipe(db_session, recipe, "apify-mercadona", store_id=zone_madrid.id)
+    assert other.fully_costable is False
+
+    # No zone (national plan) -> a zonified price never satisfies a national requirement.
+    national = cost_recipe(db_session, recipe, "apify-mercadona", store_id=None)
+    assert national.fully_costable is False
+
+
+def test_zone_store_resolution_is_idempotent(db_session: Session) -> None:
+    rid = _mercadona_retailer(db_session)
+    first = resolve_store_for_postal(db_session, rid, "14006")
+    second = resolve_store_for_postal(db_session, rid, "14006")
+    assert first.id == second.id  # a second resolution never duplicates the zone store
+    assert first.postal_code == "14006" and first.retailer_id == rid
+
+
+def test_capture_missing_optional_fields_does_not_block_batch() -> None:
+    # A real, heterogeneous capture where a product lacks unitPrice/brand/category/imageUrl must
+    # still map — these nullable, non-core fields never block the batch nor change the fingerprint.
+    records = _records()
+    records[0].pop("unitPrice")
+    records[0].pop("brand")
+    records[0].pop("category")
+    records[0].pop("imageUrl")
+    products = ApifyMercadonaMapper().map_products(records, postal_code=_POSTAL)
+    assert len(products) == 5
+    first = next(p for p in products if p.external_product_id == "10381")
+    assert first.unit_price is None and first.unit_price_unit is None
+    assert first.brand is None and first.category is None and first.image_url is None
+    assert first.regular_price == Decimal("5.04")  # core field still parsed
+
+
+def test_price_string_with_comma_decimal_is_parsed() -> None:
+    records = _records()
+    records[0]["price"] = "5,04"  # a comma-decimal string price is normalised by Money
+    # A string price is a different core type -> fingerprint drift is expected to block; assert the
+    # Money parser itself normalises the comma via a direct record validation instead.
+    from cestaplan_api.ingestion.providers.apify.mapping import ApifyMercadonaRecord
+
+    rec = ApifyMercadonaRecord.model_validate(records[0])
+    assert rec.price == Decimal("5.04")

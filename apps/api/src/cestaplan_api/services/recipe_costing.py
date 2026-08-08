@@ -48,6 +48,7 @@ from cestaplan_api.models import (
     RecipeIngredient,
     Retailer,
 )
+from cestaplan_api.services.price_scope import scope_satisfies
 
 _CENT = Decimal("0.01")
 _QTY = Decimal("0.0001")
@@ -293,6 +294,7 @@ def _best_candidate(
     required_dim: str,
     *,
     store_id: int | None,
+    required_scope: str,
     now: datetime,
     provider_code: str,
 ) -> tuple[_Candidate, Decimal, Decimal, Decimal] | None:
@@ -302,6 +304,11 @@ def _best_candidate(
         for v in variants_by_product.get(product_id, []):
             price = prices.current(db, v.id, store_id=store_id, as_of=now, staging=True)
             if price is None:
+                continue
+            # Zone safety (HARD invariant): never cost a plan with a price from the wrong/narrower
+            # area. current() already value-matches store_id; this rejects a zonified price for a
+            # no-zone (national) plan — such a price is otherwise returned when store_id is None.
+            if not scope_satisfies(price.price_scope, required_scope):
                 continue
             mode = classify_variant_costing_mode(
                 sell_unit=v.sell_unit,
@@ -382,7 +389,7 @@ def cost_recipe(
     for ri in recipe.ingredients:
         line = _cost_line(
             db, ri, eligible, variants_by_product, prices,
-            store_id=store_id, now=now, provider_code=provider_code,
+            store_id=store_id, required_scope=required_scope, now=now, provider_code=provider_code,
         )
         result.lines.append(line)
         if ri.optional:
@@ -427,6 +434,7 @@ def _cost_line(
     prices: CurrentPriceService,
     *,
     store_id: int | None,
+    required_scope: str,
     now: datetime,
     provider_code: str,
 ) -> IngredientCostLine:
@@ -455,6 +463,7 @@ def _cost_line(
         required_base,
         required_dim,
         store_id=store_id,
+        required_scope=required_scope,
         now=now,
         provider_code=provider_code,
     )
