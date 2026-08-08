@@ -542,7 +542,7 @@ _SPECS: dict[str, IngredientSpec] = {
     "alubia": IngredientSpec(
         "alubia",
         "legumbres",
-        aliases=("alubia", "alubias", "alubia blanca", "judia blanca", "faba"),
+        aliases=("alubia", "alubias", "alubia blanca", "judia blanca"),
         required_terms=("alubia",),
         excluding_terms=(),
         forbidden_forms=(),
@@ -617,7 +617,7 @@ _SPECS: dict[str, IngredientSpec] = {
     "almendra": IngredientSpec(
         "almendra",
         "frutos_secos",
-        aliases=("almendra", "almendras", "almendra molida", "almendra cruda"),
+        aliases=("almendra", "almendras", "almendra cruda"),
         required_terms=("almendra",),
         excluding_terms=("bebida", "leche", "turron", "sabor"),
         forbidden_forms=(),
