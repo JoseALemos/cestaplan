@@ -6,12 +6,21 @@ that the queue is admin-only. Never touches production.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import ProviderIngredientMapping
+from cestaplan_api.models import (
+    ExternalProduct,
+    PriceObservation,
+    Product,
+    ProductVariant,
+    ProviderIngredientMapping,
+    Retailer,
+)
 from tests.admin.conftest import csrf, login, promote_to_admin, register
 from tests.fixtures.provider_scenarios import ensure_test_ingredient
 
@@ -38,6 +47,86 @@ def _competing(db: Session, key: str, ext: str) -> ProviderIngredientMapping:
     db.add(row)
     db.flush()
     return row
+
+
+def _dia_candidate_with_unit_priced_variant(db: Session, key: str, ext: str) -> int:
+    """A DIA candidate whose stored variant has a €/l unit price but NO net content."""
+    ing = ensure_test_ingredient(db, key)
+    rid = db.execute(select(Retailer.id).where(Retailer.slug == "dia")).scalar_one_or_none()
+    if rid is None:
+        r = Retailer(slug="dia", name="DIA", adapter_key="parsebot-dia", is_synthetic=True)
+        db.add(r)
+        db.flush()
+        rid = r.id
+    product = Product(name="Leche DIA", is_synthetic=False)
+    db.add(product)
+    db.flush()
+    external = ExternalProduct(retailer_id=rid, external_id=ext)
+    db.add(external)
+    db.flush()
+    variant = ProductVariant(
+        retailer_id=rid,
+        external_product_id=external.id,
+        product_id=product.id,
+        display_name="Leche DIA",
+        sell_unit="package",
+        variable_weight=False,
+        net_content_quantity=None,
+        net_content_unit=None,
+        unit_price=Decimal("0.84"),
+        unit_price_unit="l",
+    )
+    db.add(variant)
+    db.flush()
+    db.add(
+        PriceObservation(
+            retailer_id=rid,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal("0.84"),
+            currency="EUR",
+            observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+            imported_at=datetime(2026, 7, 23, tzinfo=UTC),
+            valid_from=datetime(2026, 7, 23, tzinfo=UTC),
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    row = ProviderIngredientMapping(
+        provider_code="parsebot-dia",
+        ingredient_id=ing.id,
+        canonical_ingredient_key=key,
+        retailer_slug="dia",
+        external_product_id=ext,
+        normalized_product_id=product.id,
+        mapping_status="candidate",
+        mapping_method="exact_alias",
+        confidence_score=Decimal("0.9"),
+        required_review=True,
+        active=False,
+        evidence_json={"product_name": "Leche DIA"},
+    )
+    db.add(row)
+    db.flush()
+    return row.id
+
+
+def test_dia_candidate_shows_costable_in_review_panel(
+    client: TestClient, db_session: Session
+) -> None:
+    # M1: the review panel must scope the DIA unit-price exception to the mapping's provider, so a
+    # DIA candidate reads as costable (variable_volume) instead of a misleading UNRESOLVED.
+    mapping_id = _dia_candidate_with_unit_priced_variant(db_session, "leche", "DIA-REVIEW-1")
+    register(client, "adm-dia@x.com")
+    login(client, "adm-dia@x.com")
+    promote_to_admin(db_session, "adm-dia@x.com")
+
+    detail = client.get(f"{_BASE}/{mapping_id}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["product_costing_mode"] == "variable_volume"
+    assert body["costing_eligible"] is True
 
 
 def test_queue_requires_admin(client: TestClient, db_session: Session) -> None:

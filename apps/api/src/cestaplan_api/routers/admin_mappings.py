@@ -77,6 +77,9 @@ def _variant_facts(db: DbSession, row: ProviderIngredientMapping) -> dict[str, A
         unit_price=var.unit_price,
         unit_price_unit=var.unit_price_unit,
         has_price=price is not None,
+        # Scope the DIA (unit-price-costed) exception to the mapping's provider, so the review
+        # panel shows DIA as costable instead of a misleading UNRESOLVED (matches the costing path).
+        provider_code=row.provider_code,
     )
     return {
         "net_content": (

@@ -256,7 +256,6 @@ def _cost_candidate(
             required_base, required_dim, v.net_content_quantity, v.net_content_unit, cand.price
         )
     if mode in (ProductCostingMode.VARIABLE_WEIGHT, ProductCostingMode.VARIABLE_VOLUME):
-        # Genuine per-weight/volume sell price (not the informational unit_price of a package).
         if v.unit_price is None or v.unit_price_unit is None:
             return None
         sell = _to_base(Decimal("1"), v.unit_price_unit)
@@ -266,7 +265,21 @@ def _cost_candidate(
         purchased_base = required_base.to_integral_value(rounding=ROUND_CEILING)
         if purchased_base < 1:
             purchased_base = Decimal("1")
-        price_per_base = cand.price / sell[0]  # unit_price is per unit_price_unit
+        # Which figure is the genuine price per unit_price_unit?
+        #  - REAL variable weight/volume (variable_weight=True): the OBSERVED price already IS the
+        #    €/kg or €/l sell price -> use cand.price (unchanged behaviour, never regressed).
+        #  - unit-price-costed provider (DIA): the mode was set by the scoped exception with
+        #    variable_weight=False, so the observed price is the PACKAGE price (e.g. 5.04 EUR for a
+        #    6x1 L pack). The real per-litre/kg price is the variant's unit_price (0.84 EUR/l);
+        #    using the package price would multiply the cost by the pack size. Use v.unit_price.
+        per_unit_price = cand.price if v.variable_weight else v.unit_price
+        # A non-positive per-unit price is never buyable: without this guard a 0 €/l reference
+        # would make the line 0 € and win the cheapest-candidate race, silently costing an
+        # ingredient at zero under a provider's name (cand.price>0 is already checked above, so
+        # this specifically protects the DIA unit-price path).
+        if per_unit_price <= 0:
+            return None
+        price_per_base = per_unit_price / sell[0]  # price is per one unit_price_unit
         return purchased_base, purchased_base, (purchased_base * price_per_base)
     return None
 
@@ -281,6 +294,7 @@ def _best_candidate(
     *,
     store_id: int | None,
     now: datetime,
+    provider_code: str,
 ) -> tuple[_Candidate, Decimal, Decimal, Decimal] | None:
     """Cheapest buyable candidate for the required amount: min total line cost, then price, id."""
     best: tuple[_Candidate, Decimal, Decimal, Decimal] | None = None
@@ -297,6 +311,7 @@ def _best_candidate(
                 unit_price=v.unit_price,
                 unit_price_unit=v.unit_price_unit,
                 has_price=True,
+                provider_code=provider_code,
             )
             if mode is ProductCostingMode.UNRESOLVED:
                 continue
@@ -365,7 +380,10 @@ def cost_recipe(
     any_priced = False
 
     for ri in recipe.ingredients:
-        line = _cost_line(db, ri, eligible, variants_by_product, prices, store_id=store_id, now=now)
+        line = _cost_line(
+            db, ri, eligible, variants_by_product, prices,
+            store_id=store_id, now=now, provider_code=provider_code,
+        )
         result.lines.append(line)
         if ri.optional:
             # Default optional policy (§1/§4): optionals are EXCLUDED from the costed basket so a
@@ -410,6 +428,7 @@ def _cost_line(
     *,
     store_id: int | None,
     now: datetime,
+    provider_code: str,
 ) -> IngredientCostLine:
     line = IngredientCostLine(
         ingredient_id=ri.ingredient_id,
@@ -437,6 +456,7 @@ def _cost_line(
         required_dim,
         store_id=store_id,
         now=now,
+        provider_code=provider_code,
     )
     if best is None:
         line.reason = f"{ri.canonical_name}: sin producto costeable (precio/unidad/envase)"

@@ -90,6 +90,53 @@ def test_quality_empty_is_quarantined_when_had_previous() -> None:
     assert evaluate_quality([], _settings()).status == "insufficient"
 
 
+# --- per-provider floor policy (§R) — DIA is costed by unit price, not net content ---------- #
+def _dia_no_net_content(external_id: str, **over: Any) -> ExternalCatalogProduct:
+    """A DIA-shaped product: national online price, a real unit price, NO net content."""
+    kw: dict[str, Any] = {
+        "provider": "parsebot-dia",
+        "net_content_quantity": None,
+        "net_content_unit": None,
+        "unit_price": Decimal("0.84"),
+        "unit_price_unit": "l",
+        "price_scope": PriceScope.NATIONAL,
+    }
+    kw.update(over)
+    return _p(external_id, **kw)
+
+
+def test_dia_accepted_without_net_content_when_unit_price_present() -> None:
+    # DIA net content is 0, but the national unit price is present -> package floor is satisfied by
+    # unit-price coverage, so the batch is accepted (§R per-provider policy).
+    products = [_dia_no_net_content(f"D{i}") for i in range(5)]
+    report = evaluate_quality(products, _settings())
+    assert report.package_unit_coverage == 0.0
+    assert report.unit_price_coverage == 1.0
+    assert "package_coverage_below_floor" not in (report.reasons or [])
+    assert "geographic_scope_undeterminable" not in (report.reasons or [])
+    assert report.status == "accepted"
+
+
+def test_same_batch_from_other_provider_is_insufficient() -> None:
+    # Identical shape (no net content, unit price present) from a NON-DIA provider is NOT relaxed:
+    # the global net-content package floor still applies -> insufficient.
+    products = [_dia_no_net_content(f"D{i}", provider="parsebot-other") for i in range(5)]
+    report = evaluate_quality(products, _settings())
+    assert "package_coverage_below_floor" in (report.reasons or [])
+    assert report.status == "insufficient"
+
+
+def test_dia_without_unit_price_still_insufficient() -> None:
+    # The substitution is honest: a DIA batch that ALSO lacks unit prices has nothing to cost by,
+    # so the package floor is not waived and the batch stays insufficient.
+    products = [
+        _dia_no_net_content(f"D{i}", unit_price=None, unit_price_unit=None) for i in range(5)
+    ]
+    report = evaluate_quality(products, _settings())
+    assert "package_coverage_below_floor" in (report.reasons or [])
+    assert report.status == "insufficient"
+
+
 # --- dedup ----------------------------------------------------------------- #
 def test_same_barcode_same_everything_is_review() -> None:
     clusters = find_duplicate_candidates(

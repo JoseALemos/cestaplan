@@ -23,6 +23,7 @@ from cestaplan_api.ingestion.providers.contracts import (
     ProductCostingMode,
     SellUnit,
 )
+from cestaplan_api.ingestion.providers.quality import UNIT_PRICE_COSTED_PROVIDERS
 from cestaplan_api.models import ProviderActivation
 
 # A capture must clear this fraction of individually-costable products to be costable overall.
@@ -34,10 +35,17 @@ _VOLUME_UNITS = (ContentUnit.ML, ContentUnit.L)
 def classify_costing_mode(p: ExternalCatalogProduct) -> ProductCostingMode:
     """Decide how a single product can cost a recipe (spec audit) — confirmed fields only.
 
-    A bare ``unit_price`` is NEVER sufficient: a fixed package that merely shows a reference
-    price per kg/l is ``UNRESOLVED`` (its real content is unknown, so a fractional amount can't
-    be costed). Only a known net content (fixed package), a genuine sale by weight/volume, or a
-    known unit count makes a product costable.
+    A bare ``unit_price`` is NEVER sufficient in the general case: a fixed package that merely
+    shows a reference price per kg/l is ``UNRESOLVED`` (its real content is unknown, so a
+    fractional amount can't be costed). Only a known net content (fixed package), a genuine sale
+    by weight/volume, or a known unit count makes a product costable.
+
+    Scoped exception — providers in :data:`quality.UNIT_PRICE_COSTED_PROVIDERS`: DIA (dia.es
+    online) exposes NO net content but publishes a real *national* unit price ("0,84 €/l"), so
+    its products are costed by that unit price as variable weight/volume. This applies ONLY to
+    those providers and ONLY when ``unit_price_unit`` is a known mass/volume code (kg/g, l/ml);
+    a missing or foreign unit stays ``UNRESOLVED`` (never guessed). Every other provider keeps
+    the strict rule that a lone reference ``unit_price`` is not costable.
     """
     if p.regular_price is None or not p.external_product_id:
         return ProductCostingMode.UNRESOLVED
@@ -57,6 +65,13 @@ def classify_costing_mode(p: ExternalCatalogProduct) -> ProductCostingMode:
             return ProductCostingMode.VARIABLE_WEIGHT
         if p.sell_unit is SellUnit.VOLUME and upu in ("l", "ml"):
             return ProductCostingMode.VARIABLE_VOLUME
+    # 3b. scoped exception: a unit-price-costed provider (DIA) with a compatible mass/volume unit
+    # is costed by its national unit price, even without net content. Foreign/missing unit -> no.
+    if p.provider in UNIT_PRICE_COSTED_PROVIDERS and p.unit_price is not None:
+        if upu in ("kg", "g"):
+            return ProductCostingMode.VARIABLE_WEIGHT
+        if upu in ("l", "ml"):
+            return ProductCostingMode.VARIABLE_VOLUME
     # 4. anything else (incl. a lone reference unit_price on a fixed package) cannot cost.
     return ProductCostingMode.UNRESOLVED
 
@@ -70,9 +85,18 @@ def classify_variant_costing_mode(
     unit_price: Decimal | None,
     unit_price_unit: str | None,
     has_price: bool,
+    provider_code: str | None = None,
 ) -> ProductCostingMode:
     """Same costing rules as :func:`classify_costing_mode`, but from stored ``ProductVariant``
-    fields (strings) + whether a usable price exists. A bare ``unit_price`` is never enough."""
+    fields (strings) + whether a usable price exists. A bare ``unit_price`` is never enough.
+
+    ``provider_code`` defaults to ``None`` — that reproduces the historical behaviour EXACTLY, so
+    callers that do not pass it see no change. When it names a provider in
+    :data:`quality.UNIT_PRICE_COSTED_PROVIDERS` (DIA) and a compatible mass/volume ``unit_price``
+    is present, the variant is costed by that national unit price as variable weight/volume even
+    without net content — an incompatible/missing unit stays ``UNRESOLVED`` (never guessed). No
+    other provider is affected.
+    """
     if not has_price:
         return ProductCostingMode.UNRESOLVED
     ncu = (net_content_unit or "").lower()
@@ -87,6 +111,12 @@ def classify_variant_costing_mode(
         if (sell_unit or "").lower() == "weight" and upu in ("kg", "g"):
             return ProductCostingMode.VARIABLE_WEIGHT
         if (sell_unit or "").lower() == "volume" and upu in ("l", "ml"):
+            return ProductCostingMode.VARIABLE_VOLUME
+    # Scoped exception: DIA & co. are costed by a national unit price, not net content.
+    if provider_code in UNIT_PRICE_COSTED_PROVIDERS and unit_price is not None:
+        if upu in ("kg", "g"):
+            return ProductCostingMode.VARIABLE_WEIGHT
+        if upu in ("l", "ml"):
             return ProductCostingMode.VARIABLE_VOLUME
     return ProductCostingMode.UNRESOLVED
 

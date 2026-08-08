@@ -123,6 +123,7 @@ def _provider_basket(
                         unit_price=v.unit_price,
                         unit_price_unit=v.unit_price_unit,
                         has_price=True,
+                        provider_code=provider_code,
                     )
                     if mode is ProductCostingMode.UNRESOLVED:
                         unresolved += 1
