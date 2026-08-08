@@ -214,10 +214,18 @@ def _upsert_variant(
             sell_unit=product.sell_unit.value,
             net_content_quantity=product.net_content_quantity,
             net_content_unit=product.net_content_unit.value if product.net_content_unit else None,
+            # The reference unit price (e.g. DIA's 0,84 €/l) is what the unit-price costing path
+            # uses; persist it so classify_variant_costing_mode / _cost_candidate can read it.
+            unit_price=product.unit_price,
+            unit_price_unit=product.unit_price_unit,
             active=True,
         )
         db.add(variant)
         db.flush()
+    else:
+        # Keep the reference unit price fresh on re-sync (it is pricing metadata, not identity).
+        variant.unit_price = product.unit_price
+        variant.unit_price_unit = product.unit_price_unit
     return variant
 
 

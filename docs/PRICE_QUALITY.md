@@ -220,15 +220,30 @@ eso su costeo es por `price_per_unit` y sólo con unidades compatibles.
   neto None) da `costing_eligibility = sufficient` → `_onboard_one` escribe
   `data_quality_status = "accepted"`. Ésta es la vía por la que DIA llega a `accepted`.
 
-> **Gaps operativos pendientes (NO resueltos en este cambio).** Para que el costeo DIA sea posible
-> Y numéricamente exacto de extremo a extremo en producción faltan dos piezas del camino de sync
-> (`services/provider_sync.py`), que se dejan señaladas al owner:
-> 1. `_upsert_variant` **no persiste** `variant.unit_price` / `unit_price_unit` (sólo sell_unit y
->    net content). Sin ese dato, la variante DIA almacenada tiene `unit_price = None` y
->    `classify_variant_costing_mode` la vería `UNRESOLVED`. Los caminos `targeted_discovery` y
->    `licensed_catalog` sí lo persisten; el sync principal no.
-> 2. `_append_observation` guarda `amount = product.regular_price` (precio de estante), mientras
->    que el costeo `VARIABLE_*` aguas abajo (`_cost_candidate`) usa ese `amount` como precio por
->    unidad base. Coinciden sólo cuando el envase equivale a 1 unidad del `unit_price_unit` (p. ej.
->    leche 1 L). Para un costeo exacto en tamaños arbitrarios, el sync debería persistir/usar el
->    `unit_price` (€/l) de DIA. No se toca el costeo aguas abajo aquí por indicación del owner.
+### Costeo por precio-unitario de extremo a extremo (dos correcciones del motor)
+
+Para que el costeo DIA sea posible **y** numéricamente exacto en el flujo real (observación =
+precio del paquete, `unit_price` en la variante), el motor corrige dos puntos:
+
+1. **Persistir el precio unitario en la variante.** `provider_sync._upsert_variant` ahora guarda
+   `unit_price` / `unit_price_unit` en la `ProductVariant` al crearla **y** los refresca en cada
+   re-sync (es metadato de precio, no identidad). Antes quedaban en `None`, así que
+   `classify_variant_costing_mode` veía la variante DIA como `UNRESOLVED`. (Los caminos
+   `targeted_discovery` y `licensed_catalog` ya lo hacían; el sync principal ahora también.)
+
+2. **No usar el precio del PAQUETE como precio por-unidad.** La observación guarda
+   `amount = product.regular_price` (p. ej. 5,04 € de un pack 6×1 L). La rama `VARIABLE_*` de
+   `recipe_costing._cost_candidate` distingue dos casos con una señal ya presente en la variante,
+   `variable_weight`:
+   - **Peso/volumen variable GENUINO** (`variable_weight = True`, p. ej. pescadería a granel de
+     otra cadena): el precio observado **ya es** el €/kg o €/l de venta → se sigue usando
+     `cand.price` (comportamiento **sin cambios**, sin regresión).
+   - **Proveedor costeado por precio-unitario (DIA)**: el modo `VARIABLE_*` sólo pudo venir de la
+     excepción scoped, con `variable_weight = False`, así que el precio observado es el del
+     **paquete**; el precio real por litro/kg es `variant.unit_price` (0,84 €/l). Se usa
+     `v.unit_price`, **nunca** el precio del paquete (usarlo multiplicaría el coste por el tamaño
+     del pack: 200 ml saldrían a 1,008 € en vez de 0,168 €).
+
+   La distinción es exacta porque un modo `VARIABLE_*` con `variable_weight = False` sólo lo produce
+   la excepción scoped a `UNIT_PRICE_COSTED_PROVIDERS`; ningún otro proveedor ni el peso-variable
+   genuino se ven afectados.

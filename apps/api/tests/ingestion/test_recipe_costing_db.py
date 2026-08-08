@@ -316,30 +316,124 @@ def _dia_retailer(db: Session) -> int:
     return r.id
 
 
-def test_dia_unit_priced_product_is_costed_by_planner(db_session: Session) -> None:
-    # DIA has NO net content but a real national €/l unit price. The planner must cost the recipe
-    # via the VARIABLE_VOLUME mode using the provider-scoped exception (provider_code=parsebot-dia).
-    # NOTE: downstream _cost_candidate uses the observation amount as the per-base price, so we
-    # store the €/l figure (0.84) as the staging price here; see the report's caveat on the sync
-    # path (production stores regular_price, not €/l, and does not yet persist variant.unit_price).
+def _add_dia_leche(
+    db: Session,
+    rid: int,
+    *,
+    name: str,
+    amount: str,
+    unit_price: str,
+    unit_price_unit: str = "l",
+    variable_weight: bool = False,
+    ext: str = "DIA-LECHE",
+) -> None:
+    """A DIA milk with NO net content: the observation stores the PACKAGE price (regular_price),
+    the variant carries the real €/l unit price. This mirrors the real sync flow."""
+    product = Product(name=name, is_synthetic=False)
+    db.add(product)
+    db.flush()
+    external = ExternalProduct(retailer_id=rid, external_id=ext)
+    db.add(external)
+    db.flush()
+    variant = ProductVariant(
+        retailer_id=rid,
+        external_product_id=external.id,
+        product_id=product.id,
+        display_name=name,
+        sell_unit="package",
+        variable_weight=variable_weight,
+        net_content_quantity=None,  # DIA search exposes no net content
+        net_content_unit=None,
+        unit_price=Decimal(unit_price),
+        unit_price_unit=unit_price_unit,
+    )
+    db.add(variant)
+    db.flush()
+    db.add(
+        PriceObservation(
+            retailer_id=rid,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal(amount),  # the PACKAGE price, NOT the €/l
+            currency="EUR",
+            observed_at=_NOW,
+            imported_at=_NOW,
+            valid_from=_NOW,
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    db.add(
+        ProviderIngredientMapping(
+            provider_code="parsebot-dia",
+            ingredient_id=_ing(db, _LECHE),
+            canonical_ingredient_key="leche_entera",
+            retailer_slug="dia",
+            external_product_id=ext,
+            normalized_product_id=product.id,
+            mapping_status="auto_approved",
+            mapping_method="exact_alias",
+            confidence_score=Decimal("0.96"),
+            unit_compatibility="compatible",
+            required_review=False,
+            active=True,
+        )
+    )
+    db.flush()
+
+
+def test_dia_multipack_costs_by_unit_price_not_package_price(db_session: Session) -> None:
+    # (a) DIA 6x1L pack at 5.04 EUR, unit_price 0.84 EUR/l. Recipe needs 200 ml -> cost must come
+    # from the EUR/l unit price (0.168 EUR), NOT the 5.04 EUR pack price (which would give 1.008 EUR
+    # -- a 6x over-cost). Real flow: observation = pack price, variant.unit_price = EUR/l.
     rid = _dia_retailer(db_session)
-    product = Product(name="Leche DIA 1L", is_synthetic=False)
+    _add_dia_leche(db_session, rid, name="Leche DIA 6x1L", amount="5.04", unit_price="0.84")
+    recipe = _recipe(
+        db_session, [(_LECHE, "leche_entera", "Leche entera", "200", "ml", False)], servings=1
+    )
+    result = cost_recipe(db_session, recipe, "parsebot-dia")
+    assert result.fully_costable is True
+    leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
+    assert leche.costing_mode == "variable_volume"
+    assert leche.line_cost == Decimal("0.17")  # 200 ml * 0.84 €/l / 1000 = 0.168 -> 0.17 (NOT 1.01)
+
+
+def test_dia_single_litre_still_correct(db_session: Session) -> None:
+    # (b) DIA 1L at 0,84 €, unit_price 0,84 €/l. 400 ml -> 0.336 -> 0.34 €.
+    rid = _dia_retailer(db_session)
+    _add_dia_leche(db_session, rid, name="Leche DIA 1L", amount="0.84", unit_price="0.84")
+    recipe = _recipe(
+        db_session, [(_LECHE, "leche_entera", "Leche entera", "400", "ml", False)], servings=1
+    )
+    result = cost_recipe(db_session, recipe, "parsebot-dia")
+    assert result.fully_costable is True
+    leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
+    assert leche.line_cost == Decimal("0.34")  # 400 ml * 0.84 €/l / 1000
+
+
+def test_genuine_variable_weight_uses_observed_price_unchanged(db_session: Session) -> None:
+    # (c) Non-regression: a GENUINE variable-weight item (variable_weight=True) on a non-DIA
+    # provider. Its observed price IS the €/kg sell price, so it must keep using the observation
+    # amount (12,00 €/kg), never the variant.unit_price path. 150 g -> 1.80 €.
+    rid = _retailer(db_session)  # slug=_PROV, provider_code=_PROV (not DIA)
+    product = Product(name="Merluza a granel", is_synthetic=False)
     db_session.add(product)
     db_session.flush()
-    external = ExternalProduct(retailer_id=rid, external_id="DIA-LECHE-1")
+    external = ExternalProduct(retailer_id=rid, external_id="VW-MERLUZA")
     db_session.add(external)
     db_session.flush()
     variant = ProductVariant(
         retailer_id=rid,
         external_product_id=external.id,
         product_id=product.id,
-        display_name="Leche DIA 1L",
-        sell_unit="package",
-        variable_weight=False,
-        net_content_quantity=None,  # DIA search exposes no net content
+        display_name="Merluza a granel",
+        sell_unit="weight",
+        variable_weight=True,
+        net_content_quantity=None,
         net_content_unit=None,
-        unit_price=Decimal("0.84"),  # 0,84 €/l
-        unit_price_unit="l",
+        unit_price=Decimal("12.00"),
+        unit_price_unit="kg",
     )
     db_session.add(variant)
     db_session.flush()
@@ -349,7 +443,7 @@ def test_dia_unit_priced_product_is_costed_by_planner(db_session: Session) -> No
             product_variant_id=variant.id,
             price_scope="national",
             price_type="regular",
-            amount=Decimal("0.84"),
+            amount=Decimal("12.00"),  # the genuine €/kg sell price
             currency="EUR",
             observed_at=_NOW,
             imported_at=_NOW,
@@ -360,11 +454,11 @@ def test_dia_unit_priced_product_is_costed_by_planner(db_session: Session) -> No
     )
     db_session.add(
         ProviderIngredientMapping(
-            provider_code="parsebot-dia",
-            ingredient_id=_ing(db_session, _LECHE),
-            canonical_ingredient_key="leche_entera",
-            retailer_slug="dia",
-            external_product_id="DIA-LECHE-1",
+            provider_code=_PROV,
+            ingredient_id=_ing(db_session, _AVENA),  # reuse a seeded ingredient slot
+            canonical_ingredient_key="avena_copos",
+            retailer_slug=_PROV,
+            external_product_id="VW-MERLUZA",
             normalized_product_id=product.id,
             mapping_status="auto_approved",
             mapping_method="exact_alias",
@@ -376,15 +470,13 @@ def test_dia_unit_priced_product_is_costed_by_planner(db_session: Session) -> No
     )
     db_session.flush()
     recipe = _recipe(
-        db_session, [(_LECHE, "leche_entera", "Leche entera", "400", "ml", False)], servings=1
+        db_session, [(_AVENA, "avena_copos", "Granel", "150", "g", False)], servings=1
     )
-
-    result = cost_recipe(db_session, recipe, "parsebot-dia")
-
+    result = cost_recipe(db_session, recipe, _PROV)
     assert result.fully_costable is True
-    leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
-    assert leche.costing_mode == "variable_volume"
-    assert leche.line_cost == Decimal("0.34")  # 400 ml * 0.84 €/l / 1000
+    line = result.lines[0]
+    assert line.costing_mode == "variable_weight"
+    assert line.line_cost == Decimal("1.80")  # 150 g * 12.00 €/kg / 1000, from the OBSERVED price
 
 
 def test_production_only_price_is_not_used(db_session: Session) -> None:
