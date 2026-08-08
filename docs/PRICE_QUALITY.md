@@ -142,3 +142,68 @@ actual sigue devolviendo el dato bueno. Un administrador revisa la cuarentena v�
 - **Nunca reemplazar el último-bueno** con un lote anómalo: se cuarentena, no se pisa.
 - **Las estimaciones no se presentan como reales** (`price_type = estimated`,
   `confidence_score` y `verification_status` viajan con cada observación).
+
+---
+
+## 7. Floors de calidad por-proveedor (§R)
+
+`evaluate_quality` (`ingestion/providers/quality.py`) califica **un sync** de un proveedor
+contra los floors §R de `Settings` (`provider_min_price_coverage`, `provider_min_package_coverage`,
+`provider_min_observed_at_coverage`, `provider_min_barcode_coverage`) y devuelve
+`accepted` / `degraded` / `insufficient` / `quarantined`. Esos floors son **GLOBALES** y son el
+valor por defecto para todos los proveedores; **no se relajan globalmente**.
+
+### Override por-proveedor: DIA se costea por precio unitario
+
+Un proveedor puede tener un modelo de dato legítimamente distinto. El conjunto
+`UNIT_PRICE_COSTED_PROVIDERS` (en `quality.py`) lista, **con justificación fijada en el código**,
+los proveedores cuyo floor de contenido neto (`provider_min_package_coverage`) se satisface con la
+cobertura de **precio unitario** en lugar de la de contenido neto:
+
+- **`parsebot-dia`** — el scraper lee la tienda **online** dia.es. Ese endpoint **no** expone
+  contenido neto (`net_content_quantity/unit = None`, ver `parsebot/dia.py` §7) pero **sí** publica
+  un precio unitario nacional real (`"0,84 €/l"`). Los productos DIA se costean por `unit_price`
+  (precio por unidad), no por contenido neto, así que la ausencia de contenido neto **no es un
+  defecto** para DIA.
+
+Por qué es **parcial** y defendible: DIA sólo aporta precio unitario nacional online (sin contenido
+neto ni tienda física), por eso su costeo es por precio-unitario y su ámbito es `national`
+(no `exact_store`). No se baja ningún floor: la cobertura de precio unitario **sustituye** a la de
+contenido neto **contra el mismo valor de floor**. Un lote DIA que además careciera de precios
+unitarios seguiría fallando el floor (`insufficient`). Cualquier otro proveedor conserva el
+contenido neto como única vía para superar el floor de package.
+
+### Qué consume el override de `evaluate_quality`
+
+El grade §R de `evaluate_quality` alimenta `SyncReport.quality_status` en
+`services/provider_sync.run_sync`: decide si un sync **escribe** o se **cuarentena**. Con el
+override, un sync DIA (`scope=national` §6, precio unitario presente, contenido neto 0) queda sin
+`reasons` → `quality_status = accepted`, así que ya **no** se bloquea por
+`package_coverage_below_floor` ni `geographic_scope_undeterminable`.
+
+### Cómo se asigna `activation.data_quality_status` (traza exacta)
+
+`activation.data_quality_status` lo escribe **exclusivamente** `onboarding.upsert_activation`
+(`ingestion/providers/onboarding.py`, parámetro `data_quality_status`). Su único llamador de
+producción es `tools/onboard_all_retailers._onboard_one`, que **NO** deriva ese valor de
+`evaluate_quality` sino de `measure_coverage(...).costing_eligibility`:
+
+```python
+data_quality_status="accepted" if coverage.costing_eligibility == "sufficient" else (
+    "degraded" if coverage.observed_catalog_scope != "unknown" else "insufficient")
+```
+
+Ese estado es el que consumen `provider_promotion._production_prerequisite_reasons` /
+`_production_gate_reasons` y `activation.evaluate_production` como precondición de producción. Los
+**otros** gates de proceso (mapper `verified`, transport, aprobación manual, production flags, ≥3
+syncs, rollback) se despejan operativamente aparte y **no** se tocan aquí.
+
+> **Decisión de producto pendiente.** `costing_eligibility` sale de `classify_costing_mode`, que
+> por invariante documentada trata un `unit_price` de referencia suelto sobre un paquete de
+> contenido desconocido como `UNRESOLVED` (no costable). Por eso, con **sólo** el override de
+> `evaluate_quality`, un re-onboard de DIA todavía escribiría `data_quality_status` distinto de
+> `accepted`. Para que `activation.data_quality_status` llegue a `accepted` hace falta extender el
+> mismo criterio "DIA se costea por precio unitario" al camino de onboarding
+> (`_onboard_one` / `_costing_eligibility`). Eso implica decidir si un precio unitario nacional
+> cuenta como costable a efectos de onboarding — una decisión de producto que se deja al owner, no
+> se adivina aquí.
