@@ -281,6 +281,7 @@ def _best_candidate(
     *,
     store_id: int | None,
     now: datetime,
+    provider_code: str,
 ) -> tuple[_Candidate, Decimal, Decimal, Decimal] | None:
     """Cheapest buyable candidate for the required amount: min total line cost, then price, id."""
     best: tuple[_Candidate, Decimal, Decimal, Decimal] | None = None
@@ -297,6 +298,7 @@ def _best_candidate(
                 unit_price=v.unit_price,
                 unit_price_unit=v.unit_price_unit,
                 has_price=True,
+                provider_code=provider_code,
             )
             if mode is ProductCostingMode.UNRESOLVED:
                 continue
@@ -365,7 +367,10 @@ def cost_recipe(
     any_priced = False
 
     for ri in recipe.ingredients:
-        line = _cost_line(db, ri, eligible, variants_by_product, prices, store_id=store_id, now=now)
+        line = _cost_line(
+            db, ri, eligible, variants_by_product, prices,
+            store_id=store_id, now=now, provider_code=provider_code,
+        )
         result.lines.append(line)
         if ri.optional:
             # Default optional policy (§1/§4): optionals are EXCLUDED from the costed basket so a
@@ -410,6 +415,7 @@ def _cost_line(
     *,
     store_id: int | None,
     now: datetime,
+    provider_code: str,
 ) -> IngredientCostLine:
     line = IngredientCostLine(
         ingredient_id=ri.ingredient_id,
@@ -437,6 +443,7 @@ def _cost_line(
         required_dim,
         store_id=store_id,
         now=now,
+        provider_code=provider_code,
     )
     if best is None:
         line.reason = f"{ri.canonical_name}: sin producto costeable (precio/unidad/envase)"

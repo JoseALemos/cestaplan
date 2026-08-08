@@ -305,6 +305,88 @@ def test_unresolved_package_is_not_costable(db_session: Session) -> None:
     assert result.fully_costable is False
 
 
+def _dia_retailer(db: Session) -> int:
+    """Get-or-create the real ``dia`` retailer (cost_recipe maps parsebot-dia -> slug 'dia')."""
+    rid = db.execute(select(Retailer.id).where(Retailer.slug == "dia")).scalar_one_or_none()
+    if rid is not None:
+        return rid
+    r = Retailer(slug="dia", name="DIA", adapter_key="parsebot-dia", is_synthetic=True)
+    db.add(r)
+    db.flush()
+    return r.id
+
+
+def test_dia_unit_priced_product_is_costed_by_planner(db_session: Session) -> None:
+    # DIA has NO net content but a real national €/l unit price. The planner must cost the recipe
+    # via the VARIABLE_VOLUME mode using the provider-scoped exception (provider_code=parsebot-dia).
+    # NOTE: downstream _cost_candidate uses the observation amount as the per-base price, so we
+    # store the €/l figure (0.84) as the staging price here; see the report's caveat on the sync
+    # path (production stores regular_price, not €/l, and does not yet persist variant.unit_price).
+    rid = _dia_retailer(db_session)
+    product = Product(name="Leche DIA 1L", is_synthetic=False)
+    db_session.add(product)
+    db_session.flush()
+    external = ExternalProduct(retailer_id=rid, external_id="DIA-LECHE-1")
+    db_session.add(external)
+    db_session.flush()
+    variant = ProductVariant(
+        retailer_id=rid,
+        external_product_id=external.id,
+        product_id=product.id,
+        display_name="Leche DIA 1L",
+        sell_unit="package",
+        variable_weight=False,
+        net_content_quantity=None,  # DIA search exposes no net content
+        net_content_unit=None,
+        unit_price=Decimal("0.84"),  # 0,84 €/l
+        unit_price_unit="l",
+    )
+    db_session.add(variant)
+    db_session.flush()
+    db_session.add(
+        PriceObservation(
+            retailer_id=rid,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal("0.84"),
+            currency="EUR",
+            observed_at=_NOW,
+            imported_at=_NOW,
+            valid_from=_NOW,
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    db_session.add(
+        ProviderIngredientMapping(
+            provider_code="parsebot-dia",
+            ingredient_id=_ing(db_session, _LECHE),
+            canonical_ingredient_key="leche_entera",
+            retailer_slug="dia",
+            external_product_id="DIA-LECHE-1",
+            normalized_product_id=product.id,
+            mapping_status="auto_approved",
+            mapping_method="exact_alias",
+            confidence_score=Decimal("0.96"),
+            unit_compatibility="compatible",
+            required_review=False,
+            active=True,
+        )
+    )
+    db_session.flush()
+    recipe = _recipe(
+        db_session, [(_LECHE, "leche_entera", "Leche entera", "400", "ml", False)], servings=1
+    )
+
+    result = cost_recipe(db_session, recipe, "parsebot-dia")
+
+    assert result.fully_costable is True
+    leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
+    assert leche.costing_mode == "variable_volume"
+    assert leche.line_cost == Decimal("0.34")  # 400 ml * 0.84 €/l / 1000
+
+
 def test_production_only_price_is_not_used(db_session: Session) -> None:
     rid = _retailer(db_session)
     # A production (non-staging) price must NOT be visible to the staging costing engine.

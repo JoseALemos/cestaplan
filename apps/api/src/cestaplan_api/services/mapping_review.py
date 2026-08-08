@@ -370,6 +370,7 @@ def _costable_ingredient_ids(db: Session, provider_code: str, now: datetime) -> 
                     unit_price=v.unit_price,
                     unit_price_unit=v.unit_price_unit,
                     has_price=True,
+                    provider_code=provider_code,
                 )
                 if mode is not ProductCostingMode.UNRESOLVED:
                     ok = True

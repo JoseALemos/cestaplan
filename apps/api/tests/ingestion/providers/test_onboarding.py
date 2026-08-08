@@ -20,10 +20,13 @@ from cestaplan_api.ingestion.providers.contracts import (
     ContentUnit,
     ExternalCatalogProduct,
     PriceScope,
+    ProductCostingMode,
     SellUnit,
 )
 from cestaplan_api.ingestion.providers.onboarding import (
     RETAILER_MATRIX,
+    classify_costing_mode,
+    classify_variant_costing_mode,
     config_status,
     get_entry,
     measure_coverage,
@@ -97,6 +100,102 @@ def test_full_catalog_with_package_content_is_costable() -> None:
     assert cov.package_unit_coverage == Decimal("1.0000")
     assert cov.geographic_scope_coverage == Decimal("1.0000")
     assert cov.costing_eligibility == "sufficient"
+
+
+# --- DIA scoped exception: costed by national unit price, not net content ------------------- #
+def _dia_unit_priced(
+    *, provider: str = "parsebot-dia", unit: str | None = "l", up: Decimal | None = Decimal("0.84")
+) -> ExternalCatalogProduct:
+    """A DIA-shaped product: national price, a real €/l unit price, NO net content."""
+    return ExternalCatalogProduct(
+        provider=provider,
+        retailer_slug="dia",
+        external_product_id="x",
+        product_name="Leche entera",
+        sell_unit=SellUnit.PACKAGE,
+        regular_price=Decimal("0.84"),
+        currency="EUR",
+        price_scope=PriceScope.NATIONAL,
+        observed_at=_NOW,
+        availability=Availability.IN_STOCK,
+        variable_weight=False,
+        net_content_quantity=None,
+        net_content_unit=None,
+        unit_price=up,
+        unit_price_unit=unit,
+    )
+
+
+def test_classify_dia_unit_price_is_costable() -> None:
+    assert classify_costing_mode(_dia_unit_priced(unit="l")) is ProductCostingMode.VARIABLE_VOLUME
+    assert classify_costing_mode(_dia_unit_priced(unit="kg")) is ProductCostingMode.VARIABLE_WEIGHT
+
+
+def test_classify_dia_incompatible_unit_stays_unresolved() -> None:
+    # A missing or non mass/volume unit is never guessed -> UNRESOLVED even for DIA.
+    assert classify_costing_mode(_dia_unit_priced(unit=None)) is ProductCostingMode.UNRESOLVED
+    assert classify_costing_mode(_dia_unit_priced(unit="unit")) is ProductCostingMode.UNRESOLVED
+    assert classify_costing_mode(_dia_unit_priced(up=None)) is ProductCostingMode.UNRESOLVED
+
+
+def test_classify_non_dia_unit_price_stays_unresolved() -> None:
+    # Identical shape from any other provider keeps the strict invariant: a lone reference
+    # unit_price on a package with no net content is NOT costable.
+    assert (
+        classify_costing_mode(_dia_unit_priced(provider="parsebot-other"))
+        is ProductCostingMode.UNRESOLVED
+    )
+
+
+def test_classify_variant_dia_exception_and_default_none() -> None:
+    kw: dict[str, Any] = {
+        "sell_unit": "package",
+        "variable_weight": False,
+        "net_content_quantity": None,
+        "net_content_unit": None,
+        "unit_price": Decimal("0.84"),
+        "unit_price_unit": "l",
+        "has_price": True,
+    }
+    # default provider_code=None reproduces the historical behaviour exactly -> UNRESOLVED.
+    assert classify_variant_costing_mode(**kw) is ProductCostingMode.UNRESOLVED
+    # non-DIA provider: still UNRESOLVED (invariant intact).
+    assert (
+        classify_variant_costing_mode(**kw, provider_code="parsebot-other")
+        is ProductCostingMode.UNRESOLVED
+    )
+    # DIA with a compatible unit: costable by the national unit price.
+    assert (
+        classify_variant_costing_mode(**kw, provider_code="parsebot-dia")
+        is ProductCostingMode.VARIABLE_VOLUME
+    )
+    # DIA with an incompatible unit: not guessed -> UNRESOLVED.
+    assert (
+        classify_variant_costing_mode(
+            **{**kw, "unit_price_unit": "ud"}, provider_code="parsebot-dia"
+        )
+        is ProductCostingMode.UNRESOLVED
+    )
+
+
+def test_measure_coverage_dia_unit_price_is_sufficient() -> None:
+    # A DIA capture (national, €/l unit price, no net content) is costable per product, so
+    # costing_eligibility is sufficient -> onboarding writes data_quality_status=accepted.
+    products = [_dia_unit_priced() for _ in range(5)]
+    cov = measure_coverage(
+        products, captured=5, limit=5, supports_full_catalog=False, supports_store_scope=True
+    )
+    assert cov.package_quantity_coverage == Decimal("0.0000")  # no net content
+    assert cov.costing_eligible_product_coverage == Decimal("1.0000")
+    assert cov.costing_eligibility == "sufficient"
+
+
+def test_measure_coverage_non_dia_same_shape_is_insufficient() -> None:
+    products = [_dia_unit_priced(provider="parsebot-other") for _ in range(5)]
+    cov = measure_coverage(
+        products, captured=5, limit=5, supports_full_catalog=False, supports_store_scope=True
+    )
+    assert cov.costing_eligibility == "insufficient"  # invariant intact for other providers
 
 
 def test_empty_capture_is_unknown() -> None:

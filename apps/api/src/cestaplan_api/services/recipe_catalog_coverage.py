@@ -214,6 +214,7 @@ def evaluate_recipe_catalog_coverage(
                 store_id=store_id,
                 required_scope=required_scope,
                 now=now,
+                provider_code=provider_code,
             )
             for ri in mandatory
         ]
@@ -281,6 +282,7 @@ def _evaluate_ingredient(
     store_id: int | None,
     required_scope: str,
     now: datetime,
+    provider_code: str,
 ) -> IngredientStatus:
     (category,) = ing_meta.get(ri.ingredient_id, (None,))
     st = IngredientStatus(ri.ingredient_id, ri.canonical_name, category)
@@ -294,6 +296,7 @@ def _evaluate_ingredient(
             if price is None:
                 continue
             mode = classify_variant_costing_mode(
+                provider_code=provider_code,
                 sell_unit=variant.sell_unit,
                 variable_weight=variant.variable_weight,
                 net_content_quantity=variant.net_content_quantity,

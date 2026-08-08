@@ -198,12 +198,37 @@ Ese estado es el que consumen `provider_promotion._production_prerequisite_reaso
 **otros** gates de proceso (mapper `verified`, transport, aprobación manual, production flags, ≥3
 syncs, rollback) se despejan operativamente aparte y **no** se tocan aquí.
 
-> **Decisión de producto pendiente.** `costing_eligibility` sale de `classify_costing_mode`, que
-> por invariante documentada trata un `unit_price` de referencia suelto sobre un paquete de
-> contenido desconocido como `UNRESOLVED` (no costable). Por eso, con **sólo** el override de
-> `evaluate_quality`, un re-onboard de DIA todavía escribiría `data_quality_status` distinto de
-> `accepted`. Para que `activation.data_quality_status` llegue a `accepted` hace falta extender el
-> mismo criterio "DIA se costea por precio unitario" al camino de onboarding
-> (`_onboard_one` / `_costing_eligibility`). Eso implica decidir si un precio unitario nacional
-> cuenta como costable a efectos de onboarding — una decisión de producto que se deja al owner, no
-> se adivina aquí.
+### Excepción de costeo scoped a DIA (precio-unitario nacional)
+
+`costing_eligibility` sale de `classify_costing_mode` (producto fresco) y
+`classify_variant_costing_mode` (variante almacenada), ambas en `onboarding.py`. Por invariante
+general, un `unit_price` de referencia suelto sobre un paquete de contenido desconocido es
+`UNRESOLVED`. **Excepción scoped** para los proveedores de `UNIT_PRICE_COSTED_PROVIDERS` (DIA): si
+el `unit_price_unit` es una unidad de masa/volumen conocida (`kg`/`g` → `VARIABLE_WEIGHT`,
+`l`/`ml` → `VARIABLE_VOLUME`) se costea por ese precio unitario nacional aunque no haya contenido
+neto; una unidad ausente o ajena sigue siendo `UNRESOLVED` (nunca se adivina). Justificación: DIA
+sólo da precio unitario nacional online, sin contenido neto en la búsqueda ni tienda física, por
+eso su costeo es por `price_per_unit` y sólo con unidades compatibles.
+
+- `classify_variant_costing_mode` recibe `provider_code: str | None = None`; con el **default
+  `None` el comportamiento es idéntico al histórico** (cero regresión para callers no actualizados).
+  Se pasa el `provider_code` real en los call sites scoped a un proveedor: `recipe_costing`
+  (planner), `recipe_catalog_coverage` (cobertura → `data_quality`), `provider_shadow`,
+  `mapping_review`. `measure_coverage` usa `classify_costing_mode(p)` y lee `p.provider`
+  directamente, así que no necesita el parámetro.
+- Con esta excepción, un re-onboard de DIA (scope national, `unit_price` €/l presente, contenido
+  neto None) da `costing_eligibility = sufficient` → `_onboard_one` escribe
+  `data_quality_status = "accepted"`. Ésta es la vía por la que DIA llega a `accepted`.
+
+> **Gaps operativos pendientes (NO resueltos en este cambio).** Para que el costeo DIA sea posible
+> Y numéricamente exacto de extremo a extremo en producción faltan dos piezas del camino de sync
+> (`services/provider_sync.py`), que se dejan señaladas al owner:
+> 1. `_upsert_variant` **no persiste** `variant.unit_price` / `unit_price_unit` (sólo sell_unit y
+>    net content). Sin ese dato, la variante DIA almacenada tiene `unit_price = None` y
+>    `classify_variant_costing_mode` la vería `UNRESOLVED`. Los caminos `targeted_discovery` y
+>    `licensed_catalog` sí lo persisten; el sync principal no.
+> 2. `_append_observation` guarda `amount = product.regular_price` (precio de estante), mientras
+>    que el costeo `VARIABLE_*` aguas abajo (`_cost_candidate`) usa ese `amount` como precio por
+>    unidad base. Coinciden sólo cuando el envase equivale a 1 unidad del `unit_price_unit` (p. ej.
+>    leche 1 L). Para un costeo exacto en tamaños arbitrarios, el sync debería persistir/usar el
+>    `unit_price` (€/l) de DIA. No se toca el costeo aguas abajo aquí por indicación del owner.
