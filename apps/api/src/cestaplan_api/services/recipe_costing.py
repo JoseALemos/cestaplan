@@ -273,6 +273,12 @@ def _cost_candidate(
         #    6x1 L pack). The real per-litre/kg price is the variant's unit_price (0.84 EUR/l);
         #    using the package price would multiply the cost by the pack size. Use v.unit_price.
         per_unit_price = cand.price if v.variable_weight else v.unit_price
+        # A non-positive per-unit price is never buyable: without this guard a 0 €/l reference
+        # would make the line 0 € and win the cheapest-candidate race, silently costing an
+        # ingredient at zero under a provider's name (cand.price>0 is already checked above, so
+        # this specifically protects the DIA unit-price path).
+        if per_unit_price <= 0:
+            return None
         price_per_base = per_unit_price / sell[0]  # price is per one unit_price_unit
         return purchased_base, purchased_base, (purchased_base * price_per_base)
     return None
