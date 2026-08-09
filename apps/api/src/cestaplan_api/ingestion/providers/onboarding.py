@@ -164,7 +164,7 @@ RETAILER_MATRIX: tuple[MatrixEntry, ...] = (
         "dense_candidate",
         "full",
         "disabled",
-        ("products", "prices"),
+        ("products", "search", "prices"),
         needs_credentials=True,
     ),
     MatrixEntry(
