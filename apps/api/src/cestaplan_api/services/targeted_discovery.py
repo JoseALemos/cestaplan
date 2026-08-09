@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings, get_settings
-from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct
+from cestaplan_api.ingestion.providers.contracts import ExternalCatalogProduct, ProductQuery
 from cestaplan_api.ingestion.providers.onboarding import classify_costing_mode, get_entry
 from cestaplan_api.ingestion.providers.registry import registry
 from cestaplan_api.models import (
@@ -203,6 +204,58 @@ def _capture_alcampo(
     return list(provider._mapper.map_products(records, retrieved_at=datetime.now(UTC)))  # type: ignore[attr-defined]
 
 
+def _capture_search(
+    provider_code: str, settings: Settings, key: str, limit: int, out_dir: Path
+) -> list[ExternalCatalogProduct]:
+    """Per-ingredient keyword capture through the generic provider contract.
+
+    For a registered, search-capable provider that is NOT a Parse.bot plan chain (e.g.
+    ``apify-mercadona``), the ingredient alias is passed as the provider's search term and the
+    provider maps its own payload to :class:`ExternalCatalogProduct`. The postal code is left to the
+    provider: a delivery-zone-scoped source (Mercadona) seals its own zone from its configured
+    default postal code, while a national source simply ignores it. The mapped products are
+    serialized per ingredient for audit (git-ignored; never versioned).
+    """
+    provider = registry.get(provider_code)
+    alias = specs()[key].aliases[0]
+    products = list(
+        provider.iterate_products(ProductQuery(search=alias, max_products=limit))
+    )
+    ing_dir = out_dir / key
+    ing_dir.mkdir(parents=True, exist_ok=True)
+    (ing_dir / "capture.json").write_text(
+        json.dumps(
+            {"query": alias, "count": len(products), "products": [asdict(p) for p in products]},
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+    return products
+
+
+_CaptureFn = Callable[[str, Settings, str, int, Path], list[ExternalCatalogProduct]]
+
+
+def _select_capture_fn(provider_code: str) -> _CaptureFn | None:
+    """Choose the per-ingredient capture route by DECLARED search capability (never by name).
+
+    - A Parse.bot live-search chain (:data:`_PLAN_LIVE_SEARCH_PROVIDERS`) keeps its existing plan
+      capture (``plans.capture_records``) — this route is unchanged.
+    - Any other REGISTERED provider that declares the ``search`` capability and is not a Parse.bot
+      plan chain (e.g. ``apify-mercadona``) captures via the generic ``iterate_products`` contract.
+    - Otherwise there is no per-ingredient capture (``None``): the caller reuses staged products.
+    """
+    from cestaplan_api.ingestion.providers.parsebot import plans
+
+    if provider_code in _PLAN_LIVE_SEARCH_PROVIDERS:
+        return _capture_alcampo
+    if not registry.has(provider_code) or plans.has_plan(provider_code):
+        return None
+    provider = registry.get(provider_code)
+    return _capture_search if provider.capabilities().search else None
+
+
 class ApprovalMode(StrEnum):
     """How discovery persists matches.
 
@@ -224,6 +277,11 @@ _MAX_CANDIDATES_PER_INGREDIENT = 25
 _MIN_REVIEWABLE_CONFIDENCE = Decimal("0.30")
 # Mapping-algorithm version: a re-run under a new version supersedes the prior candidates (§6).
 _MAPPING_VERSION = "2.0.0"
+
+# Parse.bot chains that LIVE-search per ingredient via their plan (``plans.capture_records``). This
+# is the existing route, kept unchanged. The other Parse.bot plan chains (carrefour/aldi/lidl)
+# deliberately reuse already-staged products instead of re-capturing, so they are NOT listed here.
+_PLAN_LIVE_SEARCH_PROVIDERS = ("parsebot-alcampo", "parsebot-dia")
 
 
 def _classify_candidates(
@@ -277,17 +335,22 @@ def discover_and_map(
     out_dir = _LOCAL / provider_code
 
     # 1) INGESTION happens ONCE per unique product and NEVER during matching. Search providers
-    #    (Alcampo/DIA) capture then persist once per unique product; staged providers (Carrefour)
-    #    reuse the EXISTING product ids and write nothing — matching never creates an observation.
+    #    capture then persist once per unique product; staged providers (Carrefour) reuse the
+    #    EXISTING product ids and write nothing — matching never creates an observation. The capture
+    #    route is chosen by the provider's DECLARED search capability, not by a hardcoded name:
+    #    Parse.bot live-search chains keep their plan capture, while any other registered
+    #    search-capable provider (e.g. apify-mercadona) captures via the generic iterate_products
+    #    contract.
     products: list[tuple[ExternalCatalogProduct, int]] = []
-    if provider_code in ("parsebot-alcampo", "parsebot-dia"):
+    capture_fn = _select_capture_fn(provider_code)
+    if capture_fn is not None:
         out_dir.mkdir(parents=True, exist_ok=True)  # capture files: only the search-based providers
         captured: dict[str, ExternalCatalogProduct] = {}
         for key in ingredient_keys:
             if report.api_calls >= max_calls:
                 break
             try:
-                fetched = _capture_alcampo(provider_code, settings, key, per_query_limit, out_dir)
+                fetched = capture_fn(provider_code, settings, key, per_query_limit, out_dir)
                 report.api_calls += 1
                 report.queries += 1
                 _log_usage(db, provider_code, len(fetched), now)
