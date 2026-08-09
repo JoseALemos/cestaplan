@@ -211,8 +211,9 @@ class Settings(BaseSettings):
     apify_api_token: str = ""
     apify_base_url: str = "https://api.apify.com/v2"
     apify_mercadona_enabled: bool = False
-    apify_mercadona_actor_id: str = "studio-amba~mercadona-scraper"
+    apify_mercadona_actor_id: str = "igolaizola~mercadona-scraper"
     apify_mercadona_default_postal_code: str = ""
+    apify_max_total_charge_usd: float = 2.0
     apify_max_wait_seconds: int = 900
     apify_poll_interval_seconds: float = 10.0
     apify_max_results_per_run: int = 1000

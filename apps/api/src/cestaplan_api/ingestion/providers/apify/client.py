@@ -60,11 +60,28 @@ class ApifyClient:
         # Bearer token in the header, never as a ?token= query parameter.
         return {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
 
-    def start_run(self, actor_id: str, run_input: dict[str, Any]) -> str:
-        """POST an actor run with a bounded input; return the run id."""
+    def start_run(
+        self,
+        actor_id: str,
+        run_input: dict[str, Any],
+        *,
+        max_total_charge_usd: float | None = None,
+    ) -> str:
+        """POST an actor run with a bounded input; return the run id.
+
+        ``max_total_charge_usd`` is Apify's own hard billing cap for the run, passed as the
+        ``maxTotalChargeUsd`` query parameter so the platform aborts the run before it exceeds the
+        budget — a defence-in-depth cost guard independent of any per-actor pricing. A ``None`` or
+        non-positive value omits the parameter (no cap requested).
+        """
         url = f"{self._base_url}/acts/{actor_id}/runs"
+        params: dict[str, str] | None = None
+        if max_total_charge_usd is not None and max_total_charge_usd > 0:
+            params = {"maxTotalChargeUsd": str(max_total_charge_usd)}
         try:
-            response = self._client.post(url, json=run_input, headers=self._headers)
+            response = self._client.post(
+                url, params=params, json=run_input, headers=self._headers
+            )
         except httpx.HTTPError as exc:
             raise ProviderResponseError(
                 f"Apify start_run transport error: {type(exc).__name__}"
