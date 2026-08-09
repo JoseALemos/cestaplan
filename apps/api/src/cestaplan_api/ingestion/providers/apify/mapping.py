@@ -407,7 +407,7 @@ class ApifyMercadonaMapper:
           cost.
         """
         net_qty, net_unit = _net_content(pi.unit_size, pi.size_format)
-        if net_qty is None:
+        if net_qty is None or net_unit is None:  # no quantity OR no known unit -> not costable
             return None, None
         if pi.approx_size:
             return None, None

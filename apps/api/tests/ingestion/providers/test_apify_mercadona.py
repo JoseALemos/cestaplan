@@ -96,6 +96,7 @@ def test_maps_all_sample_records() -> None:
     assert garrafa.unit_price == Decimal("3.550") and garrafa.unit_price_unit == "l"
     assert garrafa.availability is Availability.IN_STOCK
     assert garrafa.category == "Olive oil"  # deepest (most specific) category node
+    assert garrafa.product_url is not None
     assert garrafa.product_url.endswith("/product/4241/aceite-oliva-04o-hacendado-garrafa")
     assert garrafa.image_url is not None
     assert garrafa.price_scope is PriceScope.POSTAL_CODE and garrafa.postal_code == _POSTAL
@@ -373,7 +374,7 @@ def test_search_capability_is_declared() -> None:
 
 def test_iterate_products_forwards_search_term_as_actor_query() -> None:
     stub = _StubApifyClient()
-    provider = ApifyMercadonaProvider(client=stub)
+    provider = ApifyMercadonaProvider(client=stub)  # type: ignore[arg-type]  # test stub
     list(provider.iterate_products(ProductQuery(search="aceite", max_products=5)))
     assert stub.run_input is not None
     assert stub.run_input["query"] == "aceite"  # the ingredient alias filters the actor run
@@ -383,7 +384,7 @@ def test_iterate_products_forwards_search_term_as_actor_query() -> None:
 
 def test_iterate_products_without_search_omits_query() -> None:
     stub = _StubApifyClient()
-    provider = ApifyMercadonaProvider(client=stub)
+    provider = ApifyMercadonaProvider(client=stub)  # type: ignore[arg-type]  # test stub
     list(provider.iterate_products(ProductQuery(max_products=3)))
     assert stub.run_input is not None
     assert "query" not in stub.run_input  # no term -> full-catalogue behaviour, unchanged
