@@ -31,6 +31,7 @@ depended-on core field still blocks.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -86,13 +87,44 @@ _REQUIRED = (
 )
 
 
+# A clean numeric literal after separators are normalised: optional sign, digits, optional
+# single decimal group. Anything else is refused (never silently coerced to a wrong number).
+_NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
+class InvalidMoneyValue(ValueError):
+    """A money string that cannot be parsed to a clean Decimal (surfaced, never guessed)."""
+
+
+def _decimal_from_str(raw: str) -> Decimal:
+    """Parse a money string to Decimal, tolerating a currency symbol and es-ES separators.
+
+    Handles ``"5,04"`` (comma decimal), ``"5,04 €"`` (currency symbol), ``"1.234,56"`` (dot
+    thousands + comma decimal) and ``"1,234.56"`` (comma thousands + dot decimal). Anything that is
+    not a clean number after normalisation raises :class:`InvalidMoneyValue` — a malformed price is
+    NEVER coerced into a wrong number.
+    """
+    cleaned = re.sub(r"[^\d.,\-]", "", raw.strip())  # drop currency symbol / spaces / letters
+    if "." in cleaned and "," in cleaned:
+        # The RIGHTMOST separator is the decimal; the other one groups thousands.
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")  # 1.234,56 -> 1234.56
+        else:
+            cleaned = cleaned.replace(",", "")  # 1,234.56 -> 1234.56
+    elif "," in cleaned:
+        cleaned = cleaned.replace(",", ".")  # 5,04 -> 5.04
+    if not _NUMERIC_RE.fullmatch(cleaned):
+        raise InvalidMoneyValue(f"invalid money value: {raw!r}")
+    return Decimal(cleaned)
+
+
 def _to_decimal(value: object) -> object:
-    # money arrives as a JSON number (or occasionally a string with a comma decimal, e.g. "5,04");
-    # normalise the comma and go through str to avoid float imprecision.
+    # money arrives as a JSON number (int/float) or, occasionally, a string with a currency symbol
+    # and/or es-ES separators; parse robustly and go through str to avoid float imprecision.
     if value is None or isinstance(value, Decimal):
         return value
     if isinstance(value, str):
-        value = value.strip().replace(",", ".")
+        return _decimal_from_str(value)
     return Decimal(str(value))
 
 

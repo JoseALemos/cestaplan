@@ -9,7 +9,7 @@ None, ``scrapedAt`` -> tz-aware observed_at, postal-code scope, and unit-price r
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,7 +21,10 @@ from cestaplan_api.ingestion.contracts import PriceScope
 from cestaplan_api.ingestion.providers.apify.mapping import (
     ApifyMercadonaMapper,
     ApifyMercadonaProvider,
+    ApifyMercadonaRecord,
+    InvalidMoneyValue,
     UnsupportedSchemaError,
+    _decimal_from_str,
     _parse_unit_price,
 )
 from cestaplan_api.ingestion.providers.contracts import Availability, SellUnit
@@ -290,6 +293,96 @@ def test_mercadona_zone_price_never_crosses_to_another_zone(db_session: Session)
     assert national.fully_costable is False
 
 
+def _add_mercadona_leche_national_plus_zone(db: Session, rid: int, zone_store_id: int) -> None:
+    """A Mercadona milk variant with a valid NATIONAL price plus a NEWER zonified observation.
+
+    Reproduces the fallback case: value-matched current() would return the newer zonified row, but a
+    no-zone (national) plan must still cost from the older-but-valid national price.
+    """
+    product = Product(name="Leche Hacendado nat+zona", is_synthetic=False)
+    db.add(product)
+    db.flush()
+    external = ExternalProduct(retailer_id=rid, external_id="10381")
+    db.add(external)
+    db.flush()
+    variant = ProductVariant(
+        retailer_id=rid,
+        external_product_id=external.id,
+        product_id=product.id,
+        display_name="Leche Hacendado nat+zona",
+        sell_unit="package",
+        variable_weight=False,
+        unit_price=Decimal("0.84"),
+        unit_price_unit="l",
+    )
+    db.add(variant)
+    db.flush()
+    older = _NOW - timedelta(hours=2)
+    db.add(
+        PriceObservation(
+            retailer_id=rid,
+            store_id=None,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal("5.04"),
+            currency="EUR",
+            observed_at=older,
+            imported_at=older,
+            valid_from=older,
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    db.add(
+        PriceObservation(
+            retailer_id=rid,
+            store_id=zone_store_id,
+            product_variant_id=variant.id,
+            price_scope="postal_code",
+            price_type="regular",
+            amount=Decimal("5.04"),
+            currency="EUR",
+            observed_at=_NOW,  # NEWER than the national row
+            imported_at=_NOW,
+            valid_from=_NOW,
+            confidence_score=Decimal("1.0"),
+            staging_only=True,
+        )
+    )
+    db.add(
+        ProviderIngredientMapping(
+            provider_code="apify-mercadona",
+            ingredient_id=_ing(db, _LECHE),
+            canonical_ingredient_key="leche_entera",
+            retailer_slug="mercadona",
+            external_product_id="10381",
+            normalized_product_id=product.id,
+            mapping_status="auto_approved",
+            mapping_method="exact_alias",
+            confidence_score=Decimal("0.96"),
+            unit_compatibility="compatible",
+            required_review=False,
+            active=True,
+        )
+    )
+    db.flush()
+
+
+def test_national_plan_falls_back_to_national_over_newer_zone_price(db_session: Session) -> None:
+    rid = _mercadona_retailer(db_session)
+    zone = resolve_store_for_postal(db_session, rid, "14006")
+    _add_mercadona_leche_national_plus_zone(db_session, rid, zone.id)
+    recipe = _recipe(db_session, "200", "ml")
+    # No zone (national plan): the newer zonified row is rejected by the gate, but the valid
+    # national price still costs the recipe (0.84 €/l -> 0.17 € for 200 ml).
+    result = cost_recipe(db_session, recipe, "apify-mercadona", store_id=None)
+    assert result.fully_costable is True
+    leche = next(line for line in result.lines if line.canonical_name == "leche_entera")
+    assert leche.price_scope == "national"
+    assert leche.line_cost == Decimal("0.17")
+
+
 def test_zone_store_resolution_is_idempotent(db_session: Session) -> None:
     rid = _mercadona_retailer(db_session)
     first = resolve_store_for_postal(db_session, rid, "14006")
@@ -314,12 +407,33 @@ def test_capture_missing_optional_fields_does_not_block_batch() -> None:
     assert first.regular_price == Decimal("5.04")  # core field still parsed
 
 
-def test_price_string_with_comma_decimal_is_parsed() -> None:
-    records = _records()
-    records[0]["price"] = "5,04"  # a comma-decimal string price is normalised by Money
-    # A string price is a different core type -> fingerprint drift is expected to block; assert the
-    # Money parser itself normalises the comma via a direct record validation instead.
-    from cestaplan_api.ingestion.providers.apify.mapping import ApifyMercadonaRecord
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("5.04", Decimal("5.04")),  # plain dot decimal
+        ("5,04", Decimal("5.04")),  # comma decimal
+        ("5,04 €", Decimal("5.04")),  # trailing currency symbol + space
+        ("€5,04", Decimal("5.04")),  # leading currency symbol
+        ("1.234,56", Decimal("1234.56")),  # es-ES dot thousands + comma decimal
+        ("1,234.56", Decimal("1234.56")),  # en thousands + dot decimal
+        ("7", Decimal("7")),  # bare integer
+    ],
+)
+def test_money_string_parsing(raw: str, expected: Decimal) -> None:
+    assert _decimal_from_str(raw) == expected
 
+
+@pytest.mark.parametrize("raw", ["", "abc", "1.2.3", "--5", "1,2,3.4.5"])
+def test_money_string_invalid_raises_typed_error(raw: str) -> None:
+    # A malformed money string is refused with a clear typed error, never coerced to a wrong number.
+    with pytest.raises(InvalidMoneyValue):
+        _decimal_from_str(raw)
+
+
+def test_comma_decimal_price_maps_via_record() -> None:
+    # A string price is a different core type (blocks at the fingerprint gate), so exercise the
+    # Money parser through a direct record validation.
+    records = _records()
+    records[0]["price"] = "5,04"
     rec = ApifyMercadonaRecord.model_validate(records[0])
     assert rec.price == Decimal("5.04")
