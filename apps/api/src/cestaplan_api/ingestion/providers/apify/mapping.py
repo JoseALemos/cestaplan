@@ -478,7 +478,7 @@ class ApifyMercadonaProvider(PriceCatalogProvider):
             incremental_sync=False,
             promotions=True,
             categories=True,
-            search=False,  # actor input is a bounded run, not a search query
+            search=True,  # the actor accepts a ``query`` keyword -> per-ingredient search capture
         )
 
     def get_source_metadata(self) -> ProviderMetadata:
@@ -506,14 +506,19 @@ class ApifyMercadonaProvider(PriceCatalogProvider):
             raise NotSupportedError("apify mercadona not configured (missing token/flags)")
         limit = query.max_products or 30
         postal_code = query.postal_code or self._postal_code
-        # Actor input: ``igolaizola/mercadona-scraper`` ignores ``maxItems`` (it returns the full
-        # catalogue for the zone), but we pass it anyway as a harmless intent hint. The zone/
-        # warehouse is selected via ``postalCode`` — an ASSUMED key: the actor's example run input
-        # was a placeholder, so if the actor ignores it the scope simply reflects the actor's
-        # default warehouse (zone sealing downstream is unchanged either way). Empty postal omitted.
+        # Actor input: the zone/warehouse is selected via ``postalCode`` — an ASSUMED key: the
+        # actor's example run input was a placeholder, so if the actor ignores it the scope simply
+        # reflects the actor's default warehouse (zone sealing downstream is unchanged either way).
+        # ``maxItems`` is passed as a harmless intent hint. When ``query.search`` is present it is
+        # forwarded as the actor's ``query`` term: the actor then filters the catalogue to that
+        # keyword, so the run is small and cheap (a per-ingredient discovery search) instead of the
+        # whole zone catalogue. Without a search term the behaviour is unchanged (full catalogue).
+        # Empty postal omitted.
         run_input: dict[str, object] = {"maxItems": limit}
         if postal_code:
             run_input["postalCode"] = postal_code
+        if query.search:
+            run_input["query"] = query.search
         run_id = self._client.start_run(
             self._settings.apify_mercadona_actor_id,
             run_input,
