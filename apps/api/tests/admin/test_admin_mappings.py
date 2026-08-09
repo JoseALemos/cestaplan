@@ -129,6 +129,40 @@ def test_dia_candidate_shows_costable_in_review_panel(
     assert body["costing_eligible"] is True
 
 
+def test_review_panel_shows_persisted_product_name(
+    client: TestClient, db_session: Session
+) -> None:
+    # FIX B: the serialized candidate shows the proposed product's NAME (from the persisted
+    # Product.name), not an ID — even when evidence_json carries no product_name snapshot.
+    ing = ensure_test_ingredient(db_session, "harina")
+    product = Product(name="Pan de molde blanco sin corteza Hacendado", is_synthetic=False)
+    db_session.add(product)
+    db_session.flush()
+    row = ProviderIngredientMapping(
+        provider_code="apify-mercadona",
+        ingredient_id=ing.id,
+        canonical_ingredient_key="harina",
+        retailer_slug="mercadona",
+        external_product_id="MERC-NAME-1",
+        normalized_product_id=product.id,
+        mapping_status="candidate",
+        mapping_method="normalized_name",
+        confidence_score=Decimal("0.6"),
+        required_review=True,
+        active=False,
+        evidence_json={},  # no product_name snapshot -> must fall back to Product.name
+    )
+    db_session.add(row)
+    db_session.flush()
+    register(client, "adm-name@x.com")
+    login(client, "adm-name@x.com")
+    promote_to_admin(db_session, "adm-name@x.com")
+
+    detail = client.get(f"{_BASE}/{row.id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["original_product_name"] == "Pan de molde blanco sin corteza Hacendado"
+
+
 def test_queue_requires_admin(client: TestClient, db_session: Session) -> None:
     register(client, "user@x.com")
     login(client, "user@x.com")
