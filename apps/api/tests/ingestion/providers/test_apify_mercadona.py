@@ -27,6 +27,7 @@ from cestaplan_api.ingestion.providers.apify.mapping import (
     ApifyMercadonaProvider,
     ApifyMercadonaRecord,
     InvalidMoneyValue,
+    NonPositivePriceError,
     UnsupportedSchemaError,
     _decimal_from_str,
     _deepest_category_name,
@@ -189,6 +190,51 @@ def test_unknown_size_format_yields_no_net_content() -> None:
     records[0]["price_instructions"]["size_format"] = "botella"  # unknown unit -> never guessed
     garrafa = next(p for p in _map(records) if p.external_product_id == _GARRAFA_ID)
     assert garrafa.net_content_quantity is None and garrafa.net_content_unit is None
+
+
+def test_every_sampled_item_passes_the_net_content_consistency_invariant() -> None:
+    # The guard must not false-trip: unit_price / unit_size == reference_price on all 25 real items,
+    # so every product keeps its structured net content.
+    assert all(p.net_content_quantity is not None for p in _map(_records()))
+    assert all(p.net_content_unit is not None for p in _map(_records()))
+
+
+def test_pack_inconsistent_net_content_is_dropped_not_undercounted() -> None:
+    # A pack: unit_size is a SINGLE unit (1 L) but reference_price is computed over total_units (6),
+    # so unit_price / unit_size (6.00) disagrees with reference_price (1.00). Costing by unit_size
+    # would undercount the pack 6x -> the guard drops net content so it is simply not costed.
+    records = _records()
+    pi = records[0]["price_instructions"]
+    pi.update(
+        {
+            "is_pack": True,
+            "unit_size": 1,
+            "total_units": 6,
+            "unit_price": "6.00",  # pack shelf price
+            "reference_price": "1.00",  # €/L over the 6 L total
+            "reference_format": "L",
+            "size_format": "l",
+        }
+    )
+    pack = next(p for p in _map(records) if p.external_product_id == _GARRAFA_ID)
+    assert pack.net_content_quantity is None and pack.net_content_unit is None
+    assert pack.regular_price == Decimal("6.00")  # price still mapped; just not net-content costed
+
+
+def test_approx_size_yields_no_net_content() -> None:
+    # Sold by an approximate/variable measure -> unit_size is not an exact fixed content.
+    records = _records()
+    records[0]["price_instructions"]["approx_size"] = True
+    garrafa = next(p for p in _map(records) if p.external_product_id == _GARRAFA_ID)
+    assert garrafa.net_content_quantity is None and garrafa.net_content_unit is None
+
+
+@pytest.mark.parametrize("bad_price", ["0", "-1", "0.00"])
+def test_non_positive_price_is_refused_never_zero_or_negative_cost(bad_price: str) -> None:
+    records = _records()
+    records[0]["price_instructions"]["unit_price"] = bad_price
+    with pytest.raises(NonPositivePriceError):
+        _map(records)
 
 
 def test_deepest_category_name() -> None:

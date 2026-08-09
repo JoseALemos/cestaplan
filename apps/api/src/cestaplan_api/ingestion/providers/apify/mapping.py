@@ -16,11 +16,15 @@ Nothing is invented:
   A markdown is only read when ``price_decreased`` is true AND ``previous_unit_price`` is present
   and genuinely above ``unit_price`` (regular := previous, promotional := unit_price); anything else
   is read as a plain regular price. Every money value is a :class:`~decimal.Decimal` parsed robustly
-  from its string (es-ES separators tolerated); a malformed value raises, never a wrong number.
+  from its string (es-ES separators tolerated); a malformed value raises, never a wrong number. A
+  non-positive shelf price is refused (:class:`NonPositivePriceError`), never a free/negative cost.
 - NET CONTENT is structured: ``net_content_quantity := unit_size`` and ``net_content_unit`` is
-  ``size_format`` normalized to :class:`ContentUnit` (l->L, kg->KG, ml->ML, g->G). When either is
-  absent or the unit is unknown, BOTH stay ``None`` (never guessed) and the product falls back to
-  being non-costable — the honest limit.
+  ``size_format`` normalized to :class:`ContentUnit` (l->L, kg->KG, ml->ML, g->G). It is dropped to
+  ``None`` (product falls to non-costable, never mis-costed) when: the unit is absent/unknown;
+  ``approx_size`` is true (sold by an approximate/variable measure); or the net content fails the
+  consistency invariant ``unit_price / unit_size == reference_price`` (which catches packs — where
+  ``unit_size`` is a single unit but ``reference_price`` is over ``total_units`` — and unit
+  mismatches). BOTH quantity and unit are dropped together; nothing is ever guessed.
 - a supplementary ``unit_price``/``unit_price_unit`` (price per L/kg) is taken from
   ``reference_price`` + ``reference_format``; when it does not parse cleanly it is dropped.
 - ``category`` is the MOST SPECIFIC (deepest) node of the ``categories`` tree — the leaf carries the
@@ -102,9 +106,21 @@ _PRICE_INSTRUCTIONS_CORE = ("unit_price", "unit_size", "size_format", "reference
 # single decimal group. Anything else is refused (never silently coerced to a wrong number).
 _NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
+# Relative tolerance for the net-content consistency invariant (unit_price / unit_size ==
+# reference_price). Holds exactly on the 25 sampled items up to the reference's 3-decimal rounding;
+# a small tolerance absorbs that rounding while still catching packs and unit mismatches (where the
+# implied per-unit price differs from the reference by a whole factor, not a rounding sliver).
+_NET_CONTENT_TOLERANCE = Decimal("0.02")
+
 
 class InvalidMoneyValue(ValueError):
     """A money string that cannot be parsed to a clean Decimal (surfaced, never guessed)."""
+
+
+class NonPositivePriceError(InvalidMoneyValue):
+    """A shelf price that parsed cleanly but is <= 0 — refused, never coerced into a free/negative
+    cost. Blocks the batch (like an unknown fingerprint) so an anomalous price is reviewed, never
+    silently emitted as a 0 €/negative observation."""
 
 
 def _decimal_from_str(raw: str) -> Decimal:
@@ -164,6 +180,7 @@ class ApifyMercadonaPriceInstructions(BaseModel):
     reference_format: str | None = None
     previous_unit_price: str | None = None
     price_decreased: bool = False
+    approx_size: bool = False  # true -> sold by approximate/variable measure, not an exact package
 
 
 class ApifyMercadonaRecord(BaseModel):
@@ -310,7 +327,7 @@ class ApifyMercadonaMapper:
     ) -> ExternalCatalogProduct:
         pi = record.price_instructions
         regular, promotional = self._prices(pi)
-        net_qty, net_unit = _net_content(pi.unit_size, pi.size_format)
+        net_qty, net_unit = self._net_content_for(pi)
         unit_price, unit_price_unit = _reference_unit_price(pi.reference_price, pi.reference_format)
         return ExternalCatalogProduct(
             provider=self.provider_code,
@@ -335,7 +352,7 @@ class ApifyMercadonaMapper:
             unit_price_unit=unit_price_unit,
             image_url=record.thumbnail or None,
             product_url=record.share_url or None,
-            promotion=self.map_promotion(pi),
+            promotion=self.map_promotion(regular, promotional),
             verification_status=ProviderVerificationStatus.PROVIDER_REPORTED,
             confidence_score=Decimal("1.0"),
             raw_source_reference=(
@@ -348,14 +365,19 @@ class ApifyMercadonaMapper:
     def _prices(
         self, pi: ApifyMercadonaPriceInstructions
     ) -> tuple[Decimal, Decimal | None]:
-        """Return ``(regular, promotional)``.
+        """Return ``(regular, promotional)``, both strictly positive.
 
         A markdown is only read when ``price_decreased`` is true AND ``previous_unit_price`` is
         present and genuinely above ``unit_price`` (regular := previous, promotional := unit_price);
         anything else is a plain regular price. An unparseable ``previous_unit_price`` is ignored
         (never read as a markdown), so a malformed field can never invert the price.
+
+        A non-positive shelf price is refused with :class:`NonPositivePriceError` — never coerced
+        into a free/negative cost. The resulting ``regular`` is therefore always > 0.
         """
         current = pi.unit_price
+        if current <= 0:
+            raise NonPositivePriceError(f"non-positive unit_price: {current}")
         if pi.price_decreased and pi.previous_unit_price:
             try:
                 previous = _decimal_from_str(pi.previous_unit_price)
@@ -365,8 +387,40 @@ class ApifyMercadonaMapper:
                 return previous, current
         return current, None
 
-    def map_promotion(self, pi: ApifyMercadonaPriceInstructions) -> ProviderPromotion | None:
-        regular, promotional = self._prices(pi)
+    def _net_content_for(
+        self, pi: ApifyMercadonaPriceInstructions
+    ) -> tuple[Decimal, ContentUnit] | tuple[None, None]:
+        """Structured net content, dropped to ``(None, None)`` whenever it cannot be trusted.
+
+        Beyond the unit lookup in :func:`_net_content`, two grounded guards drop the net content so
+        the product falls to UNRESOLVED rather than being mis-costed:
+
+        - ``approx_size`` true -> the item is sold by an approximate/variable measure, so its
+          ``unit_size`` is not the exact fixed content a pro-rata package cost would assume.
+        - consistency: for every sampled item ``unit_price / unit_size == reference_price`` (the
+          price the customer pays over the package's own content). When the reference price is
+          present and the implied per-unit price disagrees by more than the tolerance, the net
+          content does not describe what the price covers — the classic pack case, where
+          ``unit_size`` is a single unit but ``reference_price`` is computed over ``total_units``
+          (costing by ``unit_size`` would undercount by the pack multiple). A unit mismatch (e.g. kg
+          vs l) trips the same guard. The reference is only a cross-check here, never the emitted
+          cost.
+        """
+        net_qty, net_unit = _net_content(pi.unit_size, pi.size_format)
+        if net_qty is None:
+            return None, None
+        if pi.approx_size:
+            return None, None
+        ref_value, _ = _reference_unit_price(pi.reference_price, pi.reference_format)
+        if ref_value is not None:
+            implied = pi.unit_price / net_qty
+            if abs(implied - ref_value) > _NET_CONTENT_TOLERANCE * ref_value:
+                return None, None
+        return net_qty, net_unit
+
+    def map_promotion(
+        self, regular: Decimal, promotional: Decimal | None
+    ) -> ProviderPromotion | None:
         if promotional is None:
             return None
         percentage = ((regular - promotional) / regular * Decimal("100")).quantize(Decimal("0.01"))
@@ -478,5 +532,6 @@ __all__ = [
     "ApifyMercadonaPriceInstructions",
     "ApifyMercadonaProvider",
     "ApifyMercadonaRecord",
+    "NonPositivePriceError",
     "UnsupportedSchemaError",
 ]
