@@ -36,7 +36,7 @@ from cestaplan_api.ingestion.providers.contracts import (
     SellUnit,
 )
 from cestaplan_api.ingestion.providers.registry import registry
-from cestaplan_api.models import PriceObservation, ProviderIngredientMapping
+from cestaplan_api.models import PriceObservation, Product, ProviderIngredientMapping, Retailer
 from cestaplan_api.services import targeted_discovery as td
 from tests.fixtures.provider_scenarios import ensure_test_ingredient, seed_test_retailer
 
@@ -45,13 +45,19 @@ _KEYS = ["aceite_oliva", "leche", "huevo"]
 
 
 def _product(
-    ext: str, name: str, price: str, qty: str, unit: ContentUnit
+    ext: str,
+    name: str,
+    price: str,
+    qty: str,
+    unit: ContentUnit,
+    category: str | None = None,
 ) -> ExternalCatalogProduct:
     return ExternalCatalogProduct(
         provider="apify-mercadona",
         retailer_slug="mercadona",
         external_product_id=ext,
         product_name=name,
+        category=category,
         sell_unit=SellUnit.PACKAGE,
         regular_price=Decimal(price),
         currency="EUR",
@@ -171,3 +177,64 @@ def test_apify_discovery_persists_only_staging_prices(
     )
     assert obs
     assert all(o.staging_only is True for o in obs)  # never a productive price
+
+
+def test_apify_discovery_persists_product_name(
+    db_session: Session, _apify_discovery: None
+) -> None:
+    # FIX A: the mapped product_name is persisted on Product.name (never a placeholder / ID), so the
+    # catalog and the review panel can show the name — parity with the Parse.bot path.
+    td.discover_and_map(
+        db_session, "apify-mercadona", _KEYS, now=_NOW,
+        approval_mode=td.ApprovalMode.REVIEW_ONLY,
+    )
+    rid = db_session.execute(
+        select(Retailer.id).where(Retailer.slug == "mercadona")
+    ).scalar_one()
+    products = list(
+        db_session.execute(select(Product).where(Product.retailer_id == rid)).scalars()
+    )
+    assert products
+    names = {p.name for p in products}
+    expected = {p.product_name for lst in _BY_QUERY.values() for p in lst}
+    assert expected <= names  # every mapped name landed on a Product.name
+    assert "producto" not in names and "" not in names  # never a placeholder / empty name
+
+
+# One category-only product (shares the lácteos category but has NO "leche" name token) plus one
+# real name match. The category-only match classifies to lexical 0.0 / confidence 0.40 — noise that
+# is never auto-approvable — and must NOT become a candidate; the name match must.
+_NOISE_KEYS = ["leche"]
+_NOISE_BY_QUERY: dict[str, list[ExternalCatalogProduct]] = {
+    "leche": [
+        _product(
+            "MERC-NOISE", "Batido de chocolate Hacendado", "1.20", "1", _L, category="Lacteos"
+        ),
+        _product("MERC-REAL", "Leche entera Hacendado 1 L", "0.89", "1", _L, category="Lacteos"),
+    ],
+}
+
+
+class _FakeNoiseProvider(_FakeApifyProvider):
+    def iterate_products(self, query: ProductQuery) -> Iterator[ExternalCatalogProduct]:
+        yield from _NOISE_BY_QUERY.get(query.search or "", [])
+
+
+def test_apify_discovery_drops_category_only_matches(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # FIX C: a category-only match (lexical 0, category 1) is dropped; a real name match is kept.
+    seed_test_retailer(db_session, "mercadona")
+    for key in _NOISE_KEYS:
+        ensure_test_ingredient(db_session, key)
+    monkeypatch.setattr(td, "_LOCAL", tmp_path)
+    monkeypatch.setitem(registry._factories, "apify-mercadona", _FakeNoiseProvider)
+
+    td.discover_and_map(
+        db_session, "apify-mercadona", _NOISE_KEYS, now=_NOW,
+        approval_mode=td.ApprovalMode.REVIEW_ONLY,
+    )
+    rows = _mappings(db_session)
+    ext_ids = {r.external_product_id for r in rows}
+    assert "MERC-REAL" in ext_ids  # the real name+category match is kept
+    assert "MERC-NOISE" not in ext_ids  # the category-only match is not created

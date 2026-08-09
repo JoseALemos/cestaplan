@@ -107,6 +107,11 @@ def _persist_product(
         external = ExternalProduct(retailer_id=retailer_id, external_id=p.external_product_id)
         db.add(external)
         db.flush()
+    # The mapped product carries the human-readable name (e.g. "Pan de molde blanco Hacendado").
+    # Persist it on the Product AND the ProductVariant so the catalog and the review panel show the
+    # name — never an ID — exactly like the Parse.bot path (provider_sync._upsert_variant). The name
+    # is refreshed on re-persist too, so a row created with a placeholder/stale name is healed.
+    mapped_name = (p.product_name or "").strip()[:200]
     product = (
         db.execute(
             select(Product).where(Product.id == external.canonical_product_id)
@@ -115,10 +120,18 @@ def _persist_product(
         else None
     )
     if product is None:
-        product = Product(name=p.product_name[:200] or "producto", is_synthetic=False)
+        product = Product(
+            retailer_id=retailer_id,
+            external_id=p.external_product_id,
+            name=mapped_name or "producto",
+            brand=p.brand,
+            is_synthetic=False,
+        )
         db.add(product)
         db.flush()
         external.canonical_product_id = product.id
+    elif mapped_name and product.name != mapped_name:
+        product.name = mapped_name  # heal a stale/placeholder name from an earlier persist
     variant = db.execute(
         select(ProductVariant).where(ProductVariant.external_product_id == external.id)
     ).scalar_one_or_none()
@@ -127,9 +140,11 @@ def _persist_product(
             retailer_id=retailer_id,
             external_product_id=external.id,
             product_id=product.id,
-            display_name=p.product_name[:200] or "variante",
+            display_name=mapped_name or "variante",
         )
         db.add(variant)
+    elif mapped_name:
+        variant.display_name = mapped_name
     variant.product_id = product.id
     variant.sell_unit = p.sell_unit.value
     variant.variable_weight = p.variable_weight
@@ -275,6 +290,13 @@ class ApprovalMode(StrEnum):
 _MAX_CANDIDATES_PER_PRODUCT = 3
 _MAX_CANDIDATES_PER_INGREDIENT = 25
 _MIN_REVIEWABLE_CONFIDENCE = Decimal("0.30")
+# A candidate must carry a NAME signal, not category alone. A category-only match (e.g. ingredient
+# ``harina`` -> "Pan de molde blanco Hacendado": lexical 0.0, category 1.0, confidence 0.40) shares
+# the product's category but has no lexical overlap with the ingredient — it is noise that is never
+# auto-approvable ("required terms incomplete") and floods the review queue. Requiring some lexical
+# name overlap (``lexical_score > _MIN_LEXICAL_NAME_SIGNAL``) drops those while keeping every real
+# name+category match (a genuine match always has lexical_score > 0).
+_MIN_LEXICAL_NAME_SIGNAL = Decimal("0")
 # Mapping-algorithm version: a re-run under a new version supersedes the prior candidates (§6).
 _MAPPING_VERSION = "2.0.0"
 
@@ -379,6 +401,7 @@ def discover_and_map(
             (key, cand)
             for key, cand in _classify_candidates(dto, ingredient_keys)
             if cand.confidence >= _MIN_REVIEWABLE_CONFIDENCE  # type: ignore[attr-defined]
+            and cand.lexical_score > _MIN_LEXICAL_NAME_SIGNAL  # type: ignore[attr-defined]
         ][:_MAX_CANDIDATES_PER_PRODUCT]
         for key, cand in kept:
             ing_id = ing_ids.get(key)

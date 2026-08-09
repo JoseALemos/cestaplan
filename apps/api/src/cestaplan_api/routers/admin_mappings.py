@@ -20,6 +20,7 @@ from cestaplan_api.ingestion.providers.contracts import ProductCostingMode
 from cestaplan_api.ingestion.providers.onboarding import classify_variant_costing_mode
 from cestaplan_api.models import (
     PriceObservation,
+    Product,
     ProductVariant,
     ProviderIngredientMapping,
 )
@@ -97,6 +98,24 @@ def _variant_facts(db: DbSession, row: ProviderIngredientMapping) -> dict[str, A
     }
 
 
+def _proposed_product_name(
+    db: DbSession, row: ProviderIngredientMapping, ev: dict[str, Any]
+) -> str | None:
+    """Human-readable name of the proposed product.
+
+    Prefers the persisted ``Product.name`` (the mapped product name, healed on every re-persist),
+    falling back to the ``evidence_json.product_name`` snapshot. Never returns a bare placeholder so
+    the panel shows a name instead of an ID for older/placeholder rows.
+    """
+    if row.normalized_product_id is not None:
+        name = db.execute(
+            select(Product.name).where(Product.id == row.normalized_product_id)
+        ).scalars().first()
+        if name and name not in ("producto", "variante"):
+            return name
+    return ev.get("product_name")
+
+
 def _serialize(db: DbSession, row: ProviderIngredientMapping, unlock: int) -> dict[str, Any]:
     ev = row.evidence_json or {}
     return {
@@ -106,7 +125,7 @@ def _serialize(db: DbSession, row: ProviderIngredientMapping, unlock: int) -> di
         "provider_code": row.provider_code,
         "retailer_slug": row.retailer_slug,
         "external_product_id": row.external_product_id,
-        "original_product_name": ev.get("product_name"),
+        "original_product_name": _proposed_product_name(db, row, ev),
         "matched_rules": ev.get("matched_rules", []),
         "failed_rules": ev.get("failed_rules", []),
         "warnings": ev.get("warnings", []),
