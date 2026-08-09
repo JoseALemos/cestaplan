@@ -514,7 +514,10 @@ class ApifyMercadonaProvider(PriceCatalogProvider):
         # keyword, so the run is small and cheap (a per-ingredient discovery search) instead of the
         # whole zone catalogue. Without a search term the behaviour is unchanged (full catalogue).
         # Empty postal omitted.
-        run_input: dict[str, object] = {"maxItems": limit}
+        # ``language=es``: the actor localises product names AND category labels; Spanish is
+        # required so the (Spanish) ingredient dictionary can classify the results (with the
+        # default "en" the names come back English — e.g. "Light olive oil" — and never match).
+        run_input: dict[str, object] = {"language": "es", "maxItems": limit}
         if postal_code:
             run_input["postalCode"] = postal_code
         if query.search:
