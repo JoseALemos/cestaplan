@@ -27,10 +27,17 @@ def resolve_store_for_postal(db: Session, retailer_id: int, postal_code: str) ->
     zone: repeated resolution within or across syncs returns the same row.
     """
     normalized = postal_code.strip()
+    # A zone store is external-code-less (real, imported stores always carry an external_code); the
+    # lookup governs exactly the set the ``ux_store_zone_retailer_postal`` unique index enforces, so
+    # it never returns — nor collides with — a real store that happens to share the postal code.
     existing = (
         db.execute(
             select(Store)
-            .where(Store.retailer_id == retailer_id, Store.postal_code == normalized)
+            .where(
+                Store.retailer_id == retailer_id,
+                Store.postal_code == normalized,
+                Store.external_code.is_(None),
+            )
             .order_by(Store.id)
         )
         .scalars()
