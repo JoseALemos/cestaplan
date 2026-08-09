@@ -1,32 +1,54 @@
 """Apify Mercadona mapper + provider (spec §5-§7) — grounded only in the observed capture.
 
-The mapper turns the Apify Mercadona actor's dataset items into the normalized
-:class:`ExternalCatalogProduct` without inventing anything:
+This mapper consumes the ``igolaizola/mercadona-scraper`` Apify actor, whose records are RICHER
+than the previous actor: they carry a structured ``price_instructions`` block with the real net
+content (``unit_size`` + ``size_format``), so Mercadona products are costed as a normal
+FIXED_PACKAGE — no unit-price workaround is needed (``apify-mercadona`` is deliberately NOT in
+``quality.UNIT_PRICE_COSTED_PROVIDERS``).
 
-- ``ean`` is ``null`` for every sampled item, so ``barcode`` stays ``None`` when absent and is
-  only ever the value the source reports (§7 — never fabricated from the name).
-- net content is NOT extracted from the ``unit`` string ("6 x 6 l"); ``net_content_quantity`` /
-  ``net_content_unit`` stay ``None``. Instead Mercadona publishes a real reference **unit price**
-  ("0.84/L"), so — exactly like DIA — the product is costed by ``unit_price`` (see
-  ``quality.UNIT_PRICE_COSTED_PROVIDERS``), never by a guessed package size.
-- ``price_scope`` is ``postal_code``: Mercadona prices vary by delivery zone (postal code). The
-  provider runs with one postal code (``apify_mercadona_default_postal_code``) and threads it to
-  the mapper, which stamps it on every product. Without a postal code the scope is ``UNKNOWN``
-  (the honest limit — a price with no zone cannot be localised).
-- ``observed_at`` is the source's own ``scrapedAt`` (ISO-8601, tz-aware) — a genuine observation
-  time, not merely the retrieval time.
-- a promotion is only applied when ``promotionPrice`` is present AND genuinely below the regular
-  price; an ambiguous/absent promo is never read as a markdown.
+Nothing is invented:
+
+- ``barcode`` is ``None`` for every item — the actor exposes no EAN, and a barcode is never
+  fabricated from the name (§7).
+- ``currency`` is the constant ``"EUR"``: Mercadona is a Spanish retailer and the actor does not
+  report a currency, so it is a documented constant, not a guessed field.
+- PRICE comes from ``price_instructions``: ``unit_price`` is the real shelf price the customer pays.
+  A markdown is only read when ``price_decreased`` is true AND ``previous_unit_price`` is present
+  and genuinely above ``unit_price`` (regular := previous, promotional := unit_price); anything else
+  is read as a plain regular price. Every money value is a :class:`~decimal.Decimal` parsed robustly
+  from its string (es-ES separators tolerated); a malformed value raises, never a wrong number. A
+  non-positive shelf price is refused (:class:`NonPositivePriceError`), never a free/negative cost.
+- NET CONTENT is structured: ``net_content_quantity := unit_size`` and ``net_content_unit`` is
+  ``size_format`` normalized to :class:`ContentUnit` (l->L, kg->KG, ml->ML, g->G). It is dropped to
+  ``None`` (product falls to non-costable, never mis-costed) when: the unit is absent/unknown;
+  ``approx_size`` is true (sold by an approximate/variable measure); or the net content fails the
+  consistency invariant ``unit_price / unit_size == reference_price`` (which catches packs — where
+  ``unit_size`` is a single unit but ``reference_price`` is over ``total_units`` — and unit
+  mismatches). BOTH quantity and unit are dropped together; nothing is ever guessed.
+- a supplementary ``unit_price``/``unit_price_unit`` (price per L/kg) is taken from
+  ``reference_price`` + ``reference_format``; when it does not parse cleanly it is dropped.
+- ``category`` is the MOST SPECIFIC (deepest) node of the ``categories`` tree — the leaf carries the
+  most useful signal for ingredient matching; ``None`` when the tree is empty.
+- ``availability``: ``published`` and no active ``unavailable_from``/``unavailable_weekdays`` ->
+  IN_STOCK; a future/again unavailability window -> LIMITED; unpublished or an active
+  ``unavailable_from`` -> OUT_OF_STOCK.
+- ``observed_at`` is the RETRIEVAL time threaded by the provider: this actor emits no source
+  timestamp (unlike the previous one's ``scrapedAt``), so ``source_observed_at`` is recorded as
+  absent in ``raw_source_reference``.
+- ``price_scope`` is ``postal_code``: Mercadona prices vary by delivery zone. The provider runs
+  with one postal code (``apify_mercadona_default_postal_code``) and threads it here, stamping it on
+  every product. Without a postal code the scope is ``UNKNOWN`` (no zone -> price unlocatable).
 - an unknown schema fingerprint blocks normalization.
 
 Schema pinning: the fingerprint is computed over the REQUIRED core — the always-present,
-stable-typed fields the mapper depends on (``name``, ``sku``, ``price``, ``currency``,
-``scrapedAt``, ``inStock``, ``url``). ``ean``/``promotionPrice`` — and now
-``brand``/``category``/``imageUrl``/``unitPrice`` (plus the unconsumed ``unit``) — are legitimately
-nullable/variable across real captures, so they are deliberately EXCLUDED from the core; that keeps
-the fingerprint stable when a real capture is heterogeneous (a product without ``unitPrice`` or
-``brand`` still matches the pinned core and never blocks the batch), while any structural drift in a
-depended-on core field still blocks.
+stable-typed fields the mapper depends on: top-level ``id``/``display_name``/``share_url``/
+``published`` and, inside ``price_instructions``, ``unit_price``/``unit_size``/``size_format``/
+``reference_price``. Variable/nullable fields (``previous_unit_price``, ``thumbnail``,
+``packaging``, ``categories``, the promo flags) are deliberately EXCLUDED so a heterogeneous real
+capture never blocks the batch, while structural drift in a depended-on core field still blocks.
+``unit_size`` is a JSON number sometimes an int (``5``) and sometimes a float (``0.75``); it is
+normalized to a canonical float in the core projection so that harmless int/float variance across a
+batch never shifts the fingerprint, while a genuine type change (e.g. to a string) still blocks.
 """
 
 from __future__ import annotations
@@ -34,7 +56,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
@@ -44,6 +66,7 @@ from cestaplan_api.ingestion.contracts import PriceScope, PriceType
 from cestaplan_api.ingestion.providers.apify.client import ApifyClient
 from cestaplan_api.ingestion.providers.contracts import (
     Availability,
+    ContentUnit,
     ExternalCatalogProduct,
     HealthStatus,
     PriceCatalogProvider,
@@ -59,50 +82,55 @@ from cestaplan_api.ingestion.providers.contracts import (
 from cestaplan_api.ingestion.providers.exceptions import NotSupportedError, ProviderError
 from cestaplan_api.ingestion.providers.schema_tools import merge_samples, schema_fingerprint
 
-# ``unitPrice`` unit tokens Mercadona uses (right of the "/") -> our unit codes. Unknown -> the
-# unit price is dropped (never guessed), so the product simply isn't costable by unit price.
-_UNIT_PRICE_UNITS = {
+# ``size_format`` (net-content unit) tokens -> our ContentUnit. Unknown -> net content dropped.
+_SIZE_FORMAT_UNITS = {
+    "l": ContentUnit.L,
+    "kg": ContentUnit.KG,
+    "ml": ContentUnit.ML,
+    "g": ContentUnit.G,
+}
+# ``reference_format`` (€/unit) tokens -> our unit code for the supplementary unit price.
+_REFERENCE_FORMAT_UNITS = {
     "l": "l",
-    "litro": "l",
     "kg": "kg",
-    "kilo": "kg",
-    "kilogramo": "kg",
     "ml": "ml",
     "g": "g",
-    "gramo": "g",
 }
-# The required-field ("core") projection whose structure the mapper is pinned to: only the
-# always-present, stable-typed fields the mapper truly depends on. ``ean``/``promotionPrice`` were
-# already excluded (nullable in the capture); ``brand``/``category``/``imageUrl``/``unitPrice`` join
-# them (same reasoning — legitimately nullable across real, heterogeneous captures, so they must not
-# block a batch). ``unit`` is not consumed by the mapper, so it is out of the core too.
-_REQUIRED = (
-    "currency",
-    "inStock",
-    "name",
-    "price",
-    "scrapedAt",
-    "sku",
-    "url",
-)
+# The always-present core the mapper depends on (see module docstring). Top-level + a projection of
+# the price_instructions block; everything else is legitimately nullable/variable and excluded.
+_TOP_CORE = ("id", "display_name", "share_url", "published")
+_PRICE_INSTRUCTIONS_CORE = ("unit_price", "unit_size", "size_format", "reference_price")
 
 
 # A clean numeric literal after separators are normalised: optional sign, digits, optional
 # single decimal group. Anything else is refused (never silently coerced to a wrong number).
 _NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
+# Relative tolerance for the net-content consistency invariant (unit_price / unit_size ==
+# reference_price). Holds exactly on the 25 sampled items up to the reference's 3-decimal rounding;
+# a small tolerance absorbs that rounding while still catching packs and unit mismatches (where the
+# implied per-unit price differs from the reference by a whole factor, not a rounding sliver).
+_NET_CONTENT_TOLERANCE = Decimal("0.02")
+
 
 class InvalidMoneyValue(ValueError):
     """A money string that cannot be parsed to a clean Decimal (surfaced, never guessed)."""
+
+
+class NonPositivePriceError(InvalidMoneyValue):
+    """A shelf price that parsed cleanly but is <= 0 — refused, never coerced into a free/negative
+    cost. Blocks the batch (like an unknown fingerprint) so an anomalous price is reviewed, never
+    silently emitted as a 0 €/negative observation."""
 
 
 def _decimal_from_str(raw: str) -> Decimal:
     """Parse a money string to Decimal, tolerating a currency symbol and es-ES separators.
 
     Handles ``"5,04"`` (comma decimal), ``"5,04 €"`` (currency symbol), ``"1.234,56"`` (dot
-    thousands + comma decimal) and ``"1,234.56"`` (comma thousands + dot decimal). Anything that is
-    not a clean number after normalisation raises :class:`InvalidMoneyValue` — a malformed price is
-    NEVER coerced into a wrong number.
+    thousands + comma decimal) and ``"1,234.56"`` (comma thousands + dot decimal), as well as the
+    leading whitespace the actor sometimes emits (``"       18.75"``). Anything that is not a clean
+    number after normalisation raises :class:`InvalidMoneyValue` — a malformed price is NEVER
+    coerced into a wrong number.
     """
     cleaned = re.sub(r"[^\d.,\-]", "", raw.strip())  # drop currency symbol / spaces / letters
     if "." in cleaned and "," in cleaned:
@@ -119,8 +147,8 @@ def _decimal_from_str(raw: str) -> Decimal:
 
 
 def _to_decimal(value: object) -> object:
-    # money arrives as a JSON number (int/float) or, occasionally, a string with a currency symbol
-    # and/or es-ES separators; parse robustly and go through str to avoid float imprecision.
+    # money arrives as a string with es-ES separators / a currency symbol, or (for unit_size) as a
+    # JSON number; parse robustly and go through str to avoid float imprecision.
     if value is None or isinstance(value, Decimal):
         return value
     if isinstance(value, str):
@@ -135,78 +163,137 @@ class UnsupportedSchemaError(ProviderError):
     """The batch's schema fingerprint is not one the mapper is validated against."""
 
 
-class ApifyMercadonaRecord(BaseModel):
-    """One Apify Mercadona dataset item — derived ONLY from the observed capture.
+class ApifyMercadonaPriceInstructions(BaseModel):
+    """The ``price_instructions`` block — the only place price/net-content live.
 
-    Only the depended-on core (``name``/``sku``/``price``/``currency``/``url``/``inStock``/
-    ``scrapedAt``) is required; every other field (``brand``/``category``/``unit``/``unitPrice``/
-    ``imageUrl``/``ean``/``promotionPrice``) is nullable so a heterogeneous real capture never
-    blocks the batch. ``extra="ignore"`` tolerates new fields without failing.
+    Only the depended-on core (``unit_price``/``unit_size``/``size_format``/``reference_price``) is
+    required; the promo fields and ``reference_format`` are nullable so a heterogeneous capture
+    never blocks the batch.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    name: str
-    sku: str
-    price: Money
-    currency: str
-    url: str
-    inStock: bool
-    scrapedAt: str
-    # Nullable, non-core fields: legitimately absent/variable across real captures, so a missing one
-    # must never block the batch (same reasoning as ean/promotionPrice).
-    brand: str | None = None
-    category: str | None = None
-    unit: str | None = None
-    unitPrice: str | None = None
-    imageUrl: str | None = None
-    ean: str | None = None
-    promotionPrice: Money | None = None
+    unit_price: Money
+    unit_size: Money  # JSON number (net content in size_format units) -> Decimal via str
+    size_format: str
+    reference_price: str  # parsed leniently in the mapper (a bad value -> no supplementary price)
+    reference_format: str | None = None
+    previous_unit_price: str | None = None
+    price_decreased: bool = False
+    approx_size: bool = False  # true -> sold by approximate/variable measure, not an exact package
 
 
-def _parse_observed_at(raw: str) -> datetime:
-    """Parse the source ``scrapedAt`` ISO-8601 timestamp as a tz-aware datetime (UTC if naive)."""
-    normalized = raw.strip()
-    if normalized.endswith("Z"):  # 3.11+ handles 'Z', but normalise for safety across versions
-        normalized = normalized[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(normalized)
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+class ApifyMercadonaRecord(BaseModel):
+    """One ``igolaizola/mercadona-scraper`` dataset item — derived ONLY from the observed capture.
 
-
-def _parse_unit_price(raw: str) -> tuple[Decimal | None, str | None]:
-    """Parse a Mercadona unit price like ``"0.84/L"`` -> ``(Decimal("0.84"), "l")``.
-
-    Returns ``(None, None)`` when the string is not a clean ``value/unit`` with a positive value
-    and a known unit — the mapper never guesses.
+    Only the depended-on core is required; every other field is nullable so a real, heterogeneous
+    capture never blocks the batch. ``extra="ignore"`` tolerates new fields without failing.
     """
-    value_part, sep, unit_part = raw.partition("/")
-    if not sep:
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    display_name: str
+    share_url: str
+    published: bool
+    price_instructions: ApifyMercadonaPriceInstructions
+    # Nullable / non-core fields.
+    thumbnail: str | None = None
+    categories: list[dict] | None = None
+    unavailable_from: str | None = None
+    unavailable_weekdays: list | None = None
+
+
+def _deepest_category_name(categories: list[dict] | None) -> str | None:
+    """The name of the deepest (most specific) node in the ``categories`` tree, or None if empty.
+
+    The leaf carries the most useful signal for ingredient matching; ties keep the first branch.
+    """
+    if not categories:
+        return None
+    best_name: str | None = None
+    best_level = -1
+
+    def walk(node: dict) -> None:
+        nonlocal best_name, best_level
+        level = node.get("level")
+        name = node.get("name")
+        if isinstance(level, int) and level > best_level and isinstance(name, str) and name:
+            best_level, best_name = level, name
+        children = node.get("categories")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    walk(child)
+
+    for root in categories:
+        if isinstance(root, dict):
+            walk(root)
+    return best_name
+
+
+def _net_content(
+    quantity: Decimal, size_format: str
+) -> tuple[Decimal, ContentUnit] | tuple[None, None]:
+    """Structured net content from ``unit_size`` + ``size_format``; (None, None) if unit unknown."""
+    unit = _SIZE_FORMAT_UNITS.get(size_format.strip().lower())
+    if unit is None or quantity <= 0:
+        return None, None
+    return quantity, unit
+
+
+def _reference_unit_price(
+    reference_price: str, reference_format: str | None
+) -> tuple[Decimal | None, str | None]:
+    """Supplementary €/unit price from ``reference_price`` + ``reference_format``.
+
+    Returns ``(None, None)`` when the price does not parse to a positive Decimal or the unit is
+    unknown — the mapper never guesses.
+    """
+    if not reference_format:
+        return None, None
+    unit = _REFERENCE_FORMAT_UNITS.get(reference_format.strip().lower())
+    if unit is None:
         return None, None
     try:
-        value = Decimal(value_part.strip().replace(",", "."))
-    except (InvalidOperation, ValueError):
+        value = _decimal_from_str(reference_price)
+    except InvalidMoneyValue:
         return None, None
     if value <= 0:
-        return None, None
-    unit = _UNIT_PRICE_UNITS.get(unit_part.strip().lower())
-    if unit is None:
         return None, None
     return value, unit
 
 
 class ApifyMercadonaMapper:
-    mapping_version = "1.0.0"
+    mapping_version = "2.0.0"  # igolaizola schema (structured net content); was 1.0.0 (studio-amba)
     retailer_slug = "mercadona"
     provider_code = "apify-mercadona"
-    # Fingerprint of the required-field core observed in the sanitized Mercadona sample.
+    # Fingerprint of the required-field core observed in the sanitized igolaizola Mercadona sample.
     supported_schema_fingerprints = (
-        "8cf656ce8d16f8c184216900dca24827918759c8f2840c198a97a655c201280c",
+        "ddb7440cf6358ed7c6a9f114d56ae59531ab1b4c233bd3fb57fc70b002bade7c",
     )
+
+    def _core(self, record: dict) -> dict:
+        """Project a record to the required core; ``unit_size`` normalized to a canonical float.
+
+        Only present keys are included (a missing optional never alters the structure).
+        ``unit_size`` is a JSON number that is sometimes int, sometimes float; casting it to float
+        pins it as "numeric" so harmless int/float variance across the batch never shifts the
+        fingerprint, while a genuine type change (e.g. to a string) still changes it and blocks.
+        """
+        core: dict = {k: record[k] for k in _TOP_CORE if k in record}
+        pi = record.get("price_instructions")
+        if isinstance(pi, dict):
+            projected = {k: pi[k] for k in _PRICE_INSTRUCTIONS_CORE if k in pi}
+            size = projected.get("unit_size")
+            if isinstance(size, (int, float)) and not isinstance(size, bool):
+                projected["unit_size"] = float(size)
+            core["price_instructions"] = projected
+        return core
 
     def detect_schema(self, records: list[dict]) -> str:
         """Fingerprint of the required-field core (stable to nullable-field variance)."""
-        core = [{k: r[k] for k in _REQUIRED if k in r} for r in records]
-        return schema_fingerprint(merge_samples(core))
+        return schema_fingerprint(merge_samples([self._core(r) for r in records]))
 
     def validate_supported_schema(self, records: list[dict]) -> str:
         fp = self.detect_schema(records)
@@ -217,65 +304,123 @@ class ApifyMercadonaMapper:
         return fp
 
     def map_products(
-        self, records: list[dict], *, postal_code: str | None = None
+        self, records: list[dict], *, postal_code: str | None = None, observed_at: datetime
     ) -> list[ExternalCatalogProduct]:
         if not records:  # empty response -> nothing to normalize (not an error)
             return []
         self.validate_supported_schema(records)  # unknown fingerprint blocks normalization
         return [
-            self.map_product(ApifyMercadonaRecord.model_validate(r), postal_code=postal_code)
+            self.map_product(
+                ApifyMercadonaRecord.model_validate(r),
+                postal_code=postal_code,
+                observed_at=observed_at,
+            )
             for r in records
         ]
 
     def map_product(
-        self, record: ApifyMercadonaRecord, *, postal_code: str | None = None
+        self,
+        record: ApifyMercadonaRecord,
+        *,
+        postal_code: str | None = None,
+        observed_at: datetime,
     ) -> ExternalCatalogProduct:
-        regular = record.price
-        promotional = self._promotional_price(regular, record.promotionPrice)
-        unit_price, unit_price_unit = (
-            _parse_unit_price(record.unitPrice) if record.unitPrice else (None, None)
-        )
-        observed_at = _parse_observed_at(record.scrapedAt)
+        pi = record.price_instructions
+        regular, promotional = self._prices(pi)
+        net_qty, net_unit = self._net_content_for(pi)
+        unit_price, unit_price_unit = _reference_unit_price(pi.reference_price, pi.reference_format)
         return ExternalCatalogProduct(
             provider=self.provider_code,
             retailer_slug=self.retailer_slug,
-            external_product_id=record.sku,
-            product_name=record.name,
-            brand=record.brand or None,
-            category=record.category or None,
-            barcode=record.ean or None,  # null/empty -> None; never invented
-            sell_unit=SellUnit.PACKAGE,  # sold as a package; net content not extracted
+            external_product_id=record.id,
+            product_name=record.display_name,
+            brand=None,  # actor exposes no brand field — never inferred from the name
+            category=_deepest_category_name(record.categories),
+            barcode=None,  # no EAN in this actor — never invented
+            sell_unit=SellUnit.PACKAGE,  # sold as a package with a known net content
             regular_price=regular,
             promotional_price=promotional,
-            currency=record.currency,  # taken from the response, not assumed
+            currency="EUR",  # Mercadona (Spain); actor reports no currency -> documented constant
             price_scope=self.map_scope(postal_code),  # postal_code (zone) — see map_scope
             postal_code=postal_code or None,
-            observed_at=observed_at,  # source's own scrapedAt (tz-aware)
-            availability=Availability.IN_STOCK if record.inStock else Availability.OUT_OF_STOCK,
+            observed_at=observed_at,  # retrieval time; this actor provides no source timestamp
+            availability=self.map_availability(record),
             variable_weight=False,
-            net_content_quantity=None,  # §7: not extracted from the "unit" string
-            net_content_unit=None,
-            unit_price=unit_price,
+            net_content_quantity=net_qty,  # structured net content -> FIXED_PACKAGE costing
+            net_content_unit=net_unit,
+            unit_price=unit_price,  # supplementary €/L or €/kg reference price
             unit_price_unit=unit_price_unit,
-            image_url=record.imageUrl or None,
-            product_url=record.url or None,
-            promotion=self.map_promotion(regular, record.promotionPrice),
+            image_url=record.thumbnail or None,
+            product_url=record.share_url or None,
+            promotion=self.map_promotion(regular, promotional),
             verification_status=ProviderVerificationStatus.PROVIDER_REPORTED,
             confidence_score=Decimal("1.0"),
             raw_source_reference=(
-                f"sku:{record.sku}; source_observed_at={observed_at.isoformat()}; "
-                f"postal_code={postal_code or 'none'}; mapping={self.mapping_version}"
+                f"id:{record.id}; source_observed_at=absent; "
+                f"retrieved_at={observed_at.isoformat()}; postal_code={postal_code or 'none'}; "
+                f"mapping={self.mapping_version}"
             ),
         )
 
-    def _promotional_price(self, regular: Decimal, promo: Decimal | None) -> Decimal | None:
-        """A promo price only when present AND genuinely below the regular price."""
-        if promo is not None and 0 < promo < regular:
-            return promo
-        return None
+    def _prices(
+        self, pi: ApifyMercadonaPriceInstructions
+    ) -> tuple[Decimal, Decimal | None]:
+        """Return ``(regular, promotional)``, both strictly positive.
 
-    def map_promotion(self, regular: Decimal, promo: Decimal | None) -> ProviderPromotion | None:
-        promotional = self._promotional_price(regular, promo)
+        A markdown is only read when ``price_decreased`` is true AND ``previous_unit_price`` is
+        present and genuinely above ``unit_price`` (regular := previous, promotional := unit_price);
+        anything else is a plain regular price. An unparseable ``previous_unit_price`` is ignored
+        (never read as a markdown), so a malformed field can never invert the price.
+
+        A non-positive shelf price is refused with :class:`NonPositivePriceError` — never coerced
+        into a free/negative cost. The resulting ``regular`` is therefore always > 0.
+        """
+        current = pi.unit_price
+        if current <= 0:
+            raise NonPositivePriceError(f"non-positive unit_price: {current}")
+        if pi.price_decreased and pi.previous_unit_price:
+            try:
+                previous = _decimal_from_str(pi.previous_unit_price)
+            except InvalidMoneyValue:
+                return current, None
+            if previous > current > 0:
+                return previous, current
+        return current, None
+
+    def _net_content_for(
+        self, pi: ApifyMercadonaPriceInstructions
+    ) -> tuple[Decimal, ContentUnit] | tuple[None, None]:
+        """Structured net content, dropped to ``(None, None)`` whenever it cannot be trusted.
+
+        Beyond the unit lookup in :func:`_net_content`, two grounded guards drop the net content so
+        the product falls to UNRESOLVED rather than being mis-costed:
+
+        - ``approx_size`` true -> the item is sold by an approximate/variable measure, so its
+          ``unit_size`` is not the exact fixed content a pro-rata package cost would assume.
+        - consistency: for every sampled item ``unit_price / unit_size == reference_price`` (the
+          price the customer pays over the package's own content). When the reference price is
+          present and the implied per-unit price disagrees by more than the tolerance, the net
+          content does not describe what the price covers — the classic pack case, where
+          ``unit_size`` is a single unit but ``reference_price`` is computed over ``total_units``
+          (costing by ``unit_size`` would undercount by the pack multiple). A unit mismatch (e.g. kg
+          vs l) trips the same guard. The reference is only a cross-check here, never the emitted
+          cost.
+        """
+        net_qty, net_unit = _net_content(pi.unit_size, pi.size_format)
+        if net_qty is None:
+            return None, None
+        if pi.approx_size:
+            return None, None
+        ref_value, _ = _reference_unit_price(pi.reference_price, pi.reference_format)
+        if ref_value is not None:
+            implied = pi.unit_price / net_qty
+            if abs(implied - ref_value) > _NET_CONTENT_TOLERANCE * ref_value:
+                return None, None
+        return net_qty, net_unit
+
+    def map_promotion(
+        self, regular: Decimal, promotional: Decimal | None
+    ) -> ProviderPromotion | None:
         if promotional is None:
             return None
         percentage = ((regular - promotional) / regular * Decimal("100")).quantize(Decimal("0.01"))
@@ -284,6 +429,15 @@ class ApifyMercadonaMapper:
             promotional_price=promotional,
             percentage_discount=percentage,
         )
+
+    def map_availability(self, record: ApifyMercadonaRecord) -> Availability:
+        # Unpublished or an active unavailability date -> out of stock; a weekday-restricted window
+        # -> limited; otherwise in stock. Conservative reads of the actor's availability signals.
+        if not record.published or record.unavailable_from:
+            return Availability.OUT_OF_STOCK
+        if record.unavailable_weekdays:
+            return Availability.LIMITED
+        return Availability.IN_STOCK
 
     def map_scope(self, postal_code: str | None) -> PriceScope:
         # Mercadona prices are per delivery zone (postal code). With a postal code the scope IS
@@ -324,7 +478,7 @@ class ApifyMercadonaProvider(PriceCatalogProvider):
             incremental_sync=False,
             promotions=True,
             categories=True,
-            search=False,  # actor input is a bounded maxItems run, not a search query
+            search=False,  # actor input is a bounded run, not a search query
         )
 
     def get_source_metadata(self) -> ProviderMetadata:
@@ -352,20 +506,32 @@ class ApifyMercadonaProvider(PriceCatalogProvider):
             raise NotSupportedError("apify mercadona not configured (missing token/flags)")
         limit = query.max_products or 30
         postal_code = query.postal_code or self._postal_code
-        # Actor input: the capturer used ``{"maxItems": limit}``; the postal code is threaded here
-        # under ``postalCode`` (assumed key for the zone). An empty postal code is omitted.
+        # Actor input: ``igolaizola/mercadona-scraper`` ignores ``maxItems`` (it returns the full
+        # catalogue for the zone), but we pass it anyway as a harmless intent hint. The zone/
+        # warehouse is selected via ``postalCode`` — an ASSUMED key: the actor's example run input
+        # was a placeholder, so if the actor ignores it the scope simply reflects the actor's
+        # default warehouse (zone sealing downstream is unchanged either way). Empty postal omitted.
         run_input: dict[str, object] = {"maxItems": limit}
         if postal_code:
             run_input["postalCode"] = postal_code
-        run_id = self._client.start_run(self._settings.apify_mercadona_actor_id, run_input)
+        run_id = self._client.start_run(
+            self._settings.apify_mercadona_actor_id,
+            run_input,
+            max_total_charge_usd=self._settings.apify_max_total_charge_usd,
+        )
         run = self._client.wait_for_run(run_id)
         records = self._client.get_dataset_items(str(run["defaultDatasetId"]), limit=limit)[:limit]
-        yield from self._mapper.map_products(records, postal_code=postal_code or None)
+        observed_at = datetime.now(UTC)
+        yield from self._mapper.map_products(
+            records, postal_code=postal_code or None, observed_at=observed_at
+        )
 
 
 __all__ = [
     "ApifyMercadonaMapper",
+    "ApifyMercadonaPriceInstructions",
     "ApifyMercadonaProvider",
     "ApifyMercadonaRecord",
+    "NonPositivePriceError",
     "UnsupportedSchemaError",
 ]
