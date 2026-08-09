@@ -34,18 +34,7 @@ from cestaplan_api.models import (
     RecipeIngredient,
     Retailer,
 )
-
-# Scopes acceptable when a specific location is requested (more specific than the requirement).
-_SCOPE_RANK = {
-    "exact_store": 1,
-    "delivery_zone": 2,
-    "postal_code": 3,
-    "municipality": 4,
-    "province": 5,
-    "region": 6,
-    "national": 7,
-    "unknown": 8,
-}
+from cestaplan_api.services.price_scope import scope_satisfies
 
 
 def _ratio(n: int, total: int) -> Decimal:
@@ -321,11 +310,9 @@ def _evaluate_ingredient(
 
 
 def _scope_ok(candidate_scope: str, required_scope: str) -> bool:
-    if required_scope == "national":
-        return True  # any real scope satisfies a national requirement
-    if candidate_scope == "unknown":
-        return False
-    return _SCOPE_RANK.get(candidate_scope, 99) <= _SCOPE_RANK.get(required_scope, 0)
+    """A candidate satisfies a requirement only when its area contains it (shared zone-safety rule):
+    ``national`` satisfies any plan; a zonified price never satisfies a broader/``national`` one."""
+    return scope_satisfies(candidate_scope, required_scope)
 
 
 def _missing_reason(st: IngredientStatus) -> str:

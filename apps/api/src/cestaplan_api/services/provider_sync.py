@@ -44,6 +44,7 @@ from cestaplan_api.services.observation_persistence import (
     RecordMetrics,
     record_price_fact,
 )
+from cestaplan_api.services.store_zone_resolution import resolve_store_for_postal
 
 
 class SyncMode(StrEnum):
@@ -261,9 +262,20 @@ def _append_observation(
     """
     scope = product.price_scope
     confidence = product.confidence_score or Decimal("1.0")
+    # Zonified pricing (Mercadona): a product carrying a postal_code is resolved to the chain's
+    # zone Store so the observation is stamped with the store that OWNS the price. store_id is part
+    # of the lane/fact identity, so each zone keeps an independent history and a zone-A price is
+    # never value-matched to a zone-B (or no-zone) plan. National providers (no postal_code) keep
+    # store_id=None — unchanged behaviour.
+    store_id = (
+        resolve_store_for_postal(db, retailer_id, product.postal_code).id
+        if product.postal_code
+        else None
+    )
     if staging:
         candidate = PriceObservation(
             retailer_id=retailer_id,
+            store_id=store_id,
             product_variant_id=variant.id,
             price_scope=scope.value,
             price_type=PriceType.REGULAR.value,
@@ -285,13 +297,17 @@ def _append_observation(
         record_price_fact(db, candidate, provenance, imported_at=as_of, metrics=metrics)
         return
 
-    # Production: append-only history (unchanged behavior).
+    # Production: append-only history. The lane is scoped to the resolved store (store_id is None
+    # for national providers, so their behaviour is byte-identical; a zonified store keeps its own
+    # append-only chain).
     prior = (
         db.execute(
             select(PriceObservation)
             .where(
                 PriceObservation.product_variant_id == variant.id,
-                PriceObservation.store_id.is_(None),
+                PriceObservation.store_id.is_(None)
+                if store_id is None
+                else PriceObservation.store_id == store_id,
                 PriceObservation.price_scope == scope.value,
                 PriceObservation.staging_only.is_(False),
                 PriceObservation.valid_until.is_(None),
@@ -310,6 +326,7 @@ def _append_observation(
     db.add(
         PriceObservation(
             retailer_id=retailer_id,
+            store_id=store_id,
             product_variant_id=variant.id,
             price_scope=scope.value,
             price_type=PriceType.REGULAR.value,

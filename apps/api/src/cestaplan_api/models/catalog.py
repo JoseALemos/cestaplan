@@ -82,6 +82,16 @@ class Store(BaseModel):
             unique=True,
             postgresql_where=text("external_code IS NOT NULL"),
         ),
+        # Zonified pricing: at most one external-code-less delivery-zone store per (retailer,
+        # postal_code), so concurrent syncs never duplicate a zone. Real stores carry an
+        # external_code and are excluded, so several may share a postal code.
+        Index(
+            "ux_store_zone_retailer_postal",
+            "retailer_id",
+            "postal_code",
+            unique=True,
+            postgresql_where=text("external_code IS NULL AND postal_code IS NOT NULL"),
+        ),
     )
 
     retailer_id: Mapped[int] = mapped_column(

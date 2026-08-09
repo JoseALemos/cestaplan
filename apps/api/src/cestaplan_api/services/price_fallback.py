@@ -19,6 +19,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from cestaplan_api.ingestion.providers.contracts import ProductCostingMode
+from cestaplan_api.services.price_scope import scope_satisfies
 
 
 class FallbackAction(StrEnum):
@@ -114,24 +115,11 @@ class FallbackDecision:
         }
 
 
-_SCOPE_COMPATIBLE = {  # a candidate scope is acceptable for a required scope if it is >= as broad
-    "exact_store": 1,
-    "delivery_zone": 2,
-    "postal_code": 3,
-    "municipality": 4,
-    "province": 5,
-    "region": 6,
-    "national": 7,
-    "unknown": 8,
-}
-
-
 def _scope_ok(candidate_scope: str, required_scope: str) -> bool:
-    """A candidate must be at least as specific as required (never a broader-than-asked scope
-    silently upgraded); ``unknown`` is only acceptable when the requirement is also unknown."""
-    if candidate_scope == "unknown":
-        return required_scope == "unknown"
-    return _SCOPE_COMPATIBLE.get(candidate_scope, 99) <= _SCOPE_COMPATIBLE.get(required_scope, 0)
+    """A candidate satisfies the requirement only when its area contains it (shared zone-safety
+    rule): ``national`` covers everyone; a zonified ``postal_code``/``exact_store`` price NEVER
+    satisfies a broader/``national`` requirement — a no-zone plan is never served a zoned price."""
+    return scope_satisfies(candidate_scope, required_scope)
 
 
 def _blocks_on_constraint(c: FallbackCandidate, need: IngredientNeed) -> bool:

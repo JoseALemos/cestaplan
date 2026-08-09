@@ -38,6 +38,7 @@ from cestaplan_api.models import (
     ProductVariant,
     PromotionRule,
 )
+from cestaplan_api.services.price_scope import gated_current_price
 from cestaplan_engine.packaging import compute_packages
 from cestaplan_engine.units import ConversionError, UnitConverter
 
@@ -272,10 +273,16 @@ class BasketResolver:
                 item=item, reason="no_match", detail="Ningún producto coincide"
             )
 
+        # Zone safety (HARD invariant): in chain-level mode (store_id=None) a value-matched
+        # current() could return a zonified observation (one delivery zone's price) and serve it as
+        # a "chain price" to everyone. The gated read rejects a price whose scope does not satisfy
+        # the requirement (falling back to the variant's national price when one exists).
+        required_scope = "exact_store" if store_id is not None else "national"
         chosen: tuple[ProductVariant, CurrentPrice] | None = None
         for variant in candidates:
-            price = self._prices.current(
-                db, variant.id, store_id=store_id, as_of=as_of
+            price = gated_current_price(
+                self._prices, db, variant.id,
+                store_id=store_id, required_scope=required_scope, as_of=as_of,
             )
             if price is None:
                 continue
