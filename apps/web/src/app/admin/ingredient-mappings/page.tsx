@@ -17,7 +17,14 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 
-const PROVIDERS = ["parsebot-alcampo", "parsebot-carrefour", "parsebot-dia"];
+const PROVIDERS = [
+  "parsebot-alcampo",
+  "parsebot-carrefour",
+  "parsebot-dia",
+  "parsebot-aldi",
+  "parsebot-lidl",
+  "apify-mercadona",
+];
 const REVIEW_NOTICE = "Los datos externos están en revisión y no se utilizan en producción.";
 
 // lifecycle_status / relation_status -> label + badge tone (never colour alone: label carries it).
