@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.models import ProductVariant, Recipe, Retailer
 from cestaplan_api.services.mapping_enrichment import _DETAIL_CONTRACT_FINGERPRINT
+from cestaplan_api.services.price_scope import gated_current_price
 from cestaplan_api.services.purchase_evidence import resolve_purchase_evidence
 from cestaplan_api.services.recipe_costing import (
     PantryPolicy,
@@ -68,6 +69,7 @@ def _ingredient_blocker(
     prices: CurrentPriceService,
     now: datetime,
     store_id: int | None,
+    required_scope: str,
 ) -> str:
     """Most informative §6 blocker for an uncostable mandatory ingredient (evidence-based)."""
     product_ids = eligible.get(ingredient_id, [])
@@ -76,7 +78,12 @@ def _ingredient_blocker(
     best_blocker = "incomplete_package_data"
     for pid in product_ids:
         for v in variants_by_product.get(pid, []):
-            price = prices.current(db, v.id, store_id=store_id, as_of=now, staging=True)
+            # Scope-gated so the diagnostic agrees with the costing engine: a zonified price the
+            # costing would reject must not be reported as an eligible product here.
+            price = gated_current_price(
+                prices, db, v.id, store_id=store_id, required_scope=required_scope,
+                as_of=now, staging=True,
+            )
             ev = resolve_purchase_evidence(
                 name=v.display_name,
                 required_unit=required_unit,
@@ -144,6 +151,7 @@ def validate_recipe_costing(
         eligible = _eligible_products(db, retailer_id, provider_code) if retailer_id else {}
         variants_by_product = _variants_by_product(db, retailer_id) if retailer_id else {}
         prices = CurrentPriceService()
+        required_scope = "exact_store" if store_id else "national"
         for line in unresolved:
             blk = (
                 _ingredient_blocker(
@@ -156,6 +164,7 @@ def validate_recipe_costing(
                     prices,
                     now,
                     store_id,
+                    required_scope,
                 )
                 if retailer_id
                 else "incomplete_package_data"

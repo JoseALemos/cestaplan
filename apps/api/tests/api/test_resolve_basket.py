@@ -23,6 +23,7 @@ from cestaplan_api.models import (
     Retailer,
     Store,
 )
+from cestaplan_api.services.basket_resolver import BasketItem, resolve_basket
 from tests.api.conftest import login, register
 
 
@@ -285,6 +286,84 @@ def test_total_splits_known_vs_estimated(
     assert body["totals"]["total_cost"] == "3.2"
     est_line = next(li for li in body["lines"] if li["is_estimated"])
     assert est_line["price_type"] == "estimated"
+
+
+def test_chain_level_never_serves_a_zonified_price(basket_env: dict) -> None:
+    # HARD INVARIANT (zone safety): the ``basket_env`` observation is exact_store (zonified). In
+    # chain-level mode (store_id=None) it must NEVER be served as a "chain price" to everyone — it
+    # is returned as unresolved, never fabricated into a chain-wide cost.
+    db: Session = basket_env["db"]
+    retailer: Retailer = basket_env["retailer"]
+    store: Store = basket_env["store"]
+    variant: ProductVariant = basket_env["variant"]
+    item = BasketItem(
+        required_quantity=Decimal("500"), unit="g", variant_id=variant.public_id
+    )
+    now = datetime.now(UTC)
+
+    # store-scoped: the exact_store price IS served to a plan of that store.
+    scoped = resolve_basket(
+        db,
+        retailer_id=retailer.id,
+        store_id=store.id,
+        retailer_public_id=retailer.public_id,
+        store_public_id=store.public_id,
+        items=[item],
+        as_of=now,
+    )
+    assert len(scoped.lines) == 1
+
+    # chain-level (store_id=None): the zonified price is refused, never leaked as a chain price.
+    chain = resolve_basket(
+        db,
+        retailer_id=retailer.id,
+        store_id=None,
+        retailer_public_id=retailer.public_id,
+        store_public_id=None,
+        items=[item],
+        as_of=now,
+    )
+    assert chain.lines == []
+    assert [u.reason for u in chain.unresolved] == ["no_price"]
+
+
+def test_chain_level_still_serves_a_national_price(basket_env: dict) -> None:
+    # Non-regression: a genuine NATIONAL observation is still served chain-level (national covers
+    # any plan) — the gate/fallback never blocks a legitimate national price.
+    db: Session = basket_env["db"]
+    retailer: Retailer = basket_env["retailer"]
+    variant: ProductVariant = basket_env["variant"]
+    observed = datetime.now(UTC) - timedelta(minutes=30)
+    db.add(
+        PriceObservation(
+            retailer_id=retailer.id,
+            store_id=None,
+            product_variant_id=variant.id,
+            price_scope="national",
+            price_type="regular",
+            amount=Decimal("1.10"),
+            currency="EUR",
+            observed_at=observed,
+            imported_at=observed,
+            valid_from=observed,
+            confidence_score=Decimal("0.95"),
+        )
+    )
+    db.flush()
+    item = BasketItem(
+        required_quantity=Decimal("500"), unit="g", variant_id=variant.public_id
+    )
+    chain = resolve_basket(
+        db,
+        retailer_id=retailer.id,
+        store_id=None,
+        retailer_public_id=retailer.public_id,
+        store_public_id=None,
+        items=[item],
+        as_of=datetime.now(UTC),
+    )
+    assert len(chain.lines) == 1
+    assert chain.lines[0].price_scope == "national"
 
 
 def test_requires_authentication(client: TestClient, basket_env: dict) -> None:
