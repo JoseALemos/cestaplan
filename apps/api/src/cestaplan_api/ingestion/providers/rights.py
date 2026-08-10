@@ -151,14 +151,18 @@ SOURCE_RIGHTS: dict[str, SourceRights] = {
     "parsebot-lidl": _parsebot("parsebot-lidl", "Lidl", "https://www.lidl.es"),
     "parsebot-aldi": _parsebot("parsebot-aldi", "Aldi", "https://www.aldi.es"),
     "parsebot-deza": _parsebot("parsebot-deza", "Deza", None),
+    # Transporte: crawl DIRECTO de la API pública de tienda.mercadona.es (cortesía: user-agent
+    # identificable, rate-limit, cadencia MENSUAL, nunca evade bloqueos/CAPTCHA). La base de
+    # autorización sobre los DATOS la declara el owner (acuerdo comercial); el transporte ya no es
+    # un feed de partner de pago (Apify) sino acceso directo a la API pública bajo ese footing.
     "apify-mercadona": SourceRights(
         provider_code="apify-mercadona",
-        provider_display_name="Mercadona (vía Apify)",
+        provider_display_name="Mercadona (API pública directa)",
         retailer_display_name="Mercadona",
-        technical_provider="Apify",
+        technical_provider="Directo (crawl API pública tienda.mercadona.es, mensual)",
         official_api=False,
         source_type="authorized_partner",
-        source_url="https://www.mercadona.es",
+        source_url="https://tienda.mercadona.es",
         data_rights_status="commercial_use_allowed",
         authorization_status="verified",
         license_basis="private_commercial_agreement",

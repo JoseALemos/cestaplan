@@ -140,6 +140,9 @@ class Settings(BaseSettings):
 
     # --- Per-connector enable flags (all OFF by default; opt-in per retailer) ---
     mercadona_connector_enabled: bool = False
+    # Delivery zone (postal code) the DIRECT Mercadona public-API crawl pins via change-pc. Empty
+    # falls back to ``apify_mercadona_default_postal_code`` for continuity. No secret.
+    mercadona_postal_code: str = ""
     alcampo_connector_enabled: bool = False
     carrefour_connector_enabled: bool = False
     dia_connector_enabled: bool = False

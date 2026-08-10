@@ -1,7 +1,11 @@
 """Apify Mercadona mapper + provider (spec §5-§7) — grounded only in the observed capture.
 
-This mapper consumes the ``igolaizola/mercadona-scraper`` Apify actor, whose records are RICHER
-than the previous actor: they carry a structured ``price_instructions`` block with the real net
+This mapper consumes Mercadona records under provider code ``apify-mercadona``. The records were
+first sourced from the ``igolaizola/mercadona-scraper`` Apify actor and are now sourced FREE and
+directly from Mercadona's own public store API (``providers/mercadona``) — the two produce the
+identical record shape, so this mapper and its schema fingerprint are unchanged across the switch.
+The records are RICHER than the previous actor: they carry a structured ``price_instructions``
+block with the real net
 content (``unit_size`` + ``size_format``), so Mercadona products are costed as a normal
 FIXED_PACKAGE — no unit-price workaround is needed (``apify-mercadona`` is deliberately NOT in
 ``quality.UNIT_PRICE_COSTED_PROVIDERS``).
@@ -54,32 +58,22 @@ batch never shifts the fingerprint, while a genuine type change (e.g. to a strin
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
-from cestaplan_api.config import Settings, get_settings
 from cestaplan_api.ingestion.contracts import PriceScope, PriceType
-from cestaplan_api.ingestion.providers.apify.client import ApifyClient
 from cestaplan_api.ingestion.providers.contracts import (
     Availability,
     ContentUnit,
     ExternalCatalogProduct,
-    HealthStatus,
-    PriceCatalogProvider,
-    ProductQuery,
-    ProviderCapabilities,
-    ProviderKind,
-    ProviderMetadata,
     ProviderPromotion,
-    ProviderStatus,
     ProviderVerificationStatus,
     SellUnit,
 )
-from cestaplan_api.ingestion.providers.exceptions import NotSupportedError, ProviderError
+from cestaplan_api.ingestion.providers.exceptions import ProviderError
 from cestaplan_api.ingestion.providers.schema_tools import merge_samples, schema_fingerprint
 
 # ``size_format`` (net-content unit) tokens -> our ContentUnit. Unknown -> net content dropped.
@@ -445,100 +439,9 @@ class ApifyMercadonaMapper:
         return PriceScope.POSTAL_CODE if postal_code else PriceScope.UNKNOWN
 
 
-class ApifyMercadonaProvider(PriceCatalogProvider):
-    provider_code = "apify-mercadona"
-
-    def __init__(
-        self,
-        *,
-        settings: Settings | None = None,
-        client: ApifyClient | None = None,
-        mapper: ApifyMercadonaMapper | None = None,
-    ) -> None:
-        s = settings or get_settings()
-        self._settings = s
-        self._mapper = mapper or ApifyMercadonaMapper()
-        self._postal_code = s.apify_mercadona_default_postal_code or ""
-        if client is not None:
-            self._client: ApifyClient | None = client
-        elif s.apify_enabled and s.apify_mercadona_enabled and s.apify_api_token:
-            self._client = ApifyClient(
-                api_token=s.apify_api_token,
-                base_url=s.apify_base_url,
-                max_wait_seconds=s.apify_max_wait_seconds,
-                poll_interval_seconds=s.apify_poll_interval_seconds,
-            )
-        else:
-            self._client = None
-
-    def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            full_catalog=False,  # bounded actor run; not a full-catalogue guarantee
-            store_scope=True,  # postal-code (delivery-zone) scoped prices
-            incremental_sync=False,
-            promotions=True,
-            categories=True,
-            search=True,  # the actor accepts a ``query`` keyword -> per-ingredient search capture
-        )
-
-    def get_source_metadata(self) -> ProviderMetadata:
-        return ProviderMetadata(
-            provider_code=self.provider_code,
-            retailer_slug="mercadona",
-            kind=ProviderKind.INDEPENDENT,  # third-party Apify actor, NOT Mercadona's official API
-            status=ProviderStatus.ACTIVE_WHEN_CONFIGURED,
-            official=False,
-            catalog_type="search_partial",
-            attribution="Apify (actor de terceros). No es una API oficial de Mercadona.",
-        )
-
-    def health_check(self) -> HealthStatus:
-        # No cheap Apify ping exists and this layer performs no speculative network call; report
-        # the honest configured/not-configured state instead.
-        if self._client is None:
-            return HealthStatus(ok=False, detail="apify mercadona not configured")
-        return HealthStatus(
-            ok=True, detail="apify mercadona configured", checked_at=datetime.now(UTC)
-        )
-
-    def iterate_products(self, query: ProductQuery) -> Iterator[ExternalCatalogProduct]:
-        if self._client is None:
-            raise NotSupportedError("apify mercadona not configured (missing token/flags)")
-        limit = query.max_products or 30
-        postal_code = query.postal_code or self._postal_code
-        # Actor input: the zone/warehouse is selected via ``postalCode`` — an ASSUMED key: the
-        # actor's example run input was a placeholder, so if the actor ignores it the scope simply
-        # reflects the actor's default warehouse (zone sealing downstream is unchanged either way).
-        # ``maxItems`` is passed as a harmless intent hint. When ``query.search`` is present it is
-        # forwarded as the actor's ``query`` term: the actor then filters the catalogue to that
-        # keyword, so the run is small and cheap (a per-ingredient discovery search) instead of the
-        # whole zone catalogue. Without a search term the behaviour is unchanged (full catalogue).
-        # Empty postal omitted.
-        # ``language=es``: the actor localises product names AND category labels; Spanish is
-        # required so the (Spanish) ingredient dictionary can classify the results (with the
-        # default "en" the names come back English — e.g. "Light olive oil" — and never match).
-        run_input: dict[str, object] = {"language": "es", "maxItems": limit}
-        if postal_code:
-            run_input["postalCode"] = postal_code
-        if query.search:
-            run_input["query"] = query.search
-        run_id = self._client.start_run(
-            self._settings.apify_mercadona_actor_id,
-            run_input,
-            max_total_charge_usd=self._settings.apify_max_total_charge_usd,
-        )
-        run = self._client.wait_for_run(run_id)
-        records = self._client.get_dataset_items(str(run["defaultDatasetId"]), limit=limit)[:limit]
-        observed_at = datetime.now(UTC)
-        yield from self._mapper.map_products(
-            records, postal_code=postal_code or None, observed_at=observed_at
-        )
-
-
 __all__ = [
     "ApifyMercadonaMapper",
     "ApifyMercadonaPriceInstructions",
-    "ApifyMercadonaProvider",
     "ApifyMercadonaRecord",
     "NonPositivePriceError",
     "UnsupportedSchemaError",
