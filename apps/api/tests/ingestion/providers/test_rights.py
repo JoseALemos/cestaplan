@@ -47,9 +47,10 @@ def test_seven_external_sources_are_authorized_commercial() -> None:
         assert r.license_basis == "private_commercial_agreement"
         assert r.license_display_name == "Licencia comercial privada"
         assert r.rights_display_name == "Uso autorizado"
-        # An intermediary (Parse.bot / Apify) is NEVER an official API.
+        # An intermediary (Parse.bot / Apify) or a direct public-API crawl (Mercadona) is NEVER an
+        # official retailer API.
         assert r.official_api is False
-        assert r.technical_provider in ("Parse.bot", "Apify")
+        assert r.technical_provider in ("Parse.bot", "Apify", "Directo")
         # Raw redistribution stays off; attribution is governed by the private agreement (None).
         assert r.rights_scope["raw_redistribution"] is False
         assert r.rights_scope["attribution_required"] is None

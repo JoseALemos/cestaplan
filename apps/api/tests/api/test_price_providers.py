@@ -63,9 +63,10 @@ def test_seven_external_chains_are_authorized_not_official_api(db_session: Sessi
         assert p["data_rights_status"] == "commercial_use_allowed", code
         assert p["license_display_name"] == "Licencia comercial privada", code
         assert p["rights_display_name"] == "Uso autorizado", code
-        # The chain owner authorized the data — but the intermediary is NOT an official API.
+        # The chain owner authorized the data — but the intermediary (or direct crawl) is NOT an
+        # official retailer API.
         assert p["official_api"] is False, code
-        assert p["technical_provider"] in ("Parse.bot", "Apify"), code
+        assert p["technical_provider"] in ("Parse.bot", "Apify", "Directo"), code
         # attribution governed by a private agreement -> null (not "not required").
         assert p["attribution_required"] is None, code
 
