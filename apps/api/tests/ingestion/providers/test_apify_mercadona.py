@@ -24,7 +24,6 @@ from cestaplan_api.ingestion.contracts import PriceScope
 from cestaplan_api.ingestion.providers.apify.client import ApifyClient
 from cestaplan_api.ingestion.providers.apify.mapping import (
     ApifyMercadonaMapper,
-    ApifyMercadonaProvider,
     ApifyMercadonaRecord,
     InvalidMoneyValue,
     NonPositivePriceError,
@@ -36,9 +35,9 @@ from cestaplan_api.ingestion.providers.apify.mapping import (
 from cestaplan_api.ingestion.providers.contracts import (
     Availability,
     ContentUnit,
-    ProductQuery,
     SellUnit,
 )
+from cestaplan_api.ingestion.providers.mercadona.provider import MercadonaProvider
 from cestaplan_api.ingestion.providers.quality import UNIT_PRICE_COSTED_PROVIDERS
 from cestaplan_api.ingestion.providers.registry import registry
 from cestaplan_api.models import (
@@ -271,7 +270,7 @@ def test_reference_unit_price(price, fmt, expected) -> None:
 def test_provider_registered_and_not_unit_price_costed() -> None:
     assert registry.has("apify-mercadona")
     provider = registry.get("apify-mercadona")
-    assert isinstance(provider, ApifyMercadonaProvider)
+    assert isinstance(provider, MercadonaProvider)
     meta = provider.get_source_metadata()
     assert meta.retailer_slug == "mercadona"
     assert meta.official is False
@@ -340,55 +339,6 @@ def test_start_run_omits_cap_when_not_positive() -> None:
     )
     client.start_run("actor~x", {"maxItems": 1})  # no cap passed
     assert "maxTotalChargeUsd" not in captured["url"].params
-
-
-# --- iterate_products: per-ingredient search run input --------------------- #
-class _StubApifyClient:
-    """Captures the actor run input; returns an empty dataset (no network)."""
-
-    def __init__(self) -> None:
-        self.run_input: dict[str, object] | None = None
-        self.actor_id: str | None = None
-        self.max_total_charge_usd: float | None = None
-
-    def start_run(
-        self, actor_id: str, run_input: dict, *, max_total_charge_usd: float | None = None
-    ) -> str:
-        self.actor_id = actor_id
-        self.run_input = run_input
-        self.max_total_charge_usd = max_total_charge_usd
-        return "run-1"
-
-    def wait_for_run(self, run_id: str) -> dict:
-        return {"defaultDatasetId": "ds-1"}
-
-    def get_dataset_items(self, dataset_id: str, *, limit: int | None = None) -> list[dict]:
-        return []
-
-
-def test_search_capability_is_declared() -> None:
-    # The actor accepts a keyword ``query``, so the provider declares the search capability that
-    # drives per-ingredient discovery capture.
-    assert registry.get("apify-mercadona").capabilities().search is True
-
-
-def test_iterate_products_forwards_search_term_as_actor_query() -> None:
-    stub = _StubApifyClient()
-    provider = ApifyMercadonaProvider(client=stub)  # type: ignore[arg-type]  # test stub
-    list(provider.iterate_products(ProductQuery(search="aceite", max_products=5)))
-    assert stub.run_input is not None
-    assert stub.run_input["query"] == "aceite"  # the ingredient alias filters the actor run
-    assert stub.run_input["maxItems"] == 5  # intent hint preserved
-    assert stub.max_total_charge_usd is not None  # billing cap still applied
-
-
-def test_iterate_products_without_search_omits_query() -> None:
-    stub = _StubApifyClient()
-    provider = ApifyMercadonaProvider(client=stub)  # type: ignore[arg-type]  # test stub
-    list(provider.iterate_products(ProductQuery(max_products=3)))
-    assert stub.run_input is not None
-    assert "query" not in stub.run_input  # no term -> full-catalogue behaviour, unchanged
-    assert stub.run_input["maxItems"] == 3
 
 
 # --- FIXED_PACKAGE recipe costing (DB, no network) ----------------------- #

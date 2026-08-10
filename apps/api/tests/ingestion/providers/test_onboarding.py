@@ -249,11 +249,15 @@ def test_config_status_blocks_honestly() -> None:
     # key + base URL -> configured
     s2 = _settings(parse_bot_api_key="k", parse_bot_dia_base_url="https://x")
     assert config_status(dia, s2).configured is True
-    # apify without token
+    # mercadona direct crawl: disabled connector -> blocked; enabled but no postal -> blocked;
+    # enabled + postal -> configured (no Apify token required on the direct path).
     merc = get_entry("apify-mercadona")
     assert merc is not None
-    merc_status = config_status(merc, _settings())
-    assert merc_status.blocked_reason == "blocked_by_missing_credentials"
+    assert config_status(merc, _settings()).blocked_reason == "blocked_by_disabled_connector"
+    merc_no_pc = _settings(mercadona_connector_enabled=True)
+    assert config_status(merc, merc_no_pc).blocked_reason == "blocked_by_missing_postal_code"
+    merc_ok = _settings(mercadona_connector_enabled=True, mercadona_postal_code="28001")
+    assert config_status(merc, merc_ok).configured is True
     # open-prices / demo need no credentials
     op, demo = get_entry("open-prices"), get_entry("demo")
     assert op is not None and demo is not None
