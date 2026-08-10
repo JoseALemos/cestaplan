@@ -72,12 +72,29 @@ class FrequencyConfig:
         return self.cadence_days.get(run_type, self.default_cadence_days)
 
 
+def _mercadona_monthly() -> FrequencyConfig:
+    """Mercadona refreshes MONTHLY (owner request), not twice a week.
+
+    The direct public-API path is a ~200-request full-catalogue crawl, so a courteous 30-day
+    spacing replaces the old frequent cadence. Every scheduled run type is spaced 30 days.
+    """
+    return FrequencyConfig(
+        run_types=(RunType.CATALOG, RunType.PRICES),
+        cadence_days={RunType.CATALOG: 30, RunType.PRICES: 30},
+        default_cadence_days=30,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulerConfig:
     """Scheduler configuration: a default policy plus per-retailer-slug overrides."""
 
     default: FrequencyConfig = field(default_factory=FrequencyConfig)
-    per_retailer: dict[str, FrequencyConfig] = field(default_factory=dict)
+    # Mercadona is refreshed monthly (see :func:`_mercadona_monthly`); every other retailer uses
+    # ``default`` unless overridden here.
+    per_retailer: dict[str, FrequencyConfig] = field(
+        default_factory=lambda: {"mercadona": _mercadona_monthly()}
+    )
     # Advisory-lock key for the scheduler mutex. Defaults to the global key (one scheduler
     # at a time in production). Tests may set a unique key so concurrent, pooled-connection
     # test transactions never contend on the same lock.
