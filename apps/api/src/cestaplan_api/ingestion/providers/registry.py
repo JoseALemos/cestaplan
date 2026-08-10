@@ -54,10 +54,10 @@ def register_default(code: str, factory: ProviderFactory) -> None:
 
 
 # Demo is always available (no flags, no network).
-from cestaplan_api.ingestion.providers.apify.mapping import (  # noqa: E402
-    ApifyMercadonaProvider,
-)
 from cestaplan_api.ingestion.providers.demo.provider import DemoCatalogProvider  # noqa: E402
+from cestaplan_api.ingestion.providers.mercadona.provider import (  # noqa: E402
+    MercadonaProvider,
+)
 from cestaplan_api.ingestion.providers.open_prices.provider import (  # noqa: E402
     OpenPricesProvider,
 )
@@ -81,8 +81,9 @@ register_default(ParseBotAlcampoProvider.provider_code, ParseBotAlcampoProvider)
 register_default(ParseBotCarrefourProvider.provider_code, ParseBotCarrefourProvider)
 register_default(ParseBotAldiProvider.provider_code, ParseBotAldiProvider)
 register_default(ParseBotLidlProvider.provider_code, ParseBotLidlProvider)
-# Apify Mercadona (third-party actor). Only usable when the apify flags + token are configured;
-# the provider yields nothing / raises on iterate when not configured.
-register_default(ApifyMercadonaProvider.provider_code, ApifyMercadonaProvider)
+# Mercadona DIRECT public-API crawl (free; replaces the paid Apify actor). Provider code stays
+# ``apify-mercadona`` so LIVE mappings/candidates/prices are preserved. Only usable when
+# ``mercadona_connector_enabled`` + a postal code are set; otherwise it raises on iterate.
+register_default(MercadonaProvider.provider_code, MercadonaProvider)
 
 __all__ = ["ProviderRegistry", "register_default", "registry"]

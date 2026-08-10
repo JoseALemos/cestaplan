@@ -352,8 +352,12 @@ def config_status(entry: MatrixEntry, settings: Settings) -> ConfigStatus:
             return ConfigStatus(False, "blocked_by_missing_base_url")
         return ConfigStatus(True)
     if entry.provider_code == "apify-mercadona":
-        if not settings.apify_api_token:
-            return ConfigStatus(False, "blocked_by_missing_credentials")
+        # DIRECT public-API crawl (free): configured when the connector flag is on AND a delivery
+        # zone (postal code) is set. No Apify token is required on this path.
+        if not settings.mercadona_connector_enabled:
+            return ConfigStatus(False, "blocked_by_disabled_connector")
+        if not (settings.mercadona_postal_code or settings.apify_mercadona_default_postal_code):
+            return ConfigStatus(False, "blocked_by_missing_postal_code")
         return ConfigStatus(True)
     return ConfigStatus(True)  # open-prices / demo need no credentials
 
