@@ -134,12 +134,63 @@ def test_empty_response_maps_to_nothing() -> None:
     assert _map([]) == []
 
 
-def test_unknown_fingerprint_blocks_normalization() -> None:
+def test_core_drift_skips_only_the_drifting_record_not_the_batch() -> None:
+    records = _records()
+    # Type change on a core field (unit_size number -> string) -> that record's core drifts from the
+    # pinned fingerprint. Per-product tolerance drops JUST it; the other 24 still map, no raise.
+    records[0]["price_instructions"]["unit_size"] = "5"
+    mapper = ApifyMercadonaMapper()
+    products = mapper.map_products(records, postal_code=_POSTAL, observed_at=_NOW)
+    assert len(products) == 24
+    assert mapper.last_skipped_count == 1
+    assert all(p.external_product_id != records[0]["id"] for p in products)
+
+
+def test_validate_supported_schema_still_gates_a_globally_drifted_batch() -> None:
+    # The pinned fingerprint is retained as an OPTIONAL batch-level global-drift alarm; map_products
+    # no longer uses it, but the explicit gate still raises on whole-batch core drift.
     drifted = _records()
-    # Type change on a core field (unit_size number -> string) -> different core -> blocks.
-    drifted[0]["price_instructions"]["unit_size"] = "5"
+    for r in drifted:
+        r["price_instructions"]["unit_size"] = "5"  # every core now drifts
     with pytest.raises(UnsupportedSchemaError):
-        _map(drifted)
+        ApifyMercadonaMapper().validate_supported_schema(drifted)
+
+
+def test_heterogeneous_batch_skips_bad_records_never_raises() -> None:
+    # A real, mixed catalogue: valid products + one missing a core field + one with a 0 price + one
+    # with a malformed price_instructions. map_products returns ONLY the valid ones, counts the
+    # skips, and never raises on heterogeneity.
+    records = _records()
+    valid_count = len(records)
+
+    missing_core = _records()[0]
+    missing_core["id"] = "missing-core"
+    del missing_core["price_instructions"]["unit_price"]  # drop a required core field
+
+    zero_price = _records()[0]
+    zero_price["id"] = "zero-price"
+    zero_price["price_instructions"]["unit_price"] = "0"  # non-positive -> refused, not costed at 0
+
+    malformed = _records()[0]
+    malformed["id"] = "malformed"
+    malformed["price_instructions"]["unit_price"] = "not-a-number"  # unparseable money
+
+    batch = [*records, missing_core, zero_price, malformed]
+    mapper = ApifyMercadonaMapper()
+    products = mapper.map_products(batch, postal_code=_POSTAL, observed_at=_NOW)
+
+    assert len(products) == valid_count  # only the valid ones survive
+    assert mapper.last_skipped_count == 3
+    bad_ids = {"missing-core", "zero-price", "malformed"}
+    assert all(p.external_product_id not in bad_ids for p in products)
+
+
+def test_last_skipped_count_resets_to_zero_on_a_clean_batch() -> None:
+    mapper = ApifyMercadonaMapper()
+    mapper.map_products(_records()[:1], postal_code=_POSTAL, observed_at=_NOW)  # prime with a batch
+    products = mapper.map_products(_records(), postal_code=_POSTAL, observed_at=_NOW)
+    assert len(products) == 25
+    assert mapper.last_skipped_count == 0  # a fully-valid batch skips nothing
 
 
 def test_int_float_unit_size_variance_does_not_shift_fingerprint() -> None:
@@ -235,11 +286,29 @@ def test_approx_size_yields_no_net_content() -> None:
 
 
 @pytest.mark.parametrize("bad_price", ["0", "-1", "0.00"])
-def test_non_positive_price_is_refused_never_zero_or_negative_cost(bad_price: str) -> None:
+def test_non_positive_price_is_skipped_never_costed_at_zero_or_negative(bad_price: str) -> None:
+    # A non-positive shelf price is refused per-product: that record is skipped (never emitted as a
+    # 0 €/negative cost), the rest of the batch still maps, and nothing is raised.
     records = _records()
     records[0]["price_instructions"]["unit_price"] = bad_price
+    mapper = ApifyMercadonaMapper()
+    products = mapper.map_products(records, postal_code=_POSTAL, observed_at=_NOW)
+    assert len(products) == 24
+    assert mapper.last_skipped_count == 1
+    assert all(p.external_product_id != records[0]["id"] for p in products)
+
+
+def test_non_positive_price_still_raises_at_the_single_product_boundary() -> None:
+    # The per-product guard itself is unchanged: mapping ONE record with a non-positive price still
+    # surfaces the typed error (map_products catches it to skip; direct callers still see it).
+    records = _records()
+    records[0]["price_instructions"]["unit_price"] = "0"
     with pytest.raises(NonPositivePriceError):
-        _map(records)
+        ApifyMercadonaMapper().map_product(
+            ApifyMercadonaRecord.model_validate(records[0]),
+            postal_code=_POSTAL,
+            observed_at=_NOW,
+        )
 
 
 def test_deepest_category_name() -> None:
