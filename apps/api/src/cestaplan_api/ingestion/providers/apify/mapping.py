@@ -42,27 +42,38 @@ Nothing is invented:
 - ``price_scope`` is ``postal_code``: Mercadona prices vary by delivery zone. The provider runs
   with one postal code (``apify_mercadona_default_postal_code``) and threads it here, stamping it on
   every product. Without a postal code the scope is ``UNKNOWN`` (no zone -> price unlocatable).
-- an unknown schema fingerprint blocks normalization.
+- a record whose core drifts from the pinned schema is SKIPPED (dropped, counted, logged), never
+  mapped through lenient coercion — tolerance is PER-PRODUCT, so one odd item never blocks the rest.
+
+Tolerance (per-product, never per-batch): the real Mercadona catalogue is a large heterogeneous
+crawl, so :meth:`ApifyMercadonaMapper.map_products` maps each record INDEPENDENTLY and drops the
+ones that do not fit (schema drift, a missing/ill-typed core field, a malformed or non-positive
+price) instead of blocking the whole batch. Dropped records produce no data; the products that pass
+keep the full per-field validation. The count of skipped records is exposed on
+``last_skipped_count`` and logged, so lost coverage is visible, never silent. Principle: reduce
+coverage, NEVER invent.
 
 Schema pinning: the fingerprint is computed over the REQUIRED core — the always-present,
 stable-typed fields the mapper depends on: top-level ``id``/``display_name``/``share_url``/
 ``published`` and, inside ``price_instructions``, ``unit_price``/``unit_size``/``size_format``/
 ``reference_price``. Variable/nullable fields (``previous_unit_price``, ``thumbnail``,
-``packaging``, ``categories``, the promo flags) are deliberately EXCLUDED so a heterogeneous real
-capture never blocks the batch, while structural drift in a depended-on core field still blocks.
+``packaging``, ``categories``, the promo flags) are deliberately EXCLUDED so nullable-field variance
+never shifts it. The fingerprint is retained as a PER-PRODUCT drift signal: a record whose
+depended-on core field changed shape/type (fingerprint mismatch) is skipped, not coerced.
 ``unit_size`` is a JSON number sometimes an int (``5``) and sometimes a float (``0.75``); it is
-normalized to a canonical float in the core projection so that harmless int/float variance across a
-batch never shifts the fingerprint, while a genuine type change (e.g. to a string) still blocks.
+normalized to a canonical float in the core projection so that harmless int/float variance never
+shifts the fingerprint, while a genuine type change (e.g. to a string) trips the drift skip.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
 
 from cestaplan_api.ingestion.contracts import PriceScope, PriceType
 from cestaplan_api.ingestion.providers.contracts import (
@@ -75,6 +86,8 @@ from cestaplan_api.ingestion.providers.contracts import (
 )
 from cestaplan_api.ingestion.providers.exceptions import ProviderError
 from cestaplan_api.ingestion.providers.schema_tools import merge_samples, schema_fingerprint
+
+logger = logging.getLogger(__name__)
 
 # ``size_format`` (net-content unit) tokens -> our ContentUnit. Unknown -> net content dropped.
 _SIZE_FORMAT_UNITS = {
@@ -113,8 +126,9 @@ class InvalidMoneyValue(ValueError):
 
 class NonPositivePriceError(InvalidMoneyValue):
     """A shelf price that parsed cleanly but is <= 0 — refused, never coerced into a free/negative
-    cost. Blocks the batch (like an unknown fingerprint) so an anomalous price is reviewed, never
-    silently emitted as a 0 €/negative observation."""
+    cost. In :meth:`ApifyMercadonaMapper.map_products` this SKIPS just that product (counted and
+    logged), so an anomalous price is dropped rather than emitted as a 0 €/negative observation and
+    never blocks the rest of the batch."""
 
 
 def _decimal_from_str(raw: str) -> Decimal:
@@ -154,7 +168,12 @@ Money = Annotated[Decimal, BeforeValidator(_to_decimal)]
 
 
 class UnsupportedSchemaError(ProviderError):
-    """The batch's schema fingerprint is not one the mapper is validated against."""
+    """The batch's merged schema fingerprint is not one the mapper is validated against.
+
+    Retained for the OPTIONAL batch-level gate
+    :meth:`ApifyMercadonaMapper.validate_supported_schema` (a global drift alarm a caller may run).
+    It is NOT raised from :meth:`ApifyMercadonaMapper.map_products`, which is per-product tolerant
+    and skips drifting records instead of blocking the batch."""
 
 
 class ApifyMercadonaPriceInstructions(BaseModel):
@@ -266,6 +285,9 @@ class ApifyMercadonaMapper:
     supported_schema_fingerprints = (
         "ddb7440cf6358ed7c6a9f114d56ae59531ab1b4c233bd3fb57fc70b002bade7c",
     )
+    # Telemetry: how many records the last ``map_products`` call SKIPPED (schema drift or a
+    # per-product anomaly). Read by the sync so lost coverage is never hidden. Reset each call.
+    last_skipped_count = 0
 
     def _core(self, record: dict) -> dict:
         """Project a record to the required core; ``unit_size`` normalized to a canonical float.
@@ -290,6 +312,11 @@ class ApifyMercadonaMapper:
         return schema_fingerprint(merge_samples([self._core(r) for r in records]))
 
     def validate_supported_schema(self, records: list[dict]) -> str:
+        """Optional batch-level global-drift gate (NOT used by :meth:`map_products`).
+
+        ``map_products`` is per-product tolerant; this remains available for a caller that wants a
+        hard fail if the WHOLE batch's merged core drifts from the pinned schema.
+        """
         fp = self.detect_schema(records)
         if fp not in self.supported_schema_fingerprints:
             raise UnsupportedSchemaError(
@@ -300,17 +327,75 @@ class ApifyMercadonaMapper:
     def map_products(
         self, records: list[dict], *, postal_code: str | None = None, observed_at: datetime
     ) -> list[ExternalCatalogProduct]:
+        """Map each record INDEPENDENTLY, skipping (never raising on) the ones that do not fit.
+
+        The real Mercadona catalogue is a large, heterogeneous crawl: a handful of products carry a
+        core that drifts from the pinned schema, or an anomalous price/content that cannot be
+        trusted. Rather than block the whole batch (the old per-batch fingerprint gate did), each
+        record is validated and mapped on its own; a record that fails is DROPPED — counted and
+        logged, never emitted. This reduces coverage but never invents data: the products that pass
+        keep the full per-field validation (positive price, net-content consistency, etc.). The
+        pinned fingerprint stays, now as a PER-PRODUCT drift signal (a depended-on core field with a
+        changed shape/type is skipped instead of being coerced through lenient validation).
+        """
+        self.last_skipped_count = 0
         if not records:  # empty response -> nothing to normalize (not an error)
             return []
-        self.validate_supported_schema(records)  # unknown fingerprint blocks normalization
-        return [
-            self.map_product(
-                ApifyMercadonaRecord.model_validate(r),
-                postal_code=postal_code,
-                observed_at=observed_at,
+        products: list[ExternalCatalogProduct] = []
+        skipped = 0
+        for record in records:
+            product = self._map_one(record, postal_code=postal_code, observed_at=observed_at)
+            if product is None:
+                skipped += 1
+                continue
+            products.append(product)
+        self.last_skipped_count = skipped
+        if skipped:
+            logger.warning(
+                "apify-mercadona: skipped %d of %d records (schema drift/anomaly); mapped %d "
+                "— coverage reduced, never invented",
+                skipped,
+                len(records),
+                len(products),
             )
-            for r in records
-        ]
+        return products
+
+    def _map_one(
+        self,
+        record: dict,
+        *,
+        postal_code: str | None,
+        observed_at: datetime,
+    ) -> ExternalCatalogProduct | None:
+        """Map a single record, or return ``None`` (SKIP) when it does not fit the schema.
+
+        A record is skipped when: it is not a mapping; its required core drifts from the pinned
+        fingerprint (structural/type drift); it fails pydantic validation (a missing/ill-typed core
+        field); or a field cannot be parsed safely (malformed money, a non-positive price). The
+        skip is a no-op — it produces no data — so heterogeneity in the real catalogue never blocks
+        the sync and never yields a guessed value.
+        """
+        if not isinstance(record, dict):
+            logger.debug("apify-mercadona: skipping non-mapping record %r", type(record).__name__)
+            return None
+        if self.detect_schema([record]) not in self.supported_schema_fingerprints:
+            logger.debug(
+                "apify-mercadona: skipping record %r (core schema drift)", record.get("id")
+            )
+            return None
+        try:
+            validated = ApifyMercadonaRecord.model_validate(record)
+            return self.map_product(
+                validated, postal_code=postal_code, observed_at=observed_at
+            )
+        except (ValidationError, ValueError, ArithmeticError) as exc:
+            # InvalidMoneyValue / NonPositivePriceError are ValueErrors; a Decimal coercion of a
+            # weird value raises ArithmeticError. All mean "this one product cannot be trusted" ->
+            # skip it, never block the batch.
+            logger.debug(
+                "apify-mercadona: skipping record %r: %s", record.get("id"), exc
+            )
+            return None
 
     def map_product(
         self,
