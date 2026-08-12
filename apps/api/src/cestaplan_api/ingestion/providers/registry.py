@@ -55,6 +55,7 @@ def register_default(code: str, factory: ProviderFactory) -> None:
 
 # Demo is always available (no flags, no network).
 from cestaplan_api.ingestion.providers.demo.provider import DemoCatalogProvider  # noqa: E402
+from cestaplan_api.ingestion.providers.dia.provider import DiaProvider  # noqa: E402
 from cestaplan_api.ingestion.providers.mercadona.provider import (  # noqa: E402
     MercadonaProvider,
 )
@@ -67,15 +68,15 @@ from cestaplan_api.ingestion.providers.parsebot.chains import (  # noqa: E402
     ParseBotCarrefourProvider,
     ParseBotLidlProvider,
 )
-from cestaplan_api.ingestion.providers.parsebot.dia import ParseBotDiaProvider  # noqa: E402
 
 register_default(DemoCatalogProvider.provider_code, DemoCatalogProvider)
 # Open Prices needs no credentials (public ODbL API); enablement is via OPEN_PRICES_ENABLED
 # at the call site, not here.
 register_default(OpenPricesProvider.provider_code, OpenPricesProvider)
-# Parse.bot DIA (third-party scraper API). Only usable when configured; the provider returns
-# a not-configured health status / raises on iterate when the key/base URL are absent.
-register_default(ParseBotDiaProvider.provider_code, ParseBotDiaProvider)
+# DIA DIRECT public-API search (free; replaces the paid Parse.bot scraper). Provider code stays
+# ``parsebot-dia`` so rights/mappings/candidates/prices are preserved. Only usable when
+# ``dia_connector_enabled`` is set; otherwise it raises on iterate.
+register_default(DiaProvider.provider_code, DiaProvider)
 # Parse.bot chains onboarded from the operator's own scrapers (only usable when configured).
 register_default(ParseBotAlcampoProvider.provider_code, ParseBotAlcampoProvider)
 register_default(ParseBotCarrefourProvider.provider_code, ParseBotCarrefourProvider)
