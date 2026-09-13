@@ -25,7 +25,10 @@ export default function RegistroPage() {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<RegisterFormValues>({ resolver: zodResolver(registerSchema) });
+  } = useForm<RegisterFormValues>({
+    resolver: zodResolver(registerSchema),
+    defaultValues: { acceptPrivacy: false },
+  });
 
   const onSubmit = handleSubmit(async (values) => {
     try {
@@ -98,6 +101,25 @@ export default function RegistroPage() {
               error={errors.confirmPassword?.message}
               {...register("confirmPassword")}
             />
+            <label className="flex items-start gap-3 text-sm text-ink">
+              <input
+                type="checkbox"
+                required
+                className="mt-0.5 h-4 w-4 accent-primary"
+                {...register("acceptPrivacy")}
+              />
+              <span>
+                He leído y acepto la{" "}
+                <Link href="/privacidad" className="font-medium text-primary hover:underline">
+                  Política de Privacidad
+                </Link>
+              </span>
+            </label>
+            {errors.acceptPrivacy ? (
+              <p role="alert" className="-mt-2 text-xs font-medium text-error">
+                {errors.acceptPrivacy.message}
+              </p>
+            ) : null}
             <Button type="submit" loading={pending} className="mt-1">
               Crear cuenta
             </Button>

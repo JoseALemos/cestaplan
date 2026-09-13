@@ -233,5 +233,5 @@ def test_mercadona_scheduler_cadence_is_monthly() -> None:
     cfg = SchedulerConfig().for_retailer("mercadona")
     assert cfg.cadence_for(RunType.CATALOG) == 30
     assert cfg.cadence_for(RunType.PRICES) == 30
-    # A different retailer still uses the default (non-monthly) cadence.
-    assert SchedulerConfig().for_retailer("dia").cadence_for(RunType.PRICES) == 1
+    # A different retailer still uses the default (non-monthly) cadence (dia is monthly too now).
+    assert SchedulerConfig().for_retailer("carrefour").cadence_for(RunType.PRICES) == 1

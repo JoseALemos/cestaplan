@@ -143,7 +143,27 @@ def _parsebot(code: str, retailer_display: str, source_url: str | None) -> Sourc
 
 
 SOURCE_RIGHTS: dict[str, SourceRights] = {
-    "parsebot-dia": _parsebot("parsebot-dia", "DIA", "https://www.dia.es"),
+    # Transporte: search DIRECTO de la API pública de www.dia.es (cortesía: user-agent
+    # identificable, rate-limit, cadencia MENSUAL, nunca evade bloqueos/CAPTCHA). La base de
+    # autorización sobre los DATOS la declara el owner (acuerdo comercial); el transporte ya no es
+    # un feed de partner (Parse.bot) sino acceso directo a la API pública bajo ese footing.
+    "parsebot-dia": SourceRights(
+        provider_code="parsebot-dia",
+        provider_display_name="DIA (API pública directa)",
+        retailer_display_name="DIA",
+        technical_provider="Directo",
+        official_api=False,
+        source_type="authorized_partner",
+        source_url="https://www.dia.es",
+        data_rights_status="commercial_use_allowed",
+        authorization_status="verified",
+        license_basis="private_commercial_agreement",
+        license_display_name=LICENSE_DISPLAY_PRIVATE,
+        rights_display_name=RIGHTS_DISPLAY_AUTHORIZED,
+        public_authorization_text=PRIVATE_COMMERCIAL_AUTH_TEXT,
+        attribution_text_public=None,
+        rights_scope=_private_commercial_scope(),
+    ),
     "parsebot-alcampo": _parsebot("parsebot-alcampo", "Alcampo", "https://www.alcampo.es"),
     "parsebot-carrefour": _parsebot(
         "parsebot-carrefour", "Carrefour", "https://www.carrefour.es"

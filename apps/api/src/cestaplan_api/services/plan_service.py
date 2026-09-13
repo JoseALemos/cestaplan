@@ -567,10 +567,22 @@ class _LineResolver:
 
 
 def _latest_price_by_product(db: Session, retailer_id: int | None) -> dict[int, ProductPrice]:
-    """Most recent price per product across a whole chain (chains never mixed)."""
+    """Most recent price per product across a whole chain (chains never mixed).
+
+    Los precios sintéticos (catálogo demo MercaEjemplo) viven bajo su PROPIO retailer
+    sintético, así que al filtrar por ``retailer_id`` nunca contaminan un plan de una cadena
+    real, y SÍ costean un plan cuando la cadena seleccionada ES la demo (su ``retailer_id``
+    concreto). El único punto de fuga es el camino sin cadena (``retailer_id is None``): ahí no
+    hay filtro de retailer y se devolverían TODOS los precios, incluidos los sintéticos, aunque
+    el plan no haya seleccionado la demo. En ese caso excluimos explícitamente los sintéticos
+    para que nunca coste un plan real. (No se borra la demo: sólo deja de filtrarse hacia planes
+    que no la eligieron.)
+    """
     stmt = select(ProductPrice)
     if retailer_id is not None:
         stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
+    else:
+        stmt = stmt.where(ProductPrice.is_synthetic.is_(False))
     rows = (
         db.execute(
             stmt.order_by(

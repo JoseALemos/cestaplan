@@ -17,10 +17,12 @@ from cestaplan_api.deps import (
     DbSession,
     HouseholdCtx,
     get_household_context,
+    rate_limit,
     verify_csrf,
 )
 from cestaplan_api.models import FavoriteRecipe, PlannedMeal, Recipe, RecipeFeedback
 from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
+from cestaplan_api.security import plan_generation_rate_limiter
 from cestaplan_api.services.audit import record_audit
 from cestaplan_api.services.plan_service import (
     build_regenerate_meal_payload,
@@ -67,7 +69,12 @@ def _serialize_recipe_brief(recipe: Recipe) -> dict:
 # Generation
 # --------------------------------------------------------------------------- #
 @router.post(
-    "/generate", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_csrf)]
+    "/generate",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(verify_csrf),
+        Depends(rate_limit(plan_generation_rate_limiter)),
+    ],
 )
 def generate_plan_endpoint(
     payload: GenerateRequest, user: CurrentUser, db: DbSession

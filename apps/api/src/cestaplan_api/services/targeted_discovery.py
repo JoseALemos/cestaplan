@@ -303,7 +303,9 @@ _MAPPING_VERSION = "2.0.0"
 # Parse.bot chains that LIVE-search per ingredient via their plan (``plans.capture_records``). This
 # is the existing route, kept unchanged. The other Parse.bot plan chains (carrefour/aldi/lidl)
 # deliberately reuse already-staged products instead of re-capturing, so they are NOT listed here.
-_PLAN_LIVE_SEARCH_PROVIDERS = ("parsebot-alcampo", "parsebot-dia")
+# ``parsebot-dia`` is NOT listed either: its provider is now the DIRECT public-API connector (no
+# Parse.bot plan capture), so discovery reuses already-staged DIA products, exactly like Mercadona.
+_PLAN_LIVE_SEARCH_PROVIDERS = ("parsebot-alcampo",)
 
 
 def _classify_candidates(
