@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     alcampo_connector_enabled: bool = False
     carrefour_connector_enabled: bool = False
     dia_connector_enabled: bool = False
+    # Default national warehouse zone the DIRECT DIA public-API search reports (``cart.postal_code``
+    # 28041 Madrid). Informational in v1 (the API ignores ``?postal_code=``); store-scope
+    # zone-pinning is a follow-up. No secret.
+    dia_postal_code: str = "28041"
     lidl_offers_connector_enabled: bool = False
     aldi_offers_connector_enabled: bool = False
     deza_connector_enabled: bool = False

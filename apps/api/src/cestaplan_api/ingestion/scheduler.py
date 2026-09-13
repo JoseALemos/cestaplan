@@ -85,15 +85,30 @@ def _mercadona_monthly() -> FrequencyConfig:
     )
 
 
+def _dia_monthly() -> FrequencyConfig:
+    """DIA refreshes MONTHLY too (courteous direct public-API access, like Mercadona).
+
+    The direct www.dia.es search connector is polite (identifiable User-Agent, rate-limit); a
+    30-day spacing matches Mercadona's cadence rather than a frequent crawl. Every scheduled run
+    type is spaced 30 days.
+    """
+    return FrequencyConfig(
+        run_types=(RunType.CATALOG, RunType.PRICES),
+        cadence_days={RunType.CATALOG: 30, RunType.PRICES: 30},
+        default_cadence_days=30,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulerConfig:
     """Scheduler configuration: a default policy plus per-retailer-slug overrides."""
 
     default: FrequencyConfig = field(default_factory=FrequencyConfig)
-    # Mercadona is refreshed monthly (see :func:`_mercadona_monthly`); every other retailer uses
-    # ``default`` unless overridden here.
+    # Mercadona and DIA are refreshed monthly (see :func:`_mercadona_monthly` / :func:`_dia_monthly`
+    # — courteous direct public-API access); every other retailer uses ``default`` unless overridden
+    # here.
     per_retailer: dict[str, FrequencyConfig] = field(
-        default_factory=lambda: {"mercadona": _mercadona_monthly()}
+        default_factory=lambda: {"mercadona": _mercadona_monthly(), "dia": _dia_monthly()}
     )
     # Advisory-lock key for the scheduler mutex. Defaults to the global key (one scheduler
     # at a time in production). Tests may set a unique key so concurrent, pooled-connection
