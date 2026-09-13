@@ -3,7 +3,7 @@
 import { useMutation } from "@tanstack/react-query";
 
 import { clearCsrfToken, storeCsrfToken } from "@/lib/api/client";
-import { login, logout, registerUser } from "@/lib/api/endpoints";
+import { login, logout, registerUser, requestPasswordRecovery } from "@/lib/api/endpoints";
 import { useInvalidateAuth } from "@/lib/auth/auth-context";
 
 export function useLoginMutation() {
@@ -21,6 +21,10 @@ export function useLoginMutation() {
 
 export function useRegisterMutation() {
   return useMutation({ mutationFn: registerUser });
+}
+
+export function usePasswordRecoveryMutation() {
+  return useMutation({ mutationFn: requestPasswordRecovery });
 }
 
 export function useLogoutMutation() {

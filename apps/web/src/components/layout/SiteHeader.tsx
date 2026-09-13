@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/Button";
 const NAV_LINKS = [
   { href: "/#como-funciona", label: "Cómo funciona" },
   { href: "/#principios", label: "Principios" },
-  { href: "/#privacidad", label: "Privacidad" },
+  { href: "/privacidad", label: "Privacidad" },
 ];
 
 function BasketMark() {

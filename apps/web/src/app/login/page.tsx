@@ -78,6 +78,11 @@ export default function LoginPage() {
               error={errors.password?.message}
               {...register("password")}
             />
+            <div className="flex justify-end">
+              <Link href="/recuperar-contrasena" className="text-sm font-medium text-primary hover:underline">
+                ¿Olvidaste tu contraseña?
+              </Link>
+            </div>
             <Button type="submit" loading={loginMutation.isPending} className="mt-1">
               Entrar
             </Button>
