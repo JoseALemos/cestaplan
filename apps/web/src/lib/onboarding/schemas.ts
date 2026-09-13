@@ -72,9 +72,19 @@ export const registerSchema = z
       .max(128, "Máximo 128 caracteres"),
     confirmPassword: z.string().min(1, "Repite la contraseña"),
     display_name: z.string().trim().max(200).optional().or(z.literal("")),
+    acceptPrivacy: z.boolean(),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "Las contraseñas no coinciden",
     path: ["confirmPassword"],
+  })
+  .refine((data) => data.acceptPrivacy === true, {
+    message: "Debes aceptar la Política de Privacidad",
+    path: ["acceptPrivacy"],
   });
 export type RegisterFormValues = z.infer<typeof registerSchema>;
+
+export const passwordRecoverySchema = z.object({
+  email: z.string().trim().min(1, "Introduce tu email").email("Email no válido"),
+});
+export type PasswordRecoveryFormValues = z.infer<typeof passwordRecoverySchema>;
