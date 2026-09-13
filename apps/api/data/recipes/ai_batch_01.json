@@ -1,0 +1,2671 @@
+[
+  {
+    "title": "Porridge de avena con plátano y arándanos",
+    "description": "Gachas de avena cremosas con leche, coronadas con plátano en rodajas y arándanos frescos. Un desayuno caliente, saciante y listo en pocos minutos.",
+    "servings": 2,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "saludable",
+      "rapido"
+    ],
+    "preparation_minutes": 5,
+    "cooking_minutes": 8,
+    "required_equipment": [
+      "cazo",
+      "cuchara"
+    ],
+    "leftover_reuse": "Guarda las gachas frías y úsalas al día siguiente como base de un yogur batido o un bizcocho de avena.",
+    "storage_instructions": "En un recipiente hermético en la nevera hasta 2 días.",
+    "reheating_instructions": "Calienta en el cazo con un chorrito de leche a fuego suave, removiendo, o 1 minuto en el microondas.",
+    "ingredients": [
+      {
+        "canonical_name": "avena_copos",
+        "display_name": "Copos de avena",
+        "quantity": 80,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "leche_entera",
+        "display_name": "Leche entera",
+        "quantity": 400,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": "leche"
+      },
+      {
+        "canonical_name": "platano",
+        "display_name": "Plátano",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "arandano",
+        "display_name": "Arándanos",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "miel",
+        "display_name": "Miel",
+        "quantity": 20,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "azucar",
+        "display_name": "Azúcar",
+        "quantity": 10,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pon la avena y la leche en un cazo y lleva a ebullición suave sin dejar de remover.",
+      "Baja el fuego y cocina 5-7 minutos hasta que espese a tu gusto.",
+      "Reparte en dos boles y deja templar un minuto.",
+      "Corta el plátano en rodajas y repártelo por encima con los arándanos.",
+      "Endulza con un hilo de miel o una pizca de azúcar si lo deseas."
+    ]
+  },
+  {
+    "title": "Yogur natural con almendras y arándanos",
+    "description": "Bol rápido de yogur natural con almendras crujientes y arándanos. Ideal como desayuno ligero o merienda con proteína.",
+    "servings": 1,
+    "meal_types": [
+      "breakfast",
+      "snack"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "saludable",
+      "rapido",
+      "sin_gluten"
+    ],
+    "preparation_minutes": 5,
+    "cooking_minutes": 0,
+    "required_equipment": [
+      "bol",
+      "cuchara"
+    ],
+    "leftover_reuse": "Si sobra, tápalo bien; sirve también como topping de un porridge.",
+    "storage_instructions": "En la nevera, tapado, hasta 1 día (añade las almendras al momento para que no se ablanden).",
+    "reheating_instructions": "No requiere; consumir frío.",
+    "ingredients": [
+      {
+        "canonical_name": "yogur_natural",
+        "display_name": "Yogur natural",
+        "quantity": 250,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "almendra",
+        "display_name": "Almendras",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "arandano",
+        "display_name": "Arándanos",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "miel",
+        "display_name": "Miel",
+        "quantity": 15,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Vierte el yogur en un bol.",
+      "Pica groseramente las almendras y espárcelas por encima.",
+      "Añade los arándanos.",
+      "Termina con un hilo de miel si quieres un toque dulce."
+    ]
+  },
+  {
+    "title": "Batido de plátano y leche",
+    "description": "Batido cremoso de plátano maduro y leche, con opción de avena para hacerlo más saciante. Perfecto para un desayuno rápido o después de entrenar.",
+    "servings": 2,
+    "meal_types": [
+      "breakfast",
+      "snack"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "rapido",
+      "saludable"
+    ],
+    "preparation_minutes": 5,
+    "cooking_minutes": 0,
+    "required_equipment": [
+      "batidora",
+      "vaso"
+    ],
+    "leftover_reuse": "Congela el sobrante en cubiteras para batidos posteriores.",
+    "storage_instructions": "Mejor recién hecho; en la nevera hasta 12 horas, remover antes de beber.",
+    "reheating_instructions": "No aplica; agitar y servir frío.",
+    "ingredients": [
+      {
+        "canonical_name": "platano",
+        "display_name": "Plátano",
+        "quantity": 240,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "leche_desnatada",
+        "display_name": "Leche desnatada",
+        "quantity": 400,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": "leche"
+      },
+      {
+        "canonical_name": "avena_copos",
+        "display_name": "Copos de avena",
+        "quantity": 30,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "miel",
+        "display_name": "Miel",
+        "quantity": 15,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela los plátanos y trocéalos.",
+      "Ponlos en la batidora con la leche.",
+      "Añade la avena y la miel si las usas.",
+      "Bate hasta obtener una textura homogénea y sirve enseguida."
+    ]
+  },
+  {
+    "title": "Crema de calabacín",
+    "description": "Crema suave y ligera de calabacín con patata para dar cuerpo. Un primer plato reconfortante que gusta a toda la familia.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "saludable"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 25,
+    "required_equipment": [
+      "olla",
+      "batidora"
+    ],
+    "leftover_reuse": "Aprovecha la crema sobrante como salsa para pasta o base de un revuelto de verduras.",
+    "storage_instructions": "En la nevera, en recipiente hermético, hasta 3 días. También se congela bien.",
+    "reheating_instructions": "Calienta a fuego medio removiendo, o 2-3 minutos en el microondas.",
+    "ingredients": [
+      {
+        "canonical_name": "calabacin",
+        "display_name": "Calabacín",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "leche_entera",
+        "display_name": "Leche entera",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": true,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "queso_fresco",
+        "display_name": "Queso fresco",
+        "quantity": 60,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela y trocea la cebolla, el ajo y la patata; lava y trocea el calabacín.",
+      "Sofríe la cebolla y el ajo en el aceite hasta que estén translúcidos.",
+      "Añade la patata y el calabacín, rehoga un par de minutos y cubre con agua.",
+      "Sala y cuece 20 minutos hasta que la patata esté tierna.",
+      "Tritura con la batidora hasta obtener una crema fina (añade la leche para más cremosidad).",
+      "Sirve y corona con daditos de queso fresco si te apetece."
+    ]
+  },
+  {
+    "title": "Crema de zanahoria y comino",
+    "description": "Crema aterciopelada de zanahoria con un toque cálido de comino. Colorida, económica y muy fácil de preparar.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "economico"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 25,
+    "required_equipment": [
+      "olla",
+      "batidora"
+    ],
+    "leftover_reuse": "Usa la crema sobrante para enriquecer un guiso de lentejas o como salsa de un cuscús.",
+    "storage_instructions": "En la nevera hasta 3 días; se congela perfectamente.",
+    "reheating_instructions": "Calienta a fuego medio removiendo, o en el microondas 2-3 minutos.",
+    "ingredients": [
+      {
+        "canonical_name": "zanahoria",
+        "display_name": "Zanahoria",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "comino",
+        "display_name": "Comino",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "nata_cocinar",
+        "display_name": "Nata para cocinar",
+        "quantity": 50,
+        "unit": "ml",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela y trocea la zanahoria, la cebolla y la patata.",
+      "Rehoga la cebolla en el aceite hasta que ablande.",
+      "Añade zanahoria y patata, agrega el comino y remueve un minuto.",
+      "Cubre con agua, sala y cuece 20 minutos.",
+      "Tritura hasta obtener una crema fina; añade la nata si quieres más untuosidad."
+    ]
+  },
+  {
+    "title": "Pisto de verduras",
+    "description": "Guiso lento de calabacín, pimiento, cebolla y tomate. Un clásico de aprovechamiento de la huerta que mejora de un día para otro.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 35,
+    "required_equipment": [
+      "sarten",
+      "cuchillo"
+    ],
+    "leftover_reuse": "El pisto sobrante es ideal para rellenar una tortilla, coronar con un huevo o servir con arroz.",
+    "storage_instructions": "En la nevera hasta 4 días; gana sabor al reposar. Se congela bien.",
+    "reheating_instructions": "Calienta en la sartén a fuego medio unos minutos, o en el microondas.",
+    "ingredients": [
+      {
+        "canonical_name": "calabacin",
+        "display_name": "Calabacín",
+        "quantity": 300,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "azucar",
+        "display_name": "Azúcar",
+        "quantity": 5,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "huevos_m",
+        "display_name": "Huevos medianos",
+        "quantity": 4,
+        "unit": "unit",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pica finamente la cebolla y el ajo y sofríelos en el aceite a fuego suave.",
+      "Añade el pimiento en dados y cocina 10 minutos.",
+      "Incorpora el calabacín en dados y rehoga otros 5 minutos.",
+      "Agrega el tomate rallado, sala y cuece a fuego lento 20 minutos removiendo de vez en cuando.",
+      "Corrige la acidez con una pizca de azúcar si hace falta.",
+      "Si quieres, sirve con un huevo frito o escalfado por encima."
+    ]
+  },
+  {
+    "title": "Patatas a lo pobre",
+    "description": "Patatas confitadas a fuego lento con cebolla y pimiento rojo. Guarnición humilde y sabrosísima, perfecta con carne, pescado o un huevo.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "economico",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 30,
+    "required_equipment": [
+      "sarten",
+      "cuchillo"
+    ],
+    "leftover_reuse": "Reutiliza las patatas sobrantes en una tortilla o como base de un revuelto.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Recaliéntalas en la sartén a fuego medio o en el horno para recuperar textura.",
+    "ingredients": [
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 800,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 60,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "vinagre",
+        "display_name": "Vinagre",
+        "quantity": 15,
+        "unit": "ml",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela y corta las patatas en láminas de medio centímetro.",
+      "Corta la cebolla y el pimiento en juliana y lamina el ajo.",
+      "Calienta el aceite en la sartén y añade todo junto con una pizca de sal.",
+      "Cocina a fuego medio-bajo unos 30 minutos, removiendo con cuidado, hasta que las patatas estén tiernas.",
+      "Si te gusta, riega con un chorrito de vinagre al final."
+    ]
+  },
+  {
+    "title": "Puré de patata casero",
+    "description": "Puré de patata suave y mantecoso con leche y mantequilla. La guarnición reconfortante por excelencia.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "sin_gluten"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 20,
+    "required_equipment": [
+      "olla",
+      "pasapures"
+    ],
+    "leftover_reuse": "Con el puré sobrante puedes formar croquetas o gratinar una base de pastel de carne.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Calienta a fuego suave con un chorrito de leche removiendo, o en el microondas.",
+    "ingredients": [
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 700,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "leche_entera",
+        "display_name": "Leche entera",
+        "quantity": 150,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "mantequilla",
+        "display_name": "Mantequilla",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimienta_negra",
+        "display_name": "Pimienta negra",
+        "quantity": 1,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela y trocea las patatas y cuécelas en agua con sal 18-20 minutos hasta que estén tiernas.",
+      "Escurre bien y pásalas por el pasapurés en caliente.",
+      "Calienta la leche y añádela poco a poco mezclando.",
+      "Incorpora la mantequilla y remueve hasta que se funda y quede cremoso.",
+      "Rectifica de sal y pimienta al gusto."
+    ]
+  },
+  {
+    "title": "Patatas aliñadas con aceitunas",
+    "description": "Ensalada tibia de patata cocida con cebolla, aceitunas y un aliño de aceite y vinagre. Fresca, económica y muy socorrida.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "snack"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "economico"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 20,
+    "required_equipment": [
+      "olla",
+      "bol"
+    ],
+    "leftover_reuse": "Añade atún o huevo duro al sobrante para convertirlo en una ensalada completa.",
+    "storage_instructions": "En la nevera hasta 2 días; sacar 15 minutos antes de servir.",
+    "reheating_instructions": "Se sirve fría o templada; no requiere recalentado.",
+    "ingredients": [
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 80,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceitunas",
+        "display_name": "Aceitunas",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "vinagre",
+        "display_name": "Vinagre",
+        "quantity": 20,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "atun_lata",
+        "display_name": "Atún en lata",
+        "quantity": 80,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "huevos_m",
+        "display_name": "Huevos medianos",
+        "quantity": 2,
+        "unit": "unit",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Cuece las patatas enteras con piel en agua con sal 20 minutos; deja templar y pélalas.",
+      "Córtalas en dados y ponlas en un bol.",
+      "Añade la cebolla picada muy fina y las aceitunas.",
+      "Aliña con el aceite, el vinagre y la sal y mezcla con suavidad.",
+      "Incorpora atún o huevo duro si quieres una versión más completa."
+    ]
+  },
+  {
+    "title": "Salteado de espinacas con ajo y pimentón",
+    "description": "Espinacas salteadas con ajo laminado y un toque de pimentón. Guarnición verde rápida, sabrosa y llena de hierro.",
+    "servings": 2,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "rapido",
+      "saludable"
+    ],
+    "preparation_minutes": 5,
+    "cooking_minutes": 10,
+    "required_equipment": [
+      "sarten"
+    ],
+    "leftover_reuse": "Usa las espinacas sobrantes para rellenar una tortilla o mezclar con arroz.",
+    "storage_instructions": "En la nevera hasta 2 días en recipiente hermético.",
+    "reheating_instructions": "Saltea 2 minutos en la sartén a fuego vivo.",
+    "ingredients": [
+      {
+        "canonical_name": "espinaca",
+        "display_name": "Espinaca",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 25,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "garbanzos_cocido",
+        "display_name": "Garbanzos cocidos",
+        "quantity": 200,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Lamina los ajos y dóralos suavemente en el aceite.",
+      "Retira la sartén del fuego y añade el pimentón para que no se queme.",
+      "Vuelve al fuego, incorpora las espinacas y saltea hasta que reduzcan.",
+      "Sala al gusto y, si quieres un plato completo, añade los garbanzos y calienta un par de minutos."
+    ]
+  },
+  {
+    "title": "Zanahorias asadas al comino",
+    "description": "Zanahorias asadas al horno con aceite y comino, caramelizadas por fuera y tiernas por dentro. Guarnición sana y muy fácil.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "saludable"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 30,
+    "required_equipment": [
+      "horno",
+      "fuente_horno"
+    ],
+    "leftover_reuse": "Tritura las zanahorias sobrantes con caldo para una crema exprés o añádelas a un cuscús.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en el horno 8 minutos a 180 °C o en la sartén.",
+    "ingredients": [
+      {
+        "canonical_name": "zanahoria",
+        "display_name": "Zanahoria",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "comino",
+        "display_name": "Comino",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "miel",
+        "display_name": "Miel",
+        "quantity": 20,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Precalienta el horno a 200 °C.",
+      "Pela las zanahorias y córtalas en bastones.",
+      "Mézclalas en la fuente con el aceite, el comino y la sal.",
+      "Asa 30 minutos removiendo a media cocción hasta que estén doradas.",
+      "Pincela con un poco de miel al sacarlas si te gusta el contraste dulce."
+    ]
+  },
+  {
+    "title": "Pimientos rojos asados aliñados",
+    "description": "Pimientos rojos asados, pelados y aliñados con ajo y aceite. Entrante o guarnición mediterránea de sabor intenso.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "snack"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "tradicional"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 40,
+    "required_equipment": [
+      "horno",
+      "fuente_horno"
+    ],
+    "leftover_reuse": "Los pimientos sobrantes van perfectos en bocadillos, ensaladas o sobre una tostada.",
+    "storage_instructions": "En la nevera cubiertos con su aceite hasta 4 días.",
+    "reheating_instructions": "Se sirven a temperatura ambiente; no necesitan recalentado.",
+    "ingredients": [
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 700,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "vinagre",
+        "display_name": "Vinagre",
+        "quantity": 15,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Precalienta el horno a 200 °C y coloca los pimientos enteros en la fuente.",
+      "Ásalos 40 minutos dándoles la vuelta hasta que la piel esté arrugada.",
+      "Tápalos con un paño 10 minutos para que suden y sea fácil pelarlos.",
+      "Pélalos, quítales las semillas y córtalos en tiras.",
+      "Aliña con el ajo picado, el aceite, el vinagre y la sal."
+    ]
+  },
+  {
+    "title": "Espinacas a la crema",
+    "description": "Espinacas rehogadas y ligadas con una crema suave de leche y mantequilla. Guarnición reconfortante que combina con casi todo.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "sin_gluten"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 15,
+    "required_equipment": [
+      "sarten"
+    ],
+    "leftover_reuse": "Usa las espinacas a la crema como relleno de crepes saladas o base de un gratinado.",
+    "storage_instructions": "En la nevera hasta 2 días en recipiente hermético.",
+    "reheating_instructions": "Calienta a fuego suave removiendo; si espesa, añade un poco de leche.",
+    "ingredients": [
+      {
+        "canonical_name": "espinaca",
+        "display_name": "Espinaca",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "leche_entera",
+        "display_name": "Leche entera",
+        "quantity": 200,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "mantequilla",
+        "display_name": "Mantequilla",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "harina_trigo",
+        "display_name": "Harina de trigo",
+        "quantity": 15,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pica la cebolla y el ajo y rehógalos en la mantequilla.",
+      "Si quieres una salsa más espesa, añade la harina y cocina un minuto.",
+      "Vierte la leche poco a poco removiendo hasta que ligue.",
+      "Incorpora las espinacas y cocina hasta que reduzcan y se integren.",
+      "Sala al gusto y sirve caliente."
+    ]
+  },
+  {
+    "title": "Bacalao al horno con patata y pimentón",
+    "description": "Lomos de bacalao sobre una cama de patata panadera con ajo y pimentón. Plato de pescado sencillo, jugoso y muy resultón.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "sin_gluten",
+      "alto_en_proteina",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 40,
+    "required_equipment": [
+      "horno",
+      "fuente_horno"
+    ],
+    "leftover_reuse": "Desmiga el bacalao sobrante para un revuelto con las patatas o una ensalada tibia.",
+    "storage_instructions": "En la nevera hasta 2 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en el horno 10 minutos a 180 °C para no resecar el pescado.",
+    "ingredients": [
+      {
+        "canonical_name": "bacalao",
+        "display_name": "Bacalao",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 12,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 50,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Precalienta el horno a 200 °C.",
+      "Corta las patatas (y la cebolla, si la usas) en rodajas finas y colócalas en la fuente con parte del aceite y sal.",
+      "Hornea las patatas 25 minutos hasta que empiecen a estar tiernas.",
+      "Coloca los lomos de bacalao encima, reparte el ajo picado y el pimentón y riega con el resto del aceite.",
+      "Hornea 12-15 minutos más hasta que el bacalao se abra en lascas."
+    ]
+  },
+  {
+    "title": "Patatas con chorizo",
+    "description": "Guiso casero de patatas con chorizo, cebolla y pimiento, con un caldo teñido de pimentón. Cuchareo tradicional y muy económico.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "sin_gluten",
+      "tradicional",
+      "economico"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 35,
+    "required_equipment": [
+      "olla",
+      "cuchillo"
+    ],
+    "leftover_reuse": "Aplasta el guiso sobrante y úsalo como relleno de empanadillas o base de un huevo al plato.",
+    "storage_instructions": "En la nevera hasta 3 días; mejora de sabor al reposar.",
+    "reheating_instructions": "Calienta a fuego medio añadiendo un poco de agua si se ha espesado.",
+    "ingredients": [
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 700,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "chorizo",
+        "display_name": "Chorizo",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pica la cebolla, el ajo y el pimiento y sofríelos en el aceite.",
+      "Añade el chorizo en rodajas y rehoga hasta que suelte su grasa.",
+      "Incorpora el pimentón fuera del fuego y remueve.",
+      "Agrega las patatas chascadas (rotas con el cuchillo) y rehoga un minuto.",
+      "Cubre con agua, sala y cuece 25-30 minutos hasta que las patatas estén tiernas."
+    ]
+  },
+  {
+    "title": "Salsa de tomate casera",
+    "description": "Salsa de tomate natural sofrita con cebolla y ajo, ideal para pasta, arroces o guisos. Preparación básica para tener siempre a mano.",
+    "servings": 6,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "economico"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 40,
+    "required_equipment": [
+      "sarten",
+      "batidora"
+    ],
+    "leftover_reuse": "Guarda la salsa en botes para napar pasta, huevos o pizzas caseras a lo largo de la semana.",
+    "storage_instructions": "En la nevera hasta 5 días o congelada en porciones hasta 3 meses.",
+    "reheating_instructions": "Calienta a fuego medio removiendo hasta que hierva suavemente.",
+    "ingredients": [
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 800,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "azucar",
+        "display_name": "Azúcar",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pica la cebolla y el ajo muy finos y sofríelos en el aceite a fuego suave.",
+      "Ralla o tritura los tomates y añádelos a la sartén.",
+      "Sala, agrega el azúcar para corregir la acidez y cuece a fuego lento 35 minutos.",
+      "Tritura si la quieres fina o déjala con textura al gusto."
+    ]
+  },
+  {
+    "title": "Tortilla de patatas",
+    "description": "La tortilla española de siempre, con patata y cebolla pochadas y huevo cuajado a tu punto. Un imprescindible de la cocina de casa.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner",
+      "snack"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "sin_gluten",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 30,
+    "required_equipment": [
+      "sarten",
+      "plato"
+    ],
+    "leftover_reuse": "La tortilla sobrante se disfruta fría en pincho o en bocadillo al día siguiente.",
+    "storage_instructions": "En la nevera hasta 2 días, tapada.",
+    "reheating_instructions": "Se come fría o templada; si prefieres, calienta 20 segundos en el microondas.",
+    "ingredients": [
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "huevos_m",
+        "display_name": "Huevos medianos",
+        "quantity": 6,
+        "unit": "unit",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 60,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pela y corta las patatas en láminas finas y la cebolla en juliana.",
+      "Póchalas en el aceite a fuego medio-bajo hasta que estén tiernas; escurre el aceite sobrante.",
+      "Bate los huevos con sal y mezcla con la patata y la cebolla; deja reposar 5 minutos.",
+      "Cuaja la mezcla en la sartén a fuego medio unos minutos por un lado.",
+      "Dale la vuelta con ayuda de un plato y cuaja por el otro lado al punto que te guste."
+    ]
+  },
+  {
+    "title": "Arroz con pollo",
+    "description": "Arroz meloso con pollo dorado y sofrito de verduras, teñido de pimentón. Un plato único completo y familiar.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "sin_gluten",
+      "alto_en_proteina",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 35,
+    "required_equipment": [
+      "cazuela",
+      "cuchillo"
+    ],
+    "leftover_reuse": "El arroz sobrante queda estupendo salteado al día siguiente con un huevo.",
+    "storage_instructions": "En la nevera hasta 2 días; enfriar rápido tras cocinar.",
+    "reheating_instructions": "Calienta en la sartén con unas gotas de agua o en el microondas tapado.",
+    "ingredients": [
+      {
+        "canonical_name": "arroz_redondo",
+        "display_name": "Arroz redondo",
+        "quantity": 320,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pollo_pechuga",
+        "display_name": "Pechuga de pollo",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "guisantes",
+        "display_name": "Guisantes",
+        "quantity": 100,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Trocea el pollo, sálalo y dóralo en la cazuela con el aceite; resérvalo.",
+      "En la misma grasa sofríe la cebolla, el ajo y el pimiento picados.",
+      "Añade el tomate rallado y cocina hasta que reduzca; incorpora el pimentón.",
+      "Devuelve el pollo, agrega el arroz y rehoga un minuto.",
+      "Vierte el doble y medio de agua caliente, sala y cuece 18 minutos; añade los guisantes a mitad.",
+      "Deja reposar 5 minutos antes de servir."
+    ]
+  },
+  {
+    "title": "Lentejas estofadas con chorizo",
+    "description": "Lentejas guisadas con chorizo, patata y verduras. El plato de cuchara casero que reconforta cualquier día de invierno.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "alto_en_proteina",
+      "tradicional",
+      "economico",
+      "batch_cooking"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 45,
+    "required_equipment": [
+      "olla",
+      "cuchillo"
+    ],
+    "leftover_reuse": "Las lentejas sobrantes se convierten en hamburguesas vegetales o en un puré espeso.",
+    "storage_instructions": "En la nevera hasta 4 días; se congelan muy bien.",
+    "reheating_instructions": "Calienta a fuego medio añadiendo un poco de agua si han espesado.",
+    "ingredients": [
+      {
+        "canonical_name": "lentejas",
+        "display_name": "Lentejas",
+        "quantity": 300,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "zanahoria",
+        "display_name": "Zanahoria",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "chorizo",
+        "display_name": "Chorizo",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 100,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pica la cebolla, el ajo, la zanahoria (y el pimiento) y sofríelos en el aceite.",
+      "Añade el chorizo en rodajas y rehoga; incorpora el pimentón fuera del fuego.",
+      "Agrega las lentejas y la patata en trozos y remueve.",
+      "Cubre con agua abundante, lleva a ebullición y cuece a fuego lento 40 minutos.",
+      "Sala hacia el final y ajusta el caldo a tu gusto."
+    ]
+  },
+  {
+    "title": "Garbanzos con espinacas",
+    "description": "Potaje rápido de garbanzos cocidos con espinacas, tomate y especias. Receta de vigilia llena de sabor y muy nutritiva.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "tradicional",
+      "alto_en_proteina"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 25,
+    "required_equipment": [
+      "cazuela",
+      "cuchillo"
+    ],
+    "leftover_reuse": "El sobrante espesa al enfriar; úsalo como relleno de una empanada o sobre una tostada.",
+    "storage_instructions": "En la nevera hasta 4 días; se congela bien.",
+    "reheating_instructions": "Calienta a fuego medio añadiendo un chorrito de agua si es necesario.",
+    "ingredients": [
+      {
+        "canonical_name": "garbanzos_cocido",
+        "display_name": "Garbanzos cocidos",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "espinaca",
+        "display_name": "Espinaca",
+        "quantity": 300,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate_triturado",
+        "display_name": "Tomate triturado",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "comino",
+        "display_name": "Comino",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Sofríe la cebolla y el ajo picados en el aceite.",
+      "Añade el comino y el pimentón y, enseguida, el tomate triturado; cocina 10 minutos.",
+      "Incorpora las espinacas y deja que reduzcan.",
+      "Agrega los garbanzos escurridos y un poco de agua y cuece 10 minutos.",
+      "Sala al gusto y sirve caliente."
+    ]
+  },
+  {
+    "title": "Macarrones con tomate y chorizo",
+    "description": "Macarrones con salsa de tomate y chorizo, un plato de pasta rápido que encanta a grandes y pequeños.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "italiana",
+    "preference_tags": [
+      "rapido",
+      "economico",
+      "tradicional"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 20,
+    "required_equipment": [
+      "olla",
+      "sarten"
+    ],
+    "leftover_reuse": "Gratina los macarrones sobrantes con un poco de queso para una segunda comida distinta.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en la sartén con un chorrito de agua o en el microondas tapado.",
+    "ingredients": [
+      {
+        "canonical_name": "pasta_macarrones",
+        "display_name": "Macarrones",
+        "quantity": 320,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate_triturado",
+        "display_name": "Tomate triturado",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "chorizo",
+        "display_name": "Chorizo",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 25,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "queso_curado",
+        "display_name": "Queso curado",
+        "quantity": 50,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Cuece los macarrones en agua con sal el tiempo que indique el paquete y escúrrelos.",
+      "Mientras, sofríe la cebolla y el ajo en el aceite.",
+      "Añade el chorizo en dados y rehoga hasta que suelte su grasa.",
+      "Incorpora el tomate triturado, sala y cuece 10 minutos.",
+      "Mezcla la salsa con los macarrones y sirve con queso rallado si quieres."
+    ]
+  },
+  {
+    "title": "Merluza a la plancha con patata",
+    "description": "Lomos de merluza a la plancha con un refrito de ajo y limón, acompañados de patata cocida. Cena ligera y proteica en media hora.",
+    "servings": 2,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "sin_gluten",
+      "alto_en_proteina",
+      "saludable",
+      "rapido"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 20,
+    "required_equipment": [
+      "plancha",
+      "olla"
+    ],
+    "leftover_reuse": "Desmiga la merluza sobrante para una ensalada o unas croquetas caseras.",
+    "storage_instructions": "En la nevera hasta 1 día; el pescado se conserva mejor recién hecho.",
+    "reheating_instructions": "Calienta con suavidad en la sartén tapada para no resecar el pescado.",
+    "ingredients": [
+      {
+        "canonical_name": "merluza",
+        "display_name": "Merluza",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "limon",
+        "display_name": "Limón",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Cuece las patatas peladas y troceadas en agua con sal 18 minutos.",
+      "Salpimenta la merluza y hazla a la plancha con un poco de aceite, 3-4 minutos por lado.",
+      "Lamina el ajo y dóralo en el resto del aceite; añade un chorro de zumo de limón.",
+      "Sirve la merluza con las patatas y riega con el refrito de ajo y limón."
+    ]
+  },
+  {
+    "title": "Salmón al horno con limón",
+    "description": "Salmón jugoso al horno con ajo y limón. Cena rápida, sabrosa y rica en grasas saludables.",
+    "servings": 2,
+    "meal_types": [
+      "dinner",
+      "lunch"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "sin_gluten",
+      "alto_en_proteina",
+      "saludable"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 18,
+    "required_equipment": [
+      "horno",
+      "fuente_horno"
+    ],
+    "leftover_reuse": "Desmenuza el salmón sobrante sobre una ensalada o mézclalo con pasta.",
+    "storage_instructions": "En la nevera hasta 2 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en el horno 8 minutos a 160 °C para no resecarlo.",
+    "ingredients": [
+      {
+        "canonical_name": "salmon",
+        "display_name": "Salmón",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "limon",
+        "display_name": "Limón",
+        "quantity": 80,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 25,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 300,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Precalienta el horno a 200 °C.",
+      "Coloca los lomos de salmón en la fuente (con las patatas en rodajas debajo, si las usas).",
+      "Reparte el ajo picado, la sal y rodajas de limón y riega con el aceite.",
+      "Hornea 15-18 minutos hasta que el salmón esté hecho pero jugoso.",
+      "Exprime un poco más de limón por encima antes de servir."
+    ]
+  },
+  {
+    "title": "Pollo al horno con limón y patata",
+    "description": "Muslos de pollo asados con patata, ajo, limón y pimentón. Un asado dominguero fácil y muy jugoso, ideal para toda la familia.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "sin_gluten",
+      "alto_en_proteina",
+      "batch_cooking",
+      "tradicional"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 55,
+    "required_equipment": [
+      "horno",
+      "fuente_horno"
+    ],
+    "leftover_reuse": "Deshuesa el pollo sobrante para rellenar tacos, ensaladas o un arroz al día siguiente.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en el horno 12 minutos a 180 °C para recuperar la piel crujiente.",
+    "ingredients": [
+      {
+        "canonical_name": "pollo_muslo",
+        "display_name": "Muslo de pollo",
+        "quantity": 800,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "limon",
+        "display_name": "Limón",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 15,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 40,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Precalienta el horno a 200 °C.",
+      "Coloca las patatas en gajos en la fuente con parte del aceite y sal.",
+      "Adereza los muslos con el ajo picado, el pimentón, la sal y el resto del aceite y ponlos sobre las patatas.",
+      "Reparte rodajas de limón y exprime un poco de zumo por encima.",
+      "Asa 50-55 minutos, regando con los jugos a media cocción, hasta que el pollo esté dorado."
+    ]
+  },
+  {
+    "title": "Espaguetis con gambas y ajo",
+    "description": "Espaguetis salteados con gambas, ajo y un toque de tomate. Un plato de pasta marinero listo en 20 minutos.",
+    "servings": 2,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "italiana",
+    "preference_tags": [
+      "alto_en_proteina",
+      "rapido"
+    ],
+    "preparation_minutes": 10,
+    "cooking_minutes": 15,
+    "required_equipment": [
+      "olla",
+      "sarten"
+    ],
+    "leftover_reuse": "Saltea los espaguetis sobrantes con un huevo para una comida exprés distinta.",
+    "storage_instructions": "En la nevera hasta 1 día; el marisco se conserva mejor recién hecho.",
+    "reheating_instructions": "Calienta en la sartén con unas gotas de agua a fuego vivo.",
+    "ingredients": [
+      {
+        "canonical_name": "pasta_espagueti",
+        "display_name": "Espaguetis",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "gambas",
+        "display_name": "Gambas",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 12,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 80,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Cuece los espaguetis en agua con sal y resérvalos con un poco de su agua.",
+      "Lamina el ajo y dóralo en el aceite sin que se queme.",
+      "Añade las gambas peladas (y el pimiento en dados) y saltea 2 minutos.",
+      "Incorpora el tomate en dados y cocina un par de minutos.",
+      "Agrega los espaguetis con un poco de su agua, mezcla bien y sirve enseguida."
+    ]
+  },
+  {
+    "title": "Cuscús con verduras",
+    "description": "Cuscús esponjoso con verduras salteadas y comino. Guarnición o plato vegetariano rápido de aire norteafricano.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "norteafricana",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "rapido"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 15,
+    "required_equipment": [
+      "sarten",
+      "bol"
+    ],
+    "leftover_reuse": "El cuscús sobrante se come frío en ensalada con un aliño de limón.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Calienta en el microondas con unas gotas de agua para que no se seque.",
+    "ingredients": [
+      {
+        "canonical_name": "cuscus",
+        "display_name": "Cuscús",
+        "quantity": 250,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "calabacin",
+        "display_name": "Calabacín",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "zanahoria",
+        "display_name": "Zanahoria",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "comino",
+        "display_name": "Comino",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 5,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "garbanzos_cocido",
+        "display_name": "Garbanzos cocidos",
+        "quantity": 200,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Hidrata el cuscús con el mismo volumen de agua caliente con sal y un chorrito de aceite; tapa 5 minutos y suelta con un tenedor.",
+      "Corta las verduras en dados pequeños.",
+      "Saltéalas en el aceite empezando por la cebolla y la zanahoria, y añadiendo después el pimiento y el calabacín.",
+      "Agrega el comino y la sal y saltea hasta que estén tiernas (incorpora los garbanzos si los usas).",
+      "Mezcla las verduras con el cuscús y sirve."
+    ]
+  },
+  {
+    "title": "Ensalada de quinoa, maíz y aguacate",
+    "description": "Ensalada fresca de quinoa con maíz, tomate y aguacate, aliñada con limón. Nutritiva, saciante y perfecta para llevar en tácticas de batch cooking.",
+    "servings": 2,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "saludable",
+      "batch_cooking"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 15,
+    "required_equipment": [
+      "olla",
+      "bol"
+    ],
+    "leftover_reuse": "Rellena un wrap con la ensalada sobrante para una comida rápida.",
+    "storage_instructions": "En la nevera hasta 2 días; añade el aguacate al momento para que no se oxide.",
+    "reheating_instructions": "Se sirve fría; no requiere recalentado.",
+    "ingredients": [
+      {
+        "canonical_name": "quinoa",
+        "display_name": "Quinoa",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "maiz_dulce",
+        "display_name": "Maíz dulce",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "limon",
+        "display_name": "Limón",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 20,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aguacate",
+        "display_name": "Aguacate",
+        "quantity": 150,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Enjuaga la quinoa y cuécela en el doble de agua con sal 12-15 minutos; escurre y deja templar.",
+      "Corta el tomate (y el aguacate, si lo usas) en dados.",
+      "Mezcla en un bol la quinoa, el maíz escurrido y el tomate.",
+      "Aliña con el zumo de limón, el aceite y la sal.",
+      "Añade el aguacate al final y sirve."
+    ]
+  },
+  {
+    "title": "Tostada integral de aguacate y tomate",
+    "description": "Tostada de pan integral con aguacate machacado, tomate y un toque de limón. Desayuno o brunch saludable en cinco minutos.",
+    "servings": 2,
+    "meal_types": [
+      "breakfast",
+      "snack"
+    ],
+    "cuisine": "internacional",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "rapido",
+      "saludable"
+    ],
+    "preparation_minutes": 8,
+    "cooking_minutes": 2,
+    "required_equipment": [
+      "tostadora",
+      "bol"
+    ],
+    "leftover_reuse": "Usa el aguacate machacado sobrante como guacamole rápido para untar.",
+    "storage_instructions": "Consumir al momento; el aguacate se oxida rápido.",
+    "reheating_instructions": "No aplica; tuesta el pan justo antes de servir.",
+    "ingredients": [
+      {
+        "canonical_name": "pan_integral",
+        "display_name": "Pan integral",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aguacate",
+        "display_name": "Aguacate",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "tomate",
+        "display_name": "Tomate",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "limon",
+        "display_name": "Limón",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 10,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 3,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Tuesta las rebanadas de pan integral.",
+      "Machaca el aguacate con el zumo de limón y una pizca de sal.",
+      "Extiende el aguacate sobre las tostadas.",
+      "Cubre con el tomate en rodajas finas, sala y riega con un hilo de aceite."
+    ]
+  },
+  {
+    "title": "Salteado de tofu con verduras",
+    "description": "Tofu dorado salteado con pimiento, calabacín y cebolla. Plato vegano rápido, colorido y rico en proteína vegetal.",
+    "servings": 2,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "asiatica",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "alto_en_proteina",
+      "rapido"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 15,
+    "required_equipment": [
+      "sarten",
+      "cuchillo"
+    ],
+    "leftover_reuse": "El salteado sobrante rellena perfectamente un wrap o acompaña un cuenco de arroz.",
+    "storage_instructions": "En la nevera hasta 3 días en recipiente hermético.",
+    "reheating_instructions": "Saltea 3 minutos en la sartén a fuego vivo.",
+    "ingredients": [
+      {
+        "canonical_name": "tofu",
+        "display_name": "Tofu",
+        "quantity": 250,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "calabacin",
+        "display_name": "Calabacín",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "ajo",
+        "display_name": "Ajo",
+        "quantity": 8,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 25,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sesamo",
+        "display_name": "Sésamo",
+        "quantity": 10,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Escurre y seca bien el tofu y córtalo en dados.",
+      "Dóralo en la sartén con parte del aceite hasta que quede crujiente; resérvalo.",
+      "Saltea la cebolla, el ajo, el pimiento y el calabacín en el resto del aceite.",
+      "Devuelve el tofu, sala y saltea todo junto un par de minutos.",
+      "Espolvorea sésamo por encima si te apetece y sirve."
+    ]
+  },
+  {
+    "title": "Alubias blancas con verduras",
+    "description": "Guiso ligero de alubias blancas con zanahoria, patata y cebolla, aromatizado con pimentón. Cuchareo vegano reconfortante.",
+    "servings": 4,
+    "meal_types": [
+      "lunch",
+      "dinner"
+    ],
+    "cuisine": "española",
+    "preference_tags": [
+      "vegetariano",
+      "vegano",
+      "sin_gluten",
+      "tradicional",
+      "batch_cooking"
+    ],
+    "preparation_minutes": 15,
+    "cooking_minutes": 90,
+    "required_equipment": [
+      "olla",
+      "cuchillo"
+    ],
+    "leftover_reuse": "Tritura una parte del sobrante para espesar el guiso o hacer una crema de alubias.",
+    "storage_instructions": "En la nevera hasta 4 días; se congela muy bien.",
+    "reheating_instructions": "Calienta a fuego medio añadiendo agua si se ha espesado.",
+    "ingredients": [
+      {
+        "canonical_name": "alubias_blancas",
+        "display_name": "Alubias blancas",
+        "quantity": 320,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "zanahoria",
+        "display_name": "Zanahoria",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "cebolla",
+        "display_name": "Cebolla",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "patata",
+        "display_name": "Patata",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimenton",
+        "display_name": "Pimentón",
+        "quantity": 4,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "aceite_oliva",
+        "display_name": "Aceite de oliva",
+        "quantity": 30,
+        "unit": "ml",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "sal",
+        "display_name": "Sal",
+        "quantity": 6,
+        "unit": "g",
+        "optional": false,
+        "substitution_group": null
+      },
+      {
+        "canonical_name": "pimiento_rojo",
+        "display_name": "Pimiento rojo",
+        "quantity": 100,
+        "unit": "g",
+        "optional": true,
+        "substitution_group": null
+      }
+    ],
+    "steps": [
+      "Pon las alubias en remojo la noche anterior y escúrrelas.",
+      "Sofríe la cebolla, la zanahoria (y el pimiento) picados en el aceite.",
+      "Añade el pimentón fuera del fuego y remueve.",
+      "Incorpora las alubias, cúbrelas con agua fría y cuece a fuego lento 70 minutos.",
+      "Agrega la patata en trozos y la sal y cuece 20 minutos más hasta que todo esté tierno."
+    ]
+  }
+]
