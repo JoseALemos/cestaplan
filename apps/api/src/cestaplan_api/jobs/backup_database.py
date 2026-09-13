@@ -65,7 +65,8 @@ def run() -> Path:
 
     # pg_dump a stdout -> gzip a un fichero temporal -> rename atómico al final (nunca deja un
     # volcado a medias con nombre definitivo si el proceso muere).
-    proc = subprocess.Popen(  # noqa: S603 (argumentos fijos, sin shell)
+    # Argumentos fijos, sin shell (no hay inyección posible).
+    proc = subprocess.Popen(
         ["pg_dump", "--no-owner", "--no-privileges", "--format=plain", _libpq_url(database_url)],
         stdout=subprocess.PIPE,
     )
