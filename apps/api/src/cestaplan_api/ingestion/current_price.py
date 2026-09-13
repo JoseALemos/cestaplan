@@ -173,6 +173,7 @@ class CurrentPriceService:
             if self._price_exists(db, obs.store_id, variant.product_id, obs.observed_at):
                 continue
             source_type, source_name = self._source_provenance(db, obs.source_id)
+            package_quantity, package_unit = self._package_dims(variant)
             db.add(
                 ProductPrice(
                     retailer_id=obs.retailer_id,
@@ -180,10 +181,8 @@ class CurrentPriceService:
                     product_id=variant.product_id,
                     amount=obs.amount,
                     currency=obs.currency,
-                    package_quantity=variant.package_quantity
-                    if variant.package_quantity is not None
-                    else Decimal("1"),
-                    package_unit=variant.package_unit or "unit",
+                    package_quantity=package_quantity,
+                    package_unit=package_unit,
                     unit_price=obs.unit_amount,
                     promotion=obs.promotion_text,
                     availability=self._availability(obs.available),
@@ -199,6 +198,27 @@ class CurrentPriceService:
             written += 1
         db.flush()
         return written
+
+    @staticmethod
+    def _package_dims(variant: ProductVariant) -> tuple[Decimal, str]:
+        """Package size used for costing.
+
+        Prefiere los campos de envase de la variante; si faltan, cae al contenido neto parseado
+        (masa/volumen) para que el carril en vivo pueda escalar el coste por la cantidad de la
+        receta; en último término, el placeholder neutro ``1/'unit'`` (artículo contado/desconocido
+        que se compra entero). Evita el bug previo de dejar todo en ``1/'unit'`` e impedir el
+        escalado por cantidad.
+        """
+        if variant.package_quantity is not None and variant.package_unit:
+            return variant.package_quantity, variant.package_unit
+        if variant.net_content_quantity is not None and variant.net_content_unit in (
+            "g",
+            "kg",
+            "ml",
+            "l",
+        ):
+            return variant.net_content_quantity, variant.net_content_unit
+        return Decimal("1"), "unit"
 
     # -- internals ------------------------------------------------------------ #
 
