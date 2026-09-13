@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.db import get_db
 from cestaplan_api.models import Household, HouseholdMember, User, UserSession
-from cestaplan_api.security import hash_token
+from cestaplan_api.security import RateLimiter, hash_token
 
 # Cookie / header names. The session cookie is HttpOnly (set in the auth router); the
 # CSRF cookie is readable by JS so the front can echo it back in the header.
@@ -186,3 +187,33 @@ def verify_csrf(request: Request) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Token CSRF inválido"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting (per-IP) dependency
+# --------------------------------------------------------------------------- #
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for rate-limiting keys (never used for authorization)."""
+    return request.client.host if request.client else "-"
+
+
+def rate_limit(
+    limiter: RateLimiter,
+    *,
+    detail: str = "Demasiadas solicitudes. Inténtalo de nuevo más tarde.",
+) -> Callable[[Request], None]:
+    """Construye una dependencia que limita por IP con ``limiter`` (429 al exceder).
+
+    Reutilizable en cualquier endpoint caro/abusable. El contador es en memoria y por proceso
+    (ver :class:`cestaplan_api.security.RateLimiter`): correcto a numReplicas=1.
+    """
+
+    def _dependency(request: Request) -> None:
+        key = _client_ip(request)
+        if limiter.is_limited(key):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail
+            )
+        limiter.record(key)
+
+    return _dependency

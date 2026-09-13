@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 from cestaplan_api.db import engine
 from cestaplan_api.models import Recipe
 from cestaplan_api.scripts.seed_demo import main as seed_demo_main
-from cestaplan_api.security import login_rate_limiter
+from cestaplan_api.security import (
+    login_rate_limiter,
+    plan_generation_rate_limiter,
+    registration_rate_limiter,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -29,9 +33,19 @@ def _ensure_demo_seed() -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter() -> Iterator[None]:
-    login_rate_limiter.reset_all()
+    for limiter in (
+        login_rate_limiter,
+        registration_rate_limiter,
+        plan_generation_rate_limiter,
+    ):
+        limiter.reset_all()
     yield
-    login_rate_limiter.reset_all()
+    for limiter in (
+        login_rate_limiter,
+        registration_rate_limiter,
+        plan_generation_rate_limiter,
+    ):
+        limiter.reset_all()
 
 
 @pytest.fixture()

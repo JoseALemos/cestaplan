@@ -22,6 +22,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _CONFIG_PARENTS = Path(__file__).resolve().parents
 _REPO_ROOT = _CONFIG_PARENTS[4] if len(_CONFIG_PARENTS) > 4 else _CONFIG_PARENTS[-1]
 
+# Valor por defecto INSEGURO del secreto de sesión: sólo válido en desarrollo. El guard de
+# arranque (``Settings.validate_runtime_security``) aborta si este valor sigue puesto en cloud.
+DEV_SESSION_SECRET = "dev-only-insecure-secret-change-me"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -60,9 +64,12 @@ class Settings(BaseSettings):
     api_public_url: str = "http://localhost:8000"
     web_public_url: str = "http://localhost:3000"
     cors_allowed_origins: str = "http://localhost:3000"
+    # Allowlist de Host permitidos (TrustedHostMiddleware), separados por comas. Permisivo por
+    # defecto ("*") para desarrollo/tests; en producción se fija a los dominios reales de la API.
+    trusted_hosts: str = "*"
 
     # --- Auth / sessions ---
-    session_secret: str = "dev-only-insecure-secret-change-me"
+    session_secret: str = DEV_SESSION_SECRET
     session_ttl_hours: int = 720
     cookie_secure: bool = False
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
@@ -150,6 +157,17 @@ class Settings(BaseSettings):
     # 28041 Madrid). Informational in v1 (the API ignores ``?postal_code=``); store-scope
     # zone-pinning is a follow-up. No secret.
     dia_postal_code: str = "28041"
+    # DIA-SPECIFIC User-Agent. DIA's WAF blanket-blocks any UA without "Mozilla" (a crude bot-UA
+    # filter — NOT a CAPTCHA, NOT an auth wall, NOT aimed at us: a browser UA returns 200, our
+    # honest bot UA 403). The owner holds DIA's commercial authorization over the DATA (see
+    # rights.py); every OTHER courtesy is kept — rate-limit, MONTHLY cadence, and a From contact
+    # header (``scraping_contact_email``) so DIA can reach us. We still never solve CAPTCHAs, never
+    # bypass authentication, and back off on 429. Owner-authorized. Env-overridable. No secret.
+    # Only DIA uses this; the other connectors keep the honest ``scraping_user_agent``.
+    dia_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    )
     lidl_offers_connector_enabled: bool = False
     aldi_offers_connector_enabled: bool = False
     deza_connector_enabled: bool = False
@@ -244,6 +262,37 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_hosts_list(self) -> list[str]:
+        """Hosts permitidos para ``TrustedHostMiddleware``. ``["*"]`` (permisivo) si no se fija."""
+        hosts = [h.strip() for h in self.trusted_hosts.split(",") if h.strip()]
+        return hosts or ["*"]
+
+    def validate_runtime_security(self) -> None:
+        """Falla rápido si la API arranca en cloud/producción con seguridad insegura.
+
+        Se invoca en el arranque real de la app (``main.py``), NO como ``model_validator``:
+        numerosos tests construyen ``Settings(deployment_mode="cloud")`` con los valores por
+        defecto para ejercitar otras funcionalidades, y no deben abortar. Sólo el arranque real
+        de la API valida y, si detecta un despliegue cloud con el secreto de sesión por defecto
+        o cookies sin ``Secure``, lanza para impedir que un despliegue inseguro llegue a servir.
+        """
+        if self.deployment_mode != "cloud":
+            return
+        problems: list[str] = []
+        if not self.session_secret.strip() or self.session_secret == DEV_SESSION_SECRET:
+            problems.append(
+                "SESSION_SECRET sigue siendo el valor por defecto de desarrollo (o está vacío)"
+            )
+        if not self.cookie_secure:
+            problems.append("COOKIE_SECURE debe ser true (cookies de sesión sólo por HTTPS)")
+        if problems:
+            raise RuntimeError(
+                "Configuración de producción insegura con deployment_mode=cloud: "
+                + "; ".join(problems)
+                + ". Corrige estas variables de entorno antes de desplegar."
+            )
 
     @property
     def ai_enabled(self) -> bool:

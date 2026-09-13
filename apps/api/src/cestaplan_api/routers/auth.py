@@ -19,6 +19,7 @@ from cestaplan_api.deps import (
     CurrentUser,
     DbSession,
     get_current_user,
+    rate_limit,
     verify_csrf,
 )
 from cestaplan_api.models import User, UserSession
@@ -37,6 +38,7 @@ from cestaplan_api.security import (
     login_rate_limiter,
     new_csrf_token,
     new_session_token,
+    registration_rate_limiter,
     verify_password,
 )
 from cestaplan_api.services.audit import record_audit
@@ -76,7 +78,12 @@ def _clear_session_cookies(response: Response) -> None:
     response.delete_cookie(CSRF_COOKIE_NAME, path="/")
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit(registration_rate_limiter))],
+)
 def register(payload: RegisterRequest, db: DbSession) -> UserResponse:
     """Create an account. Email is normalised to lowercase; duplicates are rejected."""
     email = payload.email.strip().lower()
