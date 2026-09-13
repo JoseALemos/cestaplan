@@ -91,14 +91,18 @@ def hash_ip(ip: str | None) -> bytes | None:
 
 
 # --------------------------------------------------------------------------- #
-# Login rate limiting
+# Rate limiting (general, in-memory)
 # --------------------------------------------------------------------------- #
-class LoginRateLimiter:
+class RateLimiter:
     """In-memory sliding-window rate limiter keyed by an arbitrary string.
 
-    Not shared across processes; sufficient for the single-process slice. Failed
-    attempts are recorded and expire after ``window_seconds``; a successful login
-    resets the counter for that key.
+    IN-MEMORY / POR PROCESO: los contadores viven sólo en este proceso y NO se comparten entre
+    réplicas. Es correcto mientras la API corre a numReplicas=1 (el despliegue actual). Si algún
+    día se escala a varias réplicas, hay que mover esto a un almacén compartido (p. ej. Redis)
+    para que el límite se aplique de forma global y no por proceso.
+
+    Los eventos registrados con :meth:`record` caducan tras ``window_seconds``; :meth:`reset`
+    limpia una clave concreta (p. ej. tras un login correcto).
     """
 
     def __init__(self, max_attempts: int = 5, window_seconds: int = 900) -> None:
@@ -117,13 +121,13 @@ class LoginRateLimiter:
         return kept
 
     def is_limited(self, key: str) -> bool:
-        """True when ``key`` has reached the maximum attempts inside the window."""
+        """True when ``key`` has reached the maximum events inside the window."""
         with self._lock:
             now = time.monotonic()
             return len(self._prune(key, now)) >= self.max_attempts
 
-    def record_failure(self, key: str) -> None:
-        """Record one failed attempt for ``key``."""
+    def record(self, key: str) -> None:
+        """Record one event for ``key`` (a request, or a failed login attempt)."""
         with self._lock:
             now = time.monotonic()
             attempts = self._prune(key, now)
@@ -131,7 +135,7 @@ class LoginRateLimiter:
             self._attempts[key] = attempts
 
     def reset(self, key: str) -> None:
-        """Clear all recorded attempts for ``key`` (call on successful login)."""
+        """Clear all recorded events for ``key`` (e.g. call on a successful login)."""
         with self._lock:
             self._attempts.pop(key, None)
 
@@ -141,5 +145,22 @@ class LoginRateLimiter:
             self._attempts.clear()
 
 
-# Module-level singleton shared by the auth router.
+class LoginRateLimiter(RateLimiter):
+    """Rate limiter específico de login: ``record_failure`` es el alias de :meth:`record`.
+
+    Mantiene el nombre histórico usado por el router de auth (una entrada por intento fallido;
+    un login correcto llama a :meth:`reset`).
+    """
+
+    def record_failure(self, key: str) -> None:
+        """Record one failed login attempt for ``key``."""
+        self.record(key)
+
+
+# Module-level singletons. In-memory / per-process (see :class:`RateLimiter`), correcto a
+# numReplicas=1. Login se limita por ``(email, ip)``; el resto por IP.
 login_rate_limiter = LoginRateLimiter()
+# Registro de cuentas: barrera anti-abuso por IP (creación masiva de cuentas).
+registration_rate_limiter = RateLimiter(max_attempts=10, window_seconds=3600)
+# Generación de planes: endpoint caro (encola trabajo del worker); barrera por IP.
+plan_generation_rate_limiter = RateLimiter(max_attempts=30, window_seconds=3600)
