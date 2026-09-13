@@ -82,7 +82,6 @@ _PRICE_TTL_DAYS = 30
 # way DIA labels the staple. Everything not listed falls back to canonical_name.replace("_", " ").
 ALIAS_TERMS: dict[str, str] = {
     "pollo_pechuga": "pechuga de pollo",
-    "pollo_muslo": "muslo de pollo",
     "pasta_macarrones": "macarrones",
     "pasta_espagueti": "espaguetis",
     "garbanzos_cocido": "garbanzos cocidos",
@@ -91,10 +90,18 @@ ALIAS_TERMS: dict[str, str] = {
     "leche_desnatada": "leche desnatada",
     "tomate_triturado": "tomate triturado",
     "avena_copos": "copos de avena",
-    "aceite_oliva": "aceite de oliva",
     "arandano": "arándanos",
     "platano": "plátano",
     "yogur_natural": "yogur natural",
+    "aceite_oliva": "aceite de oliva virgen extra",
+    "limon": "limones",
+    "salmon": "salmón",
+    "merluza": "merluza",
+    "gambas": "gambas peladas",
+    "zanahoria": "zanahorias",
+    "tomate": "tomate rama",
+    "cuscus": "cous cous",
+    "pollo_muslo": "jamoncitos de pollo",
 }
 
 # Tokens dropped from a term before whole-word matching (connectives carry no discriminative value).
@@ -105,6 +112,15 @@ _STOPWORDS = frozenset({"de", "del", "con", "al", "a", "la", "el", "los", "las",
 _JUNK_STEMS: tuple[str, ...] = (
     "snack", "aperitivo", "salsa", "crema", "precocinad", "rebozad", "bravas", "frito", "fritas",
     "batido", "bebida", "galleta", "barrita", "papilla", "chips",
+    # non-alimentario / mascotas / derivados que colaban falsos positivos en DIA
+    "refresco", "jabon", "gel", "champu", "detergente", "suavizante",
+    "alimento", "mascota", "gato", "perro", "pienso",
+    "kefir", "croqueta", "sucedaneo", "panecillo", "queso", "yogur",
+    "orujo", "rallado", "licor", "natillas", "mousse", "helado",
+    "body", "locion", "postre", "zumo", "nectar", "fanta", "nestea",
+    "aquarius", "kas", "al punto", "yopro", "piquillo",
+    "mermelada", "confitura", "aderezo", "empanad", "casei", "actimel",
+    "pate", "vasos", "artesana",
 )
 # Name tokens that carry no product identity (size/pack noise, bare unit words + the chain's own
 # brand word), dropped when measuring how "plain" a name is (specificity -> confidence).

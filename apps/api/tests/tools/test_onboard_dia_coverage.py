@@ -131,7 +131,7 @@ def test_choose_returns_none_when_only_junk() -> None:
 
 def test_build_search_term_uses_alias_then_underscore_expansion() -> None:
     assert tool.build_search_term("pollo_pechuga") == "pechuga de pollo"
-    assert tool.build_search_term("aceite_oliva") == "aceite de oliva"
+    assert tool.build_search_term("aceite_oliva") == "aceite de oliva virgen extra"
     assert tool.build_search_term("arroz_redondo") == "arroz redondo"  # no alias -> plain expansion
 
 
