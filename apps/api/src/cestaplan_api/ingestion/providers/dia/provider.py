@@ -59,7 +59,9 @@ class DiaProvider(PriceCatalogProvider):
             self._client: DiaClient | None = client
         elif s.dia_connector_enabled:
             self._client = DiaClient(
-                user_agent=s.scraping_user_agent,
+                # DIA-specific UA (its WAF blocks non-browser UAs); From contact header retained.
+                # See config.dia_user_agent for the owner-authorized courtesy rationale.
+                user_agent=s.dia_user_agent,
                 contact_email=s.scraping_contact_email,
                 timeout=float(s.scraping_timeout_seconds),
                 max_retries=s.scraping_max_retries,
