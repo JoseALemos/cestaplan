@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     # Allowlist de Host permitidos (TrustedHostMiddleware), separados por comas. Permisivo por
     # defecto ("*") para desarrollo/tests; en producción se fija a los dominios reales de la API.
     trusted_hosts: str = "*"
+    # Nivel del logger raíz (logging estructurado JSON a stdout; ver logging_config). No secreto.
+    log_level: str = "INFO"
 
     # --- Auth / sessions ---
     session_secret: str = DEV_SESSION_SECRET

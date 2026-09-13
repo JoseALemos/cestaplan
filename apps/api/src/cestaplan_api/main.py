@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import time
+import uuid
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -10,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from cestaplan_api.config import Settings, get_settings
 from cestaplan_api.db import engine
+from cestaplan_api.logging_config import setup_logging
 from cestaplan_api.routers import (
     admin,
     admin_mappings,
@@ -28,10 +33,55 @@ from cestaplan_api.routers import (
 from cestaplan_api.routers import auth as auth_router
 
 settings = get_settings()
+# Logging estructurado (JSON a stdout) desde el arranque: baseline de observabilidad self-host.
+setup_logging(settings.log_level)
 # Falla rápido si se arranca en cloud/producción con seguridad insegura (secreto de sesión por
 # defecto o cookies sin Secure). No afecta a dev/self_hosted ni al entorno de tests (que corren
 # en self_hosted). Ver Settings.validate_runtime_security.
 settings.validate_runtime_security()
+
+_request_log = logging.getLogger("cestaplan.request")
+
+
+class RequestObservabilityMiddleware(BaseHTTPMiddleware):
+    """Registra cada petición (método/ruta/estado/duración/request_id) y captura las excepciones
+    no controladas con traceback estructurado, SIN filtrar detalle al cliente (Starlette devuelve
+    un 500 genérico). Propaga/crea ``X-Request-ID`` para correlacionar. Omite ``/health`` para no
+    inundar los logs con los healthchecks periódicos.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = round((time.perf_counter() - start) * 1000, 1)
+            _request_log.exception(
+                "unhandled exception",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "duration_ms": duration_ms,
+                },
+            )
+            raise
+        response.headers["X-Request-ID"] = request_id
+        if request.url.path != "/health":
+            _request_log.info(
+                "request",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+                },
+            )
+        return response
 
 app = FastAPI(
     title="CestaPlan API",
@@ -80,6 +130,8 @@ def configure_middleware(app: FastAPI, settings: Settings) -> None:
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts_list
     )
+    # Observabilidad la más externa (envuelve y cronometra todo, captura excepciones de dentro).
+    app.add_middleware(RequestObservabilityMiddleware)
 
 
 configure_middleware(app, settings)
