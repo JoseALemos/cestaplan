@@ -181,6 +181,60 @@ def test_project_current_prices_upserts_product_price(
     assert again == 0
 
 
+def test_project_falls_back_to_net_content_when_package_fields_absent(
+    db_session: Session,
+) -> None:
+    """A variant with no package_quantity/unit but a parsed net content projects that net content
+    into ProductPrice (so the live rail can scale cost by quantity), not the 1/'unit'
+    placeholder."""
+    retailer = Retailer(slug="cp-nc", name="CP NC", adapter_key="test", is_synthetic=True)
+    db_session.add(retailer)
+    db_session.flush()
+    store = Store(retailer_id=retailer.id, name="CP NC Store", is_synthetic=True)
+    product = Product(name="CP NC Product", is_synthetic=True)
+    db_session.add_all([store, product])
+    db_session.flush()
+    external = ExternalProduct(retailer_id=retailer.id, external_id="CP-NC-1")
+    db_session.add(external)
+    db_session.flush()
+    pv = ProductVariant(
+        product_id=product.id,
+        retailer_id=retailer.id,
+        external_product_id=external.id,
+        display_name="Aceite 1 L",
+        package_quantity=None,
+        package_unit=None,
+        net_content_quantity=Decimal("1"),
+        net_content_unit="l",
+    )
+    db_session.add(pv)
+    db_session.flush()
+    observed = datetime.now(UTC) - timedelta(hours=1)
+    record_observation(
+        db_session,
+        NormalizedObservation(
+            variant_ref="CP-NC-1",
+            amount=Decimal("5.75"),
+            currency="EUR",
+            price_scope=PriceScope.EXACT_STORE,
+            price_type=PriceType.REGULAR,
+            observed_at=observed,
+        ),
+        product_variant_id=pv.id,
+        retailer_id=retailer.id,
+        store_id=store.id,
+        as_of=observed,
+    )
+
+    written = CurrentPriceService().project_current_prices(db_session, retailer.id)
+    assert written == 1
+    price = db_session.execute(
+        select(ProductPrice).where(ProductPrice.product_id == product.id)
+    ).scalar_one()
+    assert price.package_unit == "l"
+    assert price.package_quantity == Decimal("1")
+
+
 def test_current_none_when_no_observation(
     db_session: Session, priced_variant: Fixture
 ) -> None:

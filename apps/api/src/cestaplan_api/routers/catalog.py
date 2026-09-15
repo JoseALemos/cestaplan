@@ -253,10 +253,18 @@ def list_retailers(user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
     """List active retailers that currently have at least one priced product.
 
     Retailers with no ``ProductPrice`` (e.g. Deza, or chains whose stores are seeded but
-    not yet synced) are hidden until they have real prices. The synthetic demo retailer
-    (MercaEjemplo) has prices and stays visible.
+    not yet synced) are hidden until they have real prices. A synthetic/demo retailer whose
+    only prices are synthetic (MercaEjemplo) is also hidden — it must never appear as a
+    selectable chain in a real plan.
     """
-    priced_retailer_ids = select(ProductPrice.retailer_id).distinct().scalar_subquery()
+    # Sólo los precios NO sintéticos hacen visible una cadena: una demo con datos sintéticos
+    # no debe aparecer como opción seleccionable.
+    priced_retailer_ids = (
+        select(ProductPrice.retailer_id)
+        .where(ProductPrice.is_synthetic.is_(False))
+        .distinct()
+        .scalar_subquery()
+    )
     retailers = db.execute(
         select(Retailer)
         .where(Retailer.is_active.is_(True), Retailer.id.in_(priced_retailer_ids))
