@@ -7,6 +7,7 @@ import {
   favoriteRecipe,
   generatePlan,
   getPlan,
+  getPlanComparison,
   getRunStatus,
   listFavorites,
   listRecipeFeedback,
@@ -44,6 +45,15 @@ export function usePlanQuery(mealPlanId: string | null | undefined) {
     queryKey: queryKeys.plan(mealPlanId ?? ""),
     queryFn: () => getPlan(mealPlanId as string),
     enabled: Boolean(mealPlanId),
+  });
+}
+
+/** Multi-chain price comparison for the plan's basket. Only fetched once requested (`enabled`). */
+export function usePlanComparisonQuery(mealPlanId: string | null | undefined, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.comparison(mealPlanId ?? ""),
+    queryFn: () => getPlanComparison(mealPlanId as string),
+    enabled: Boolean(mealPlanId) && enabled,
   });
 }
 
