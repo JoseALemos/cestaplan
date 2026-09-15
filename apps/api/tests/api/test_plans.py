@@ -156,6 +156,80 @@ def test_get_plan_requires_membership(db_session: Session) -> None:
     assert resp.status_code == 404
 
 
+def test_plan_comparison_requires_membership(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    owner_email = _email()
+    register(client, owner_email)
+    owner_token = login(client, owner_email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(owner_token)).json()
+    _add_equipment(db_session, hh["id"])
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=3)).isoformat(),
+            "budget_amount": "300",
+            "requirements": [
+                {"meal_type": "lunch", "requested_count": 2, "default_servings": 2}
+            ],
+        },
+        headers=csrf(owner_token),
+    ).json()
+
+    # A different user must not read the comparison (404, guarded exactly like GET /{id}).
+    other_email = _email()
+    register(client, other_email)
+    login(client, other_email)
+    resp = client.get(f"/api/v1/plans/{gen['meal_plan_id']}/comparison")
+    assert resp.status_code == 404
+
+
+def test_plan_comparison_endpoint_shape(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh["id"])
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=3)).isoformat(),
+            "budget_amount": "300",
+            "requirements": [
+                {"meal_type": "lunch", "requested_count": 2, "default_servings": 2}
+            ],
+        },
+        headers=csrf(token),
+    ).json()
+    job = db_session.execute(
+        select(GenerationJob).order_by(GenerationJob.id.desc())
+    ).scalars().first()
+    assert job is not None
+    process_job(job, db_session)
+
+    resp = client.get(f"/api/v1/plans/{gen['meal_plan_id']}/comparison")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["meal_plan_id"] == gen["meal_plan_id"]
+    assert isinstance(body["chains"], list)  # real chains only (demo excluded)
+    assert set(body["basket"]) == {"ingredient_count", "ingredients"}
+    split = body["split"]
+    assert set(split) >= {
+        "total",
+        "distinct_chain_count",
+        "savings_vs_best_single",
+        "by_chain",
+        "uncovered_ingredients",
+    }
+    assert "best_single" in body
+
+
 def test_generate_requires_csrf(db_session: Session) -> None:
     client = _plans_client(db_session)
     email = _email()
