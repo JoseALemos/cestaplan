@@ -127,7 +127,13 @@ export default function PlanPage() {
         ))
       )}
 
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-3">
+        <Link
+          href={`/planes/${mealPlanId}/comparar?householdId=${householdId}`}
+          className="inline-flex h-11 items-center justify-center rounded-lg border border-border-strong px-5 text-[0.95rem] font-medium text-ink transition-colors hover:bg-bg-subtle"
+        >
+          Comparar precios entre supermercados
+        </Link>
         <Link
           href={`/planes/${mealPlanId}/compra?householdId=${householdId}`}
           className="inline-flex h-11 items-center justify-center rounded-lg bg-primary px-5 text-[0.95rem] font-medium text-primary-ink shadow-sm transition-colors hover:bg-primary-strong"

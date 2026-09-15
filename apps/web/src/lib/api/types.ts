@@ -810,6 +810,83 @@ export interface SubstituteRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-chain price comparison — `GET /plans/{id}/comparison`. Costs are the
+// PURCHASE basket (whole packages, empty pantry): bigger pack formats can look
+// pricier here than in the plan/grocery-list views, which price consumption.
+// ---------------------------------------------------------------------------
+
+export interface ComparisonIngredient {
+  canonical_name: string;
+  display_name: string;
+  required_quantity: string;
+  required_unit: string;
+}
+
+export interface ComparisonBasket {
+  ingredient_count: number;
+  ingredients: ComparisonIngredient[];
+}
+
+export type ComparisonCoverageStatus = PriceCoverageLabel | string;
+
+export interface ComparisonCoverage {
+  with_price: number;
+  without_price: number;
+  /** Decimal ratio (0–1) as a string. */
+  ratio: string;
+  status: ComparisonCoverageStatus;
+}
+
+export interface ComparisonChain {
+  retailer_id: Uuid;
+  retailer_name: string;
+  known_cost: MoneyString;
+  full_coverage: boolean;
+  coverage: ComparisonCoverage;
+  ingredient_costs: Record<string, MoneyString>;
+}
+
+export interface ComparisonBestSingle {
+  retailer_id: Uuid;
+  retailer_name: string;
+  total: MoneyString;
+  coverage_ratio: string;
+  full_coverage: boolean;
+}
+
+export interface ComparisonSplitItem {
+  canonical_name: string;
+  display_name: string;
+  cost: MoneyString;
+  required_quantity: string;
+  required_unit: string;
+}
+
+export interface ComparisonSplitByChain {
+  retailer_id: Uuid;
+  retailer_name: string;
+  subtotal: MoneyString;
+  items: ComparisonSplitItem[];
+}
+
+export interface ComparisonSplit {
+  total: MoneyString;
+  distinct_chain_count: number;
+  savings_vs_best_single: MoneyString | null;
+  by_chain: ComparisonSplitByChain[];
+  uncovered_ingredients: ComparisonIngredient[];
+}
+
+export interface PlanComparison {
+  meal_plan_id: Uuid;
+  currency: string;
+  basket: ComparisonBasket;
+  chains: ComparisonChain[];
+  best_single: ComparisonBestSingle | null;
+  split: ComparisonSplit;
+}
+
+// ---------------------------------------------------------------------------
 // Admin — catalog sources & data imports (FASE 4).
 // The live openapi.json declares every admin response as
 // `additionalProperties: true` (an untyped dict) rather than a concrete

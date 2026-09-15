@@ -38,6 +38,7 @@ import type {
   MappingEnrichResult,
   MappingSummary,
   MealPlanDetail,
+  PlanComparison,
   MemberCreate,
   MemberResponse,
   MemberUpdate,
@@ -292,6 +293,11 @@ export function getRunStatus(
 
 export function getPlan(mealPlanId: Uuid): Promise<MealPlanDetail> {
   return apiFetch<MealPlanDetail>(`/api/v1/plans/${mealPlanId}`);
+}
+
+/** Multi-chain price comparison for the plan's shopping basket — same auth/household guard as `getPlan`. */
+export function getPlanComparison(mealPlanId: Uuid): Promise<PlanComparison> {
+  return apiFetch<PlanComparison>(`/api/v1/plans/${mealPlanId}/comparison`);
 }
 
 export function regeneratePlan(mealPlanId: Uuid): Promise<GeneratePlanAccepted> {
