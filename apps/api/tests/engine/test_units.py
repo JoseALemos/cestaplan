@@ -40,6 +40,20 @@ def test_cross_dimension_without_density_raises():
         u.convert(Decimal("100"), "ml", "g", "milk")
 
 
+def test_counted_unit_synonyms_are_interchangeable():
+    u = UnitConverter()
+    # "unidad" (español) es lo mismo que "unit"/"ud": 1 pieza = 1 pieza.
+    assert u.convert(Decimal("6"), "unidad", "unit", "huevo") == Decimal("6")
+    assert u.convert(Decimal("2"), "ud", "unidades", "huevo") == Decimal("2")
+    assert u.convert(Decimal("3"), "unit", "u", "huevo") == Decimal("3")
+
+
+def test_counted_unit_to_mass_still_raises():
+    u = UnitConverter()
+    with pytest.raises(ConversionError):
+        u.convert(Decimal("1"), "unidad", "g", "ajo")
+
+
 def test_counted_unit_cannot_convert_to_mass():
     u = UnitConverter()
     with pytest.raises(ConversionError):

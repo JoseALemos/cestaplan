@@ -29,8 +29,9 @@ _VOLUME_TO_ML: dict[str, Decimal] = {
     "l": Decimal("1000"),
     "cl": Decimal("10"),
 }
-# Counted units are dimensionless-per-unit; they only convert to themselves.
-_COUNT_UNITS = {"unit", "ud", "piece", "pcs"}
+# Counted units are dimensionless-per-unit; son intercambiables entre sí (1 pieza = 1 pieza),
+# incluidos los sinónimos en español ("unidad"/"unidades"/"u").
+_COUNT_UNITS = {"unit", "unidad", "unidades", "ud", "uds", "u", "piece", "pcs"}
 
 
 def _norm_unit(unit: str) -> str:
@@ -70,7 +71,10 @@ class UnitConverter:
         # Within volume.
         if f in _VOLUME_TO_ML and t in _VOLUME_TO_ML:
             return quantity * _VOLUME_TO_ML[f] / _VOLUME_TO_ML[t]
-        # Counted units only convert to themselves (already handled by f == t).
+        # Counted units son intercambiables entre sí (unidad/unit/ud/pieza = misma cosa, 1:1).
+        if f in _COUNT_UNITS and t in _COUNT_UNITS:
+            return quantity
+        # Una unidad contada NO convierte a masa/volumen sin una densidad/peso explícito.
         if f in _COUNT_UNITS or t in _COUNT_UNITS:
             raise ConversionError(
                 f"Cannot convert counted unit {from_unit!r} <-> {to_unit!r} "
