@@ -1,8 +1,9 @@
 """Catalog hide-empty tests: retailers/stores show only when they have priced products.
 
 A retailer or store with no ``ProductPrice`` is hidden (e.g. seeded-but-unsynced Open
-Prices stores, or a chain like Deza with no data); one with at least one priced product is
-returned. The synthetic demo retailer (which has prices) stays visible.
+Prices stores, or a chain like Deza with no data); one with at least one NON-synthetic
+priced product is returned. A retailer whose only prices are synthetic (demo/MercaEjemplo)
+is hidden — it must never be a selectable chain in a real plan.
 """
 
 from __future__ import annotations
@@ -72,12 +73,12 @@ def _make_store(db: Session, retailer: Retailer) -> Store:
     return store
 
 
-def _add_price(db: Session, retailer: Retailer, store: Store) -> None:
+def _add_price(db: Session, retailer: Retailer, store: Store, *, synthetic: bool = False) -> None:
     product = Product(
         retailer_id=retailer.id,
         external_id=f"8410{uuid.uuid4().int % 10**9}",
         name="Producto",
-        is_synthetic=False,
+        is_synthetic=synthetic,
     )
     db.add(product)
     db.flush()
@@ -91,12 +92,12 @@ def _add_price(db: Session, retailer: Retailer, store: Store) -> None:
             currency="EUR",
             package_quantity=Decimal("1"),
             package_unit="unit",
-            source_type="open_dataset",
-            source_name="Open Food Facts - Open Prices",
+            source_type="demo" if synthetic else "open_dataset",
+            source_name="Demo" if synthetic else "Open Food Facts - Open Prices",
             observed_at=now,
             imported_at=now,
             confidence_score=Decimal("0.5"),
-            is_synthetic=False,
+            is_synthetic=synthetic,
         )
     )
     db.flush()
@@ -143,12 +144,22 @@ def test_empty_store_hidden_priced_store_shown(db_session: Session) -> None:
     assert shown["priced_product_count"] == 1
 
 
-def test_synthetic_demo_retailer_stays_visible(db_session: Session) -> None:
+def test_synthetic_only_retailer_is_hidden(db_session: Session) -> None:
+    # Una cadena cuyos ÚNICOS precios son sintéticos (demo tipo MercaEjemplo) NO debe aparecer.
+    syn = _make_retailer(db_session, "syn")
+    syn_store = _make_store(db_session, syn)
+    _add_price(db_session, syn, syn_store, synthetic=True)
+
+    real = _make_retailer(db_session, "real")
+    real_store = _make_store(db_session, real)
+    _add_price(db_session, real, real_store)
+
     client = _catalog_client(db_session)
     email = _email()
     register(client, email)
     login(client, email)
     resp = client.get("/api/v1/retailers")
-    assert resp.status_code == 200
-    # The demo seed (MercaEjemplo, synthetic + priced) is present in the shared DB.
-    assert any(r["is_synthetic"] for r in resp.json())
+    assert resp.status_code == 200, resp.text
+    ids = {r["id"] for r in resp.json()}
+    assert str(real.public_id) in ids  # cadena con precios reales, visible
+    assert str(syn.public_id) not in ids  # sólo precios sintéticos, oculta
