@@ -54,6 +54,32 @@ def test_counted_unit_to_mass_still_raises():
         u.convert(Decimal("1"), "unidad", "g", "ajo")
 
 
+def test_culinary_volume_units():
+    u = UnitConverter()
+    assert u.convert(Decimal("1"), "cucharada", "ml") == Decimal("15")
+    assert u.convert(Decimal("2"), "cucharadita", "ml") == Decimal("10")
+    # cucharada de aceite contra un producto en litros (mismo dimensión, sin densidad).
+    assert u.convert(Decimal("2"), "cucharada", "l", "aceite_oliva") == Decimal("0.03")
+
+
+def test_pizca_is_small_mass():
+    u = UnitConverter()
+    assert u.convert(Decimal("1"), "pizca", "g") == Decimal("0.5")
+    assert u.convert(Decimal("1"), "pizca", "kg", "sal") == Decimal("0.0005")
+
+
+def test_piece_to_kg_bridges_via_declared_grams_per_unit():
+    # Con un peso por pieza declarado (unidad->g), el motor puentea unidad->kg.
+    conv = [
+        IngredientConversionDTO(
+            canonical_name="cebolla", from_unit="unidad", to_unit="g", factor=Decimal("150")
+        )
+    ]
+    u = UnitConverter(conv)
+    assert u.convert(Decimal("2"), "unidad", "g", "cebolla") == Decimal("300")
+    assert u.convert(Decimal("2"), "unidad", "kg", "cebolla") == Decimal("0.3")
+
+
 def test_counted_unit_cannot_convert_to_mass():
     u = UnitConverter()
     with pytest.raises(ConversionError):

@@ -23,11 +23,18 @@ _MASS_TO_G: dict[str, Decimal] = {
     "g": Decimal("1"),
     "kg": Decimal("1000"),
     "mg": Decimal("0.001"),
+    # Una "pizca" es una medida de masa convencional (~0,5 g), no una adivinanza de producto.
+    "pizca": Decimal("0.5"),
 }
 _VOLUME_TO_ML: dict[str, Decimal] = {
     "ml": Decimal("1"),
     "l": Decimal("1000"),
     "cl": Decimal("10"),
+    # Medidas culinarias estándar (aproximadas pero convencionales, no "adivinadas"):
+    "cucharada": Decimal("15"),
+    "cucharadita": Decimal("5"),
+    "vaso": Decimal("200"),
+    "taza": Decimal("240"),
 }
 # Counted units are dimensionless-per-unit; son intercambiables entre sí (1 pieza = 1 pieza),
 # incluidos los sinónimos en español ("unidad"/"unidades"/"u").
@@ -74,22 +81,23 @@ class UnitConverter:
         # Counted units son intercambiables entre sí (unidad/unit/ud/pieza = misma cosa, 1:1).
         if f in _COUNT_UNITS and t in _COUNT_UNITS:
             return quantity
-        # Una unidad contada NO convierte a masa/volumen sin una densidad/peso explícito.
+
+        # Conversión declarada por ingrediente (densidad ml<->g o peso por pieza unidad->g): puede
+        # puentear incluso una unidad contada a masa/volumen. Se comprueba ANTES de rechazar.
+        if canonical_name is not None:
+            direct = self._factors.get((canonical_name, f, t))
+            if direct is not None:
+                return quantity * direct
+            bridged = self._bridge(quantity, f, t, canonical_name)
+            if bridged is not None:
+                return bridged
+
+        # Sin conversión declarada: una unidad contada NO cruza a masa/volumen.
         if f in _COUNT_UNITS or t in _COUNT_UNITS:
             raise ConversionError(
                 f"Cannot convert counted unit {from_unit!r} <-> {to_unit!r} "
                 f"for {canonical_name!r} without an explicit conversion."
             )
-
-        # Cross-dimension (or unknown units): need a per-ingredient density.
-        if canonical_name is not None:
-            direct = self._factors.get((canonical_name, f, t))
-            if direct is not None:
-                return quantity * direct
-            # Bridge through a shared base unit if the density lands in g or ml.
-            bridged = self._bridge(quantity, f, t, canonical_name)
-            if bridged is not None:
-                return bridged
 
         raise ConversionError(
             f"No conversion defined from {from_unit!r} to {to_unit!r} "

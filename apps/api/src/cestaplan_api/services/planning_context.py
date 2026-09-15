@@ -322,7 +322,7 @@ def _build_conversions(db: Session) -> list[IngredientConversionDTO]:
             Ingredient.density_g_per_ml.is_not(None)
         )
     ).all()
-    return [
+    conversions = [
         IngredientConversionDTO(
             canonical_name=name,
             from_unit="ml",
@@ -332,6 +332,39 @@ def _build_conversions(db: Session) -> list[IngredientConversionDTO]:
         for name, density in rows
         if density is not None and density > 0
     ]
+    # Peso medio por PIEZA de frescos que las recetas miden en "unidad" pero se venden a peso
+    # (el motor puentea unidad->g->kg). Valores convencionales aproximados, no adivinados por
+    # producto. Cubre los avisos "cannot convert 'unidad' -> 'kg'".
+    for name, grams in _PIECE_GRAMS.items():
+        conversions.append(
+            IngredientConversionDTO(
+                canonical_name=name, from_unit="unidad", to_unit="g", factor=Decimal(str(grams))
+            )
+        )
+    return conversions
+
+
+# Peso medio por pieza (g) de frescos habituales. Nombres canónicos genéricos usados por recetas.
+_PIECE_GRAMS: dict[str, float] = {
+    "ajo": 5,  # un diente
+    "cebolla": 150,
+    "tomate": 120,
+    "aguacate": 200,
+    "platano": 120,
+    "pimiento": 180,
+    "pimiento_rojo": 180,
+    "pimiento_verde": 150,
+    "pan": 40,  # una rebanada
+    "limon": 100,
+    "naranja": 180,
+    "manzana": 180,
+    "zanahoria": 70,
+    "patata": 180,
+    "calabacin": 250,
+    "pepino": 300,
+    "berenjena": 250,
+    "puerro": 100,
+}
 
 
 def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductDTO]:
