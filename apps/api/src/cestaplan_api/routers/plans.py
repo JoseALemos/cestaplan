@@ -24,6 +24,7 @@ from cestaplan_api.models import FavoriteRecipe, PlannedMeal, Recipe, RecipeFeed
 from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
 from cestaplan_api.security import plan_generation_rate_limiter
 from cestaplan_api.services.audit import record_audit
+from cestaplan_api.services.plan_comparison import compare_plan_across_chains
 from cestaplan_api.services.plan_service import (
     build_regenerate_meal_payload,
     create_generation,
@@ -135,6 +136,20 @@ def get_plan(meal_plan_id: uuid.UUID, user: CurrentUser, db: DbSession) -> dict:
     """Return the full persisted plan (meals, costs, coverage, grocery summary)."""
     meal_plan = resolve_plan(db, user.id, meal_plan_id)
     return serialize_plan(db, meal_plan)
+
+
+@router.get("/{meal_plan_id}/comparison")
+def get_plan_comparison(
+    meal_plan_id: uuid.UUID, user: CurrentUser, db: DbSession
+) -> dict:
+    """Compare the plan's mandatory basket cost across every user-visible chain.
+
+    Same guard as ``GET /{meal_plan_id}`` (auth + household membership; 404 for non-members).
+    Returns per-chain totals/coverage, the cheapest single chain and the optimal cross-chain
+    split (money as strings). Pure price comparison — no geolocation/travel cost (Phase 1).
+    """
+    meal_plan = resolve_plan(db, user.id, meal_plan_id)
+    return compare_plan_across_chains(db, meal_plan)
 
 
 @router.post(
