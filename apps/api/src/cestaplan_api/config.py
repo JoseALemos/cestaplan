@@ -7,12 +7,15 @@ is read from the environment and never baked into business logic (see docs/OPENA
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from cestaplan_api.services.geo.stores import DEFAULT_OSM_BRANDS
 
 # Repo root is four levels up from this file in the source tree
 # (apps/api/src/cestaplan_api/config.py -> repo root). In a container the tree is
@@ -261,6 +264,22 @@ class Settings(BaseSettings):
     worker_job_max_attempts: int = 3
     worker_heartbeat_seconds: int = 15
 
+    # --- Geo / travel cost (FASE 2, comparador multi-cadena) ---
+    # Todo con datos abiertos de OpenStreetMap (Nominatim/Overpass): sin coste, sin scraping de
+    # retailers, el domicilio nunca sale a un tercero de pago. Nada aquí es secreto.
+    geo_enabled: bool = True
+    nominatim_base_url: str = "https://nominatim.openstreetmap.org"
+    overpass_base_url: str = "https://overpass-api.de/api/interpreter"
+    geo_search_radius_m: int = 20000
+    geo_timeout_seconds: float = 15.0
+    geo_cache_ttl_days: int = 30
+    geo_country: str = "España"
+    travel_cost_eur_per_km: Decimal = Decimal("0.26")
+    travel_road_detour_factor: Decimal = Decimal("1.3")
+    # Override opcional (JSON) {slug: [marca, ...]} fusionado SOBRE el mapa por defecto de
+    # services/geo/stores.py (nunca lo sustituye entero, salvo que redefina la misma clave).
+    retailer_osm_brands: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
@@ -351,6 +370,26 @@ class Settings(BaseSettings):
             for k, v in parsed.items()
             if isinstance(k, str) and isinstance(v, str) and v.strip()
         }
+
+    @property
+    def retailer_osm_brand_map(self) -> dict[str, list[str]]:
+        """Marcas OSM por cadena: el override de ``retailer_osm_brands`` fusionado SOBRE
+        :data:`~cestaplan_api.services.geo.stores.DEFAULT_OSM_BRANDS` (el override gana por
+        slug; ``{}``/inválido no cambia nada respecto al valor por defecto)."""
+        merged = {k: list(v) for k, v in DEFAULT_OSM_BRANDS.items()}
+        raw = self.retailer_osm_brands.strip()
+        if not raw:
+            return merged
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return merged
+        if not isinstance(parsed, dict):
+            return merged
+        for slug, brands in parsed.items():
+            if isinstance(slug, str) and isinstance(brands, list):
+                merged[slug] = [str(b) for b in brands if isinstance(b, str)]
+        return merged
 
     @property
     def commercial_feed_configured(self) -> bool:

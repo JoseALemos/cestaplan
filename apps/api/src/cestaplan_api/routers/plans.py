@@ -12,6 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
+from cestaplan_api.config import get_settings
 from cestaplan_api.deps import (
     CurrentUser,
     DbSession,
@@ -20,11 +21,11 @@ from cestaplan_api.deps import (
     rate_limit,
     verify_csrf,
 )
-from cestaplan_api.models import FavoriteRecipe, PlannedMeal, Recipe, RecipeFeedback
+from cestaplan_api.models import FavoriteRecipe, Household, PlannedMeal, Recipe, RecipeFeedback
 from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
 from cestaplan_api.security import plan_generation_rate_limiter
 from cestaplan_api.services.audit import record_audit
-from cestaplan_api.services.plan_comparison import compare_plan_across_chains
+from cestaplan_api.services.plan_comparison import compare_plan_with_travel
 from cestaplan_api.services.plan_service import (
     build_regenerate_meal_payload,
     create_generation,
@@ -146,10 +147,13 @@ def get_plan_comparison(
 
     Same guard as ``GET /{meal_plan_id}`` (auth + household membership; 404 for non-members).
     Returns per-chain totals/coverage, the cheapest single chain and the optimal cross-chain
-    split (money as strings). Pure price comparison — no geolocation/travel cost (Phase 1).
+    split (money as strings). When the plan's household has a geocoded address, each chain and
+    the split also carry a travel-cost addition (Fase 2); without an address the response is
+    the same pure Phase-1 price comparison.
     """
     meal_plan = resolve_plan(db, user.id, meal_plan_id)
-    return compare_plan_across_chains(db, meal_plan)
+    household = db.get(Household, meal_plan.household_id)
+    return compare_plan_with_travel(db, meal_plan, get_settings(), household)
 
 
 @router.post(

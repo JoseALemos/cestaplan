@@ -44,6 +44,13 @@ class HouseholdResponse(BaseModel):
     my_role: Role
     member_count: int
     created_at: datetime
+    # Domicilio (Fase 2, coste de desplazamiento) — todos ausentes en un hogar sin dirección.
+    address_text: str | None = None
+    postal_code: str | None = None
+    city: str | None = None
+    latitude: str | None = None
+    longitude: str | None = None
+    geocode_status: str | None = None
 
     @classmethod
     def from_model(cls, household, my_role: str, member_count: int) -> HouseholdResponse:
@@ -54,7 +61,21 @@ class HouseholdResponse(BaseModel):
             my_role=my_role,  # type: ignore[arg-type]
             member_count=member_count,
             created_at=household.created_at,
+            address_text=household.address_text,
+            postal_code=household.postal_code,
+            city=household.city,
+            latitude=_decimal_str(household.latitude),
+            longitude=_decimal_str(household.longitude),
+            geocode_status=household.geocode_status,
         )
+
+
+class AddressUpdate(BaseModel):
+    """Fija el domicilio del hogar (dispara la geocodificación)."""
+
+    address_text: str = Field(min_length=1, max_length=300)
+    postal_code: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=200)
 
 
 # --------------------------------------------------------------------------- #

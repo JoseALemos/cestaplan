@@ -22,6 +22,12 @@ Two deliberate differences from the plan's live cost, for a fair cross-chain com
   optional is not penalised vs one that can);
 * an EMPTY pantry is used (a pure basket price; the household's stock — identical across chains —
   never tilts the comparison).
+
+PHASE 2 (travel cost): :func:`compare_plan_with_travel` wraps :func:`compare_plan_across_chains`
+(which stays pure-price, unchanged) and, only when the household has a geocoded address, adds a
+per-chain travel cost (:mod:`cestaplan_api.services.geo.household_geo`) so "cheapest chain" and
+"cheapest split" can be compared including the trip there. A chain with no address or no known
+travel distance simply carries no travel numbers — never an invented one.
 """
 
 from __future__ import annotations
@@ -34,7 +40,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cestaplan_api.models import MealPlan, PlannedMeal, ProductPrice, Recipe, Retailer
+from cestaplan_api.config import Settings
+from cestaplan_api.models import Household, MealPlan, PlannedMeal, ProductPrice, Recipe, Retailer
+from cestaplan_api.services.geo.household_geo import travel_by_retailer
 from cestaplan_api.services.planning_context import _build_catalog, _build_conversions
 from cestaplan_engine.contracts import (
     CandidateRecipeDTO,
@@ -410,6 +418,132 @@ def compare_plan_across_chains(db: Session, meal_plan: MealPlan) -> dict[str, An
     }
 
 
+# --------------------------------------------------------------------------- #
+# Public entrypoint (PHASE 2: price + travel cost)
+# --------------------------------------------------------------------------- #
+def _travel_dict(info: dict[str, Any]) -> dict[str, Any]:
+    """Serialise one ``travel_by_retailer`` entry (money/coords as strings)."""
+    nearest_store = info["nearest_store"]
+    return {
+        "distance_km": _s(info["distance_km"]),
+        "travel_cost": _s(info["travel_cost"]),
+        "nearest_store": None
+        if nearest_store is None
+        else {
+            "name": nearest_store["name"],
+            "latitude": _s(nearest_store["latitude"]),
+            "longitude": _s(nearest_store["longitude"]),
+        },
+        "found": info["found"],
+    }
+
+
+def compare_plan_with_travel(
+    db: Session,
+    meal_plan: MealPlan,
+    settings: Settings,
+    household: Household | None,
+) -> dict[str, Any]:
+    """:func:`compare_plan_across_chains` plus travel cost when the household has an address.
+
+    ``compare_plan_across_chains`` itself is never modified (stays pure-price); this wraps its
+    result with a ``travel`` block and, per chain, a ``travel``/``total_with_travel`` addition —
+    a chain whose distance/travel cost is unknown (no matching store found, no cache yet) simply
+    carries no travel numbers rather than an invented one. Without a geocoded household address
+    (or with ``settings.geo_enabled`` off) the base Phase-1 result is returned unchanged except
+    for ``travel.has_address = False`` (the frontend then shows Phase-1 only).
+    """
+    base = compare_plan_across_chains(db, meal_plan)
+    has_address = bool(
+        household is not None
+        and household.latitude is not None
+        and household.longitude is not None
+    )
+    base["travel"] = {
+        "enabled": settings.geo_enabled,
+        "has_address": has_address,
+        "rate_eur_per_km": _s(settings.travel_cost_eur_per_km),
+        "detour_factor": _s(settings.travel_road_detour_factor),
+    }
+    if not settings.geo_enabled or not has_address:
+        return base
+
+    visible = _visible_chains(db)
+    internal_id_by_public = {str(r.public_id): r.id for r in visible}
+    travel_by_id = travel_by_retailer(db, household, visible, settings)
+
+    for chain in base["chains"]:
+        internal_id = internal_id_by_public.get(chain["retailer_id"])
+        info = travel_by_id.get(internal_id) if internal_id is not None else None
+        if info is None:
+            info = {
+                "distance_km": None,
+                "travel_cost": None,
+                "nearest_store": None,
+                "found": False,
+            }
+        chain["travel"] = _travel_dict(info)
+        travel_cost = info["travel_cost"]
+        chain["total_with_travel"] = (
+            None if travel_cost is None else _s(Decimal(chain["known_cost"]) + travel_cost)
+        )
+
+    # best_single_with_travel: same eligibility as best_single (full coverage, else near-full
+    # ratio >= 0.8), restricted to chains whose travel cost is actually known.
+    full_coverage_chains = [c for c in base["chains"] if c["full_coverage"]]
+    eligible = full_coverage_chains or [
+        c for c in base["chains"] if Decimal(c["coverage"]["ratio"]) >= _NEAR_FULL_COVERAGE
+    ]
+    priced_with_travel = [c for c in eligible if c["total_with_travel"] is not None]
+    best_chain = (
+        min(priced_with_travel, key=lambda c: (Decimal(c["total_with_travel"]), c["retailer_name"]))
+        if priced_with_travel
+        else None
+    )
+    base["best_single_with_travel"] = (
+        None
+        if best_chain is None
+        else {
+            "retailer_id": best_chain["retailer_id"],
+            "retailer_name": best_chain["retailer_name"],
+            "basket_cost": best_chain["known_cost"],
+            "travel_cost": best_chain["travel"]["travel_cost"],
+            "total_with_travel": best_chain["total_with_travel"],
+        }
+    )
+
+    # Augment split: travel_total sums each DISTINCT chain the split actually visits. If any
+    # visited chain's travel is unknown, the with-travel split figures are withheld rather than
+    # silently omitting that chain's trip (never invents a distance, never understates a total).
+    chain_travel_by_public_id = {c["retailer_id"]: c["travel"] for c in base["chains"]}
+    split = base["split"]
+    travel_total = Decimal("0")
+    travel_known = True
+    for entry in split["by_chain"]:
+        travel_cost_str = chain_travel_by_public_id.get(entry["retailer_id"], {}).get("travel_cost")
+        if travel_cost_str is None:
+            travel_known = False
+            break
+        travel_total += Decimal(travel_cost_str)
+
+    if travel_known:
+        split["travel_total"] = _s(travel_total)
+        split["total_with_travel"] = _s(Decimal(split["total"]) + travel_total)
+    else:
+        split["travel_total"] = None
+        split["total_with_travel"] = None
+
+    if base["best_single_with_travel"] is not None and split["total_with_travel"] is not None:
+        split["savings_vs_best_single_with_travel"] = _s(
+            Decimal(base["best_single_with_travel"]["total_with_travel"])
+            - Decimal(split["total_with_travel"])
+        )
+    else:
+        split["savings_vs_best_single_with_travel"] = None
+
+    return base
+
+
 def _visible_chains(db: Session) -> list[Retailer]:
     """Active chains with at least one NON-synthetic price.
 
@@ -434,4 +568,4 @@ def _visible_chains(db: Session) -> list[Retailer]:
     )
 
 
-__all__ = ["compare_plan_across_chains"]
+__all__ = ["compare_plan_across_chains", "compare_plan_with_travel"]

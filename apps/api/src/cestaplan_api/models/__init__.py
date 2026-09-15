@@ -31,6 +31,7 @@ from cestaplan_api.models.household import (
     Equipment,
     FoodPreference,
     Household,
+    HouseholdChainStore,
     HouseholdInvitation,
     HouseholdMember,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "HistoryRemediationRun",
     # household
     "Household",
+    "HouseholdChainStore",
     "HouseholdInvitation",
     "HouseholdMember",
     "Ingredient",

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, select
 
+from cestaplan_api.config import get_settings
 from cestaplan_api.deps import (
     CurrentUser,
     DbSession,
@@ -33,6 +34,7 @@ from cestaplan_api.models import (
     User,
 )
 from cestaplan_api.schemas.household import (
+    AddressUpdate,
     EquipmentResponse,
     EquipmentSet,
     HouseholdCreate,
@@ -46,6 +48,7 @@ from cestaplan_api.schemas.household import (
 )
 from cestaplan_api.security import hash_token
 from cestaplan_api.services.audit import record_audit
+from cestaplan_api.services.geo.household_geo import geocode_household
 from cestaplan_api.services.household import (
     apply_nutrition_goal,
     build_allergies,
@@ -141,6 +144,34 @@ def update_household(
     ctx.household.name = payload.name
     ctx.household.currency = payload.currency
     record_audit(db, action="household.update", actor_user_id=user.id,
+                 household_id=ctx.household.id, entity_type="household",
+                 entity_public_id=ctx.household.public_id)
+    return HouseholdResponse.from_model(
+        ctx.household, my_role=ctx.role, member_count=_member_count(db, ctx.household.id)
+    )
+
+
+@router.patch(
+    "/{household_id}/address",
+    response_model=HouseholdResponse,
+    dependencies=[Depends(verify_csrf)],
+)
+def set_household_address(
+    payload: AddressUpdate,
+    ctx: HouseholdCtxEditor,
+    user: CurrentUser,
+    db: DbSession,
+) -> HouseholdResponse:
+    """Set the household's address and (re)geocode it (editor+, Fase 2 coste de viaje).
+
+    Geocoding never fails the request: an unresolved address leaves the household without
+    coordinates (``geocode_status="not_found"``) rather than raising.
+    """
+    ctx.household.address_text = payload.address_text
+    ctx.household.postal_code = payload.postal_code
+    ctx.household.city = payload.city
+    geocode_household(db, ctx.household, get_settings())
+    record_audit(db, action="household.address.set", actor_user_id=user.id,
                  household_id=ctx.household.id, entity_type="household",
                  entity_public_id=ctx.household.public_id)
     return HouseholdResponse.from_model(

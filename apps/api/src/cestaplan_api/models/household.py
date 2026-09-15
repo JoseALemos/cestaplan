@@ -51,6 +51,17 @@ class Household(BaseModel):
     currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="EUR")
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Domicilio (FASE 2, coste de desplazamiento) — todos nullable: un hogar sin dirección
+    # simplemente no participa del cálculo de viaje (ver services/plan_comparison.py).
+    address_text: Mapped[str | None] = mapped_column(Text)
+    postal_code: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(Text)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    geocoded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # "ok" | "not_found" | "disabled" (ver services/geo/household_geo.geocode_household).
+    geocode_status: Mapped[str | None] = mapped_column(Text)
+
     owner: Mapped[User] = relationship(
         back_populates="owned_households", foreign_keys=[owner_user_id]
     )
@@ -63,6 +74,9 @@ class Household(BaseModel):
         back_populates="household", cascade="all, delete-orphan"
     )
     equipment: Mapped[list[Equipment]] = relationship(
+        back_populates="household", cascade="all, delete-orphan"
+    )
+    chain_stores: Mapped[list[HouseholdChainStore]] = relationship(
         back_populates="household", cascade="all, delete-orphan"
     )
 
@@ -195,6 +209,40 @@ class Equipment(BaseModel):
     )
 
     household: Mapped[Household] = relationship(back_populates="equipment")
+
+
+class HouseholdChainStore(BaseModel):
+    """Tienda más cercana (cacheada) de una cadena para el domicilio de un hogar.
+
+    Escrito por :func:`cestaplan_api.services.geo.household_geo.refresh_nearest_stores`;
+    ``found=False`` registra que se buscó y NO se encontró ninguna tienda de la marca dentro
+    del radio (para no repetir la consulta a Overpass en cada refresco mientras el caché siga
+    fresco), nunca una distancia inventada.
+    """
+
+    __tablename__ = "household_chain_store"
+    __table_args__ = (
+        Index(
+            "ux_household_chain_store", "household_id", "retailer_id", unique=True
+        ),
+    )
+
+    household_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("household.id", ondelete="CASCADE"), nullable=False
+    )
+    retailer_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("retailer.id"), nullable=False
+    )
+    store_name: Mapped[str | None] = mapped_column(Text)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    distance_km: Mapped[Decimal | None] = mapped_column(Numeric(8, 3))
+    found: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str | None] = mapped_column(Text)
+
+    household: Mapped[Household] = relationship(back_populates="chain_stores")
+    retailer: Mapped[Retailer] = relationship()
 
 
 class HouseholdInvitation(BaseModel):
