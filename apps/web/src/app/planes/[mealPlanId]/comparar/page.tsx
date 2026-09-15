@@ -52,6 +52,10 @@ export default function PlanComparisonPage() {
   const chains = sortByKnownCost(comparison.chains);
   // Cheapest chain (first in ascending order) among the ones with full coverage.
   const cheapestFullCoverageId = chains.find((chain) => chain.full_coverage)?.retailer_id;
+  const travel = comparison.travel;
+  const hasTravelSplit =
+    comparison.split.total_with_travel != null &&
+    comparison.split.savings_vs_best_single_with_travel != null;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-10 sm:px-6">
@@ -71,6 +75,21 @@ export default function PlanComparisonPage() {
         </p>
       </div>
 
+      {travel.enabled && !travel.has_address ? (
+        <Alert tone="info" title="Calcula también el desplazamiento">
+          Añade el domicilio de tu hogar para ver el coste de desplazamiento a cada supermercado.{" "}
+          {householdId ? (
+            <Link href={`/households/${householdId}/ajustes`} className="font-medium underline">
+              Añadir domicilio
+            </Link>
+          ) : (
+            <Link href="/households" className="font-medium underline">
+              Ir a tus hogares
+            </Link>
+          )}
+        </Alert>
+      ) : null}
+
       {comparison.best_single ? (
         <Alert tone="success" title="Mejor comprando todo en una tienda">
           {comparison.best_single.retailer_name} —{" "}
@@ -82,6 +101,13 @@ export default function PlanComparisonPage() {
           óptimo entre varias tiendas para minimizar el coste.
         </Alert>
       )}
+
+      {travel.has_address && comparison.best_single_with_travel ? (
+        <Alert tone="success" title="Mejor opción con desplazamiento">
+          {comparison.best_single_with_travel.retailer_name} —{" "}
+          {formatMoney(comparison.best_single_with_travel.total_with_travel, currency)}
+        </Alert>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -98,6 +124,15 @@ export default function PlanComparisonPage() {
                 )} frente a comprar todo en una sola tienda.`
               : "."}
           </p>
+
+          {travel.has_address && hasTravelSplit ? (
+            <p className="text-sm text-ink-muted">
+              Comprando en varios: {formatMoney(comparison.split.total_with_travel, currency)}
+              , ahorras{" "}
+              {formatMoney(comparison.split.savings_vs_best_single_with_travel, currency)}{" "}
+              incluyendo desplazamientos.
+            </p>
+          ) : null}
 
           {comparison.split.by_chain.length > 0 ? (
             <div className="flex flex-col gap-3">

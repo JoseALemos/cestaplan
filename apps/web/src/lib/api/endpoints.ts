@@ -26,6 +26,7 @@ import type {
   GeneratePlanAccepted,
   GroceryItemIn,
   GroceryList,
+  HouseholdAddressUpdate,
   HouseholdCreate,
   HouseholdResponse,
   IngredientSuggestion,
@@ -108,6 +109,17 @@ export function updateHousehold(
   body: Partial<HouseholdCreate>,
 ): Promise<HouseholdResponse> {
   return apiFetch<HouseholdResponse>(`/api/v1/households/${householdId}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+/** Sets/replaces the household's address; the API geocodes it server-side (`geocode_status`). */
+export function updateHouseholdAddress(
+  householdId: Uuid,
+  body: HouseholdAddressUpdate,
+): Promise<HouseholdResponse> {
+  return apiFetch<HouseholdResponse>(`/api/v1/households/${householdId}/address`, {
     method: "PATCH",
     body,
   });

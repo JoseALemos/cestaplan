@@ -1,6 +1,6 @@
 import type { ComparisonChain } from "@/lib/api/types";
 import { coverageTone } from "@/lib/domain/labels";
-import { formatMoney } from "@/lib/utils/format";
+import { formatMoney, formatQuantity } from "@/lib/utils/format";
 
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -38,6 +38,23 @@ export function ChainCard({ chain, currency, highlighted = false }: ChainCardPro
             </Badge>
           )}
         </div>
+        {chain.travel?.travel_cost ? (
+          <div className="mt-1 flex flex-col gap-1 border-t border-border pt-2">
+            <p className="text-sm text-ink-muted">
+              Desplazamiento: {formatMoney(chain.travel.travel_cost, currency)}
+              {chain.travel.distance_km && chain.travel.nearest_store?.name
+                ? ` (~${formatQuantity(chain.travel.distance_km, "km")} a ${chain.travel.nearest_store.name})`
+                : null}
+            </p>
+            {chain.total_with_travel ? (
+              <p className="font-semibold text-ink">
+                Total con desplazamiento: {formatMoney(chain.total_with_travel, currency)}
+              </p>
+            ) : null}
+          </div>
+        ) : chain.travel && !chain.travel.found ? (
+          <p className="mt-1 text-xs text-ink-faint">Sin tienda cercana localizada</p>
+        ) : null}
       </CardContent>
     </Card>
   );

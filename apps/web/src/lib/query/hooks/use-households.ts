@@ -10,10 +10,18 @@ import {
   listHouseholds,
   listMembers,
   putEquipment,
+  updateHouseholdAddress,
   updateMember,
 } from "@/lib/api/endpoints";
 import { queryKeys } from "@/lib/query/keys";
-import type { EquipmentSet, HouseholdCreate, MemberCreate, MemberUpdate, Uuid } from "@/lib/api/types";
+import type {
+  EquipmentSet,
+  HouseholdAddressUpdate,
+  HouseholdCreate,
+  MemberCreate,
+  MemberUpdate,
+  Uuid,
+} from "@/lib/api/types";
 
 export function useHouseholdsQuery() {
   return useQuery({ queryKey: queryKeys.households(), queryFn: listHouseholds });
@@ -40,6 +48,20 @@ export function useMembersQuery(householdId: string | null | undefined) {
     queryKey: queryKeys.members(householdId ?? ""),
     queryFn: () => listMembers(householdId as string),
     enabled: Boolean(householdId),
+  });
+}
+
+/** Saves the household's address; invalidates the household itself plus every plan comparison
+ * (travel cost keys off the household's address, not just its own mealPlanId). */
+export function useUpdateHouseholdAddressMutation(householdId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: HouseholdAddressUpdate) => updateHouseholdAddress(householdId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.household(householdId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.households() });
+      void queryClient.invalidateQueries({ queryKey: ["plans"] });
+    },
   });
 }
 

@@ -62,6 +62,9 @@ export interface HouseholdCreate {
   currency?: string;
 }
 
+/** Result of geocoding `address_text` server-side. `null` before any address has been saved. */
+export type GeocodeStatus = "ok" | "not_found" | "disabled";
+
 export interface HouseholdResponse {
   id: Uuid;
   name: string;
@@ -69,6 +72,20 @@ export interface HouseholdResponse {
   my_role: HouseholdRole;
   member_count: number;
   created_at: IsoDateTime;
+  // Address + geocode result (FASE 2b, travel cost) — null until an address is saved.
+  address_text: string | null;
+  postal_code: string | null;
+  city: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  geocode_status: GeocodeStatus | null;
+}
+
+/** `PATCH /households/{id}/address` body — postal_code/city are always sent, `null` when blank. */
+export interface HouseholdAddressUpdate {
+  address_text: string;
+  postal_code: string | null;
+  city: string | null;
 }
 
 export type AllergySeverity = "intolerance" | "allergy" | "anaphylaxis";
@@ -837,6 +854,21 @@ export interface ComparisonCoverage {
   status: ComparisonCoverageStatus;
 }
 
+/** The chain's nearest located store to the household address, if one was found. */
+export interface ComparisonNearestStore {
+  name: string | null;
+  latitude: string | null;
+  longitude: string | null;
+}
+
+/** Per-chain travel figures (FASE 2b) — only present on `ComparisonChain` when `travel.has_address` is true. */
+export interface ComparisonChainTravel {
+  distance_km: string | null;
+  travel_cost: MoneyString | null;
+  nearest_store: ComparisonNearestStore | null;
+  found: boolean;
+}
+
 export interface ComparisonChain {
   retailer_id: Uuid;
   retailer_name: string;
@@ -844,6 +876,9 @@ export interface ComparisonChain {
   full_coverage: boolean;
   coverage: ComparisonCoverage;
   ingredient_costs: Record<string, MoneyString>;
+  /** Present only when `travel.has_address` is true; absent otherwise. */
+  travel?: ComparisonChainTravel;
+  total_with_travel?: MoneyString | null;
 }
 
 export interface ComparisonBestSingle {
@@ -852,6 +887,15 @@ export interface ComparisonBestSingle {
   total: MoneyString;
   coverage_ratio: string;
   full_coverage: boolean;
+}
+
+/** Cheapest single chain once travel cost is factored in (FASE 2b). */
+export interface ComparisonBestSingleWithTravel {
+  retailer_id: Uuid;
+  retailer_name: string;
+  basket_cost: MoneyString;
+  travel_cost: MoneyString;
+  total_with_travel: MoneyString;
 }
 
 export interface ComparisonSplitItem {
@@ -875,6 +919,19 @@ export interface ComparisonSplit {
   savings_vs_best_single: MoneyString | null;
   by_chain: ComparisonSplitByChain[];
   uncovered_ingredients: ComparisonIngredient[];
+  // Travel-adjusted split figures (FASE 2b) — null when travel is disabled, no address is
+  // saved, or a visited chain has no located store.
+  travel_total?: MoneyString | null;
+  total_with_travel?: MoneyString | null;
+  savings_vs_best_single_with_travel?: MoneyString | null;
+}
+
+/** Household-level travel pricing config echoed on every comparison response. */
+export interface ComparisonTravelSettings {
+  enabled: boolean;
+  has_address: boolean;
+  rate_eur_per_km: string;
+  detour_factor: string;
 }
 
 export interface PlanComparison {
@@ -884,6 +941,8 @@ export interface PlanComparison {
   chains: ComparisonChain[];
   best_single: ComparisonBestSingle | null;
   split: ComparisonSplit;
+  travel: ComparisonTravelSettings;
+  best_single_with_travel?: ComparisonBestSingleWithTravel | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -88,3 +88,12 @@ export const passwordRecoverySchema = z.object({
   email: z.string().trim().min(1, "Introduce tu email").email("Email no válido"),
 });
 export type PasswordRecoveryFormValues = z.infer<typeof passwordRecoverySchema>;
+
+// --- Household address (FASE 2b, travel cost) ---------------------------
+
+export const householdAddressSchema = z.object({
+  address_text: z.string().trim().min(1, "Escribe el domicilio").max(300),
+  postal_code: z.string().trim().max(12, "Código postal demasiado largo").optional().or(z.literal("")),
+  city: z.string().trim().max(200).optional().or(z.literal("")),
+});
+export type HouseholdAddressFormValues = z.infer<typeof householdAddressSchema>;
