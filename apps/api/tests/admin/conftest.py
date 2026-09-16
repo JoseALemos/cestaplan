@@ -20,15 +20,26 @@ from cestaplan_api.db import engine, get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
 from cestaplan_api.models import User
 from cestaplan_api.routers import admin, admin_mappings, auth
-from cestaplan_api.security import login_rate_limiter
+from cestaplan_api.security import (
+    login_rate_limiter,
+    plan_generation_rate_limiter,
+    registration_rate_limiter,
+)
 from cestaplan_api.services import open_prices_sync
+
+# Todos los limitadores por-IP en memoria; el TestClient siempre presenta la misma IP, así que
+# sin reset los intentos (sobre todo de registro) se acumulan a lo largo de la sesión y devuelven
+# 429. Reiniciar los tres antes y después de cada test (igual que tests/api/conftest).
+_RATE_LIMITERS = (login_rate_limiter, registration_rate_limiter, plan_generation_rate_limiter)
 
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter() -> Iterator[None]:
-    login_rate_limiter.reset_all()
+    for limiter in _RATE_LIMITERS:
+        limiter.reset_all()
     yield
-    login_rate_limiter.reset_all()
+    for limiter in _RATE_LIMITERS:
+        limiter.reset_all()
 
 
 @pytest.fixture(autouse=True)

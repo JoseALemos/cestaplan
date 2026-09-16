@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -425,7 +426,7 @@ def test_prepare_request_blocks_on_drift(db_session: Session, tmp_path, monkeypa
 def _cli(argv, env):
     e = {**os.environ, **env}
     return subprocess.run(
-        ["python", "-m", "cestaplan_api.tools.apply_history_lane_remediation", *argv],
+        [sys.executable, "-m", "cestaplan_api.tools.apply_history_lane_remediation", *argv],
         capture_output=True, text=True, env=e, timeout=60,
         cwd=str(Path(__file__).resolve().parents[2]))
 
