@@ -161,7 +161,11 @@ def _seed(session: Session, rng: random.Random, now: datetime) -> dict[str, int]
             category_code=spec["cat"],
             default_unit=spec["unit"],
             density_g_per_ml=_d(spec["density"]) if spec["density"] is not None else None,
-            allergen_codes=list(spec["allergens"]) or None,
+            # The seed catalogue is fully curated, so an empty allergen list means "assessed, no
+            # allergen" ([]), NOT "unknown" (NULL). The distinction drives the fail-closed gate: a
+            # NULL here would wrongly make every allergen-free seed ingredient look unassessed and
+            # make plans infeasible for anyone with a serious allergy.
+            allergen_codes=list(spec["allergens"]),
             is_synthetic=True,
         )
         session.add(ingredient)

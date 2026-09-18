@@ -119,10 +119,11 @@ def build_seed_candidates(
     (backward-compatible: a retailer with no priced catalogue still yields candidates).
     """
     priceable = set(allow_list) if allow_list else None
-    # id -> (allergen codes, category_code). Category feeds the dietary validator so a diet
-    # (vegano/vegetariano/…) can exclude whole animal classes by ingredient category.
-    ingredient_meta: dict[int, tuple[set[str], str | None]] = {
-        ing_id: (set(codes or []), category)
+    # id -> (allergen codes, category_code, assessed). Category feeds the dietary validator so a
+    # diet can exclude whole animal classes by ingredient category; ``assessed`` (allergen_codes IS
+    # NOT NULL — empty list = assessed-safe, NULL = unknown) feeds the fail-closed allergen gate.
+    ingredient_meta: dict[int, tuple[set[str], str | None, bool]] = {
+        ing_id: (set(codes or []), category, codes is not None)
         for ing_id, codes, category in db.execute(
             select(Ingredient.id, Ingredient.allergen_codes, Ingredient.category_code)
         ).all()
@@ -149,7 +150,7 @@ def build_seed_candidates(
         ingredients: list[RecipeIngredientDTO] = []
         declared: set[str] = set()
         for ri in recipe.ingredients:
-            codes, category = ingredient_meta.get(ri.ingredient_id, (set(), None))
+            codes, category, assessed = ingredient_meta.get(ri.ingredient_id, (set(), None, False))
             declared |= codes
             ingredients.append(
                 RecipeIngredientDTO(
@@ -160,6 +161,7 @@ def build_seed_candidates(
                     optional=ri.optional,
                     substitution_group=ri.substitution_group,
                     category=category,
+                    allergen_assessed=assessed,
                 )
             )
 
@@ -447,6 +449,7 @@ class OpenAICandidateProvider:
                         optional=ing.optional,
                         substitution_group=ing.substitution_group,
                         category=ingredient.category_code,
+                        allergen_assessed=ingredient.allergen_codes is not None,
                     )
                 )
 

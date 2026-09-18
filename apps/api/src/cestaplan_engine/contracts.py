@@ -55,6 +55,10 @@ class MemberDTO(_Base):
     alias: str
     relative_serving: DecimalStr = Decimal("1")
     allergens: set[str] = Field(default_factory=set)
+    # Subset of ``allergens`` declared with a SERIOUS severity (allergy / anaphylaxis, not mere
+    # intolerance). A non-empty set turns on the fail-closed gate: recipes containing any
+    # unassessed ingredient are rejected rather than served with a warning.
+    strict_allergen_codes: set[str] = Field(default_factory=set)
     hard_restrictions: set[str] = Field(default_factory=set)
     soft_preferences: list[str] = Field(default_factory=list)
     rejected_recipe_ids: set[str] = Field(default_factory=set)
@@ -171,6 +175,12 @@ class RecipeIngredientDTO(_Base):
     # filter needs "carne", not the free-form canonical_name "pollo_pechuga"). Optional: an
     # unclassified ingredient simply contributes no category token.
     category: str | None = None
+    # Whether this ingredient's allergen profile has been ASSESSED (its ``allergen_codes`` is not
+    # NULL — an empty list means "assessed, no allergen"; NULL means "unknown"). Drives the
+    # fail-closed allergen gate: for a member with a serious (non-intolerance) allergy, a recipe
+    # containing an UNASSESSED ingredient cannot be guaranteed safe and is rejected. Defaults True
+    # so callers that do not track provenance are unaffected; the live rail sets it explicitly.
+    allergen_assessed: bool = True
 
 
 class CandidateRecipeDTO(_Base):

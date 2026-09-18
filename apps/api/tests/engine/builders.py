@@ -83,6 +83,7 @@ def ingredient(
     optional: bool = False,
     group: str | None = None,
     category: str | None = None,
+    assessed: bool = True,
 ) -> RecipeIngredientDTO:
     return RecipeIngredientDTO(
         canonical_name=canonical,
@@ -92,6 +93,7 @@ def ingredient(
         optional=optional,
         substitution_group=group,
         category=category,
+        allergen_assessed=assessed,
     )
 
 
@@ -128,6 +130,7 @@ def member(
     alias: str,
     *,
     allergens: set[str] | None = None,
+    strict: set[str] | None = None,
     hard: set[str] | None = None,
     soft: list[str] | None = None,
     rejected: set[str] | None = None,
@@ -136,6 +139,7 @@ def member(
         alias=alias,
         relative_serving=D("1"),
         allergens=allergens or set(),
+        strict_allergen_codes=strict or set(),
         hard_restrictions=hard or set(),
         soft_preferences=soft or [],
         rejected_recipe_ids=rejected or set(),

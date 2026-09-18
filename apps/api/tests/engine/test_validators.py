@@ -51,6 +51,31 @@ def test_allergen_safe_recipe_passes():
     assert result.valid is True
 
 
+def test_failclosed_serious_allergy_rejects_unassessed_ingredient():
+    # A serious (strict) allergy + an ingredient of UNKNOWN allergen status -> reject.
+    r = recipe("r", {"lunch"}, [
+        ingredient("tomate", "100", "g", assessed=True),
+        ingredient("salsa_misteriosa", "20", "g", assessed=False),
+    ])
+    m = member("A", allergens={"peanut"}, strict={"peanut"})
+    result = AllergenValidator().validate(r, [m])
+    assert result.valid is False
+    assert any("unassessed" in v for v in result.hard_violations)
+
+
+def test_failclosed_passes_when_all_ingredients_assessed():
+    r = recipe("r", {"lunch"}, [ingredient("tomate", "100", "g", assessed=True)])
+    m = member("A", allergens={"peanut"}, strict={"peanut"})
+    assert AllergenValidator().validate(r, [m]).valid is True
+
+
+def test_intolerance_does_not_fail_closed():
+    # Only an intolerance (no strict code) -> the unassessed ingredient is NOT rejected.
+    r = recipe("r", {"lunch"}, [ingredient("salsa_misteriosa", "20", "g", assessed=False)])
+    m = member("A", allergens={"milk"})  # declared but not strict
+    assert AllergenValidator().validate(r, [m]).valid is True
+
+
 def test_allergen_missing_data_warns_conservatively():
     r = recipe("r1", {"lunch"}, [ingredient("mystery", "1", "unit")])
     m = member("A", allergens={"gluten"})

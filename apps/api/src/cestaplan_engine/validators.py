@@ -131,19 +131,38 @@ class AllergenValidator:
     def validate(
         self, recipe: CandidateRecipeDTO, members: list[MemberDTO]
     ) -> ValidationResult:
-        household_allergens = set()
+        household_allergens: set[str] = set()
+        strict: set[str] = set()
         for m in members:
             household_allergens |= _canon_allergens(m.allergens)
-        if not household_allergens:
-            return ValidationResult(valid=True)
+            strict |= _canon_allergens(m.strict_allergen_codes)
 
-        recipe_allergens = self.derived_allergens(recipe)
-        conflict = recipe_allergens & household_allergens
-        result = ValidationResult(valid=not conflict)
-        for allergen in sorted(conflict):
-            result.hard_violations.append(
-                f"allergen:{allergen} in recipe '{recipe.title}'"
+        result = ValidationResult(valid=True)
+
+        # 1) Direct conflict: a declared allergen is present in the recipe (declared or derived).
+        if household_allergens:
+            conflict = self.derived_allergens(recipe) & household_allergens
+            if conflict:
+                result.valid = False
+                for allergen in sorted(conflict):
+                    result.hard_violations.append(
+                        f"allergen:{allergen} in recipe '{recipe.title}'"
+                    )
+
+        # 2) Fail-closed: a member with a SERIOUS allergy (allergy/anaphylaxis, not intolerance)
+        # cannot be served a recipe containing any ingredient whose allergen profile is UNKNOWN
+        # (unassessed). Better an infeasible plan than an unsafe one.
+        if strict:
+            unassessed = sorted(
+                ing.canonical_name for ing in recipe.ingredients if not ing.allergen_assessed
             )
+            if unassessed:
+                result.valid = False
+                shown = ", ".join(unassessed[:3]) + ("…" if len(unassessed) > 3 else "")
+                result.hard_violations.append(
+                    f"allergen_unassessed:{shown} (serious allergy; safety cannot be guaranteed) "
+                    f"in recipe '{recipe.title}'"
+                )
 
         # Conservative warning: recipe declares no allergen data at all.
         declared_any = bool(recipe.allergens_declared) or any(

@@ -214,11 +214,15 @@ def _build_members(
     for member in members:
         profile = member.dietary_profiles[0] if member.dietary_profiles else None
         allergens: set[str] = set()
+        strict: set[str] = set()
         hard: set[str] = set()
         soft: list[str] = []
         if profile is not None:
             for allergy in profile.allergies:
                 allergens.add(allergy.allergen_code)
+                # Serious allergies (not mere intolerance) drive the fail-closed gate.
+                if allergy.severity in ("allergy", "anaphylaxis"):
+                    strict.add(allergy.allergen_code)
             if profile.diet_type:
                 hard.add(profile.diet_type)
             for pref in profile.food_preferences:
@@ -234,6 +238,7 @@ def _build_members(
                 alias=_unique_alias(member, seen_aliases),
                 relative_serving=member.relative_serving,
                 allergens=allergens,
+                strict_allergen_codes=strict,
                 hard_restrictions=hard,
                 soft_preferences=soft,
                 rejected_recipe_ids=set(rejected),
