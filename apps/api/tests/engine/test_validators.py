@@ -23,6 +23,27 @@ def test_allergen_derived_from_catalog():
     assert result.valid is False
 
 
+def test_allergen_plural_singular_bridge_matches():
+    # The UI sends "peanuts"; the catalogue tags the product "peanut". They MUST conflict.
+    prod = product("crema_cacahuete", "crema_cacahuete", [], allergens={"peanut"})
+    r = recipe("r", {"breakfast"}, [ingredient("crema_cacahuete", "30", "g")])
+    m = member("A", allergens={"peanuts"})
+    assert AllergenValidator([prod]).validate(r, [m]).valid is False
+
+
+def test_allergen_bridge_covers_eu14_variants():
+    cases = [
+        ("crustaceans", "crustacean"), ("molluscs", "mollusc"), ("eggs", "egg"),
+        ("soybeans", "soy"), ("nuts", "tree_nut"), ("sulphites", "sulphite"), ("leche", "milk"),
+    ]
+    for household_code, catalog_code in cases:
+        prod = product("p", "p", [], allergens={catalog_code})
+        r = recipe("r", {"lunch"}, [ingredient("p", "10", "g")])
+        m = member("A", allergens={household_code})
+        result = AllergenValidator([prod]).validate(r, [m])
+        assert result.valid is False, f"{household_code!r} must match catalogue {catalog_code!r}"
+
+
 def test_allergen_safe_recipe_passes():
     r = recipe("r1", {"lunch"}, [ingredient("rice", "200", "g")])
     m = member("A", allergens={"gluten"})

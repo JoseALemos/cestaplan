@@ -75,6 +75,41 @@ def _lower_set(values: set[str]) -> set[str]:
     return {v.strip().lower() for v in values if v.strip()}
 
 
+# The UI emits EU-14 allergen codes in the plural English form (crustaceans, eggs, peanuts,
+# soybeans, nuts, sulphites, molluscs) while the ingredient catalogue tags them singular
+# (crustacean, egg, peanut, soy, tree_nut, sulphite, mollusc). Left unbridged, a declared allergy
+# silently fails to match the recipe — a safety bug. Canonicalize BOTH the household's and the
+# recipe's codes to one set (the singular catalogue form) before intersecting. A few common Spanish
+# and synonym spellings are tolerated defensively (the field is free text at the API).
+_ALLERGEN_CANON: dict[str, str] = {
+    "crustaceans": "crustacean", "crustaceos": "crustacean", "crustáceos": "crustacean",
+    "molluscs": "mollusc", "moluscos": "mollusc",
+    "eggs": "egg", "huevo": "egg", "huevos": "egg",
+    "peanuts": "peanut", "cacahuete": "peanut", "cacahuetes": "peanut", "mani": "peanut",
+    "soybeans": "soy", "soybean": "soy", "soya": "soy", "soja": "soy",
+    "nuts": "tree_nut", "tree_nuts": "tree_nut", "frutos_secos": "tree_nut",
+    "frutos_de_cascara": "tree_nut", "frutos de cáscara": "tree_nut",
+    "sulphites": "sulphite", "sulfites": "sulphite", "sulfito": "sulphite", "sulfitos": "sulphite",
+    "milk": "milk", "lactose": "milk", "dairy": "milk", "leche": "milk", "lactosa": "milk",
+    "gluten": "gluten", "wheat": "gluten", "trigo": "gluten",
+    "fish": "fish", "pescado": "fish",
+    "sesame": "sesame", "sesamo": "sesame", "sésamo": "sesame",
+    "celery": "celery", "apio": "celery",
+    "mustard": "mustard", "mostaza": "mustard",
+    "lupin": "lupin", "lupins": "lupin", "altramuces": "lupin",
+}
+
+
+def _canon_allergens(values: set[str]) -> set[str]:
+    """Lowercase, trim and map each allergen code to its canonical catalogue form."""
+    out: set[str] = set()
+    for value in values:
+        code = value.strip().lower()
+        if code:
+            out.add(_ALLERGEN_CANON.get(code, code))
+    return out
+
+
 class AllergenValidator:
     """HARD safety gate: reject any recipe unsafe for any member (OPTIMIZATION.md §2.3)."""
 
@@ -87,18 +122,18 @@ class AllergenValidator:
             )
 
     def derived_allergens(self, recipe: CandidateRecipeDTO) -> set[str]:
-        """Declared allergens plus those derived from the recipe's ingredients."""
+        """Declared allergens plus those derived from the recipe's ingredients (canonicalized)."""
         allergens = _lower_set(recipe.allergens_declared)
         for ing in recipe.ingredients:
             allergens |= self._by_ingredient.get(ing.canonical_name, set())
-        return allergens
+        return _canon_allergens(allergens)
 
     def validate(
         self, recipe: CandidateRecipeDTO, members: list[MemberDTO]
     ) -> ValidationResult:
         household_allergens = set()
         for m in members:
-            household_allergens |= _lower_set(m.allergens)
+            household_allergens |= _canon_allergens(m.allergens)
         if not household_allergens:
             return ValidationResult(valid=True)
 
