@@ -15,6 +15,7 @@ import {
 import { formatDate } from "@/lib/utils/format";
 import type { InvitationCreateResponse, InvitationRole } from "@/lib/api/types";
 
+import { MemberNutritionGoalForm } from "@/components/household/MemberNutritionGoalForm";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -67,6 +68,10 @@ export default function MiembrosPage() {
   }, [authLoading, isAuthenticated, router]);
 
   const isOwner = householdQuery.data?.my_role === "owner";
+  // Members (nutrition goal included) are editable by owner + editor, per the API's
+  // HouseholdCtxEditor gate on PATCH /members/{id}.
+  const canManageMembers =
+    householdQuery.data?.my_role === "owner" || householdQuery.data?.my_role === "editor";
 
   const acceptUrl = useMemo(() => {
     if (!created) return "";
@@ -145,15 +150,20 @@ export default function MiembrosPage() {
               {(membersQuery.data ?? []).map((member) => (
                 <li
                   key={member.id}
-                  className="flex items-center justify-between rounded-md border border-border px-4 py-3"
+                  className="flex flex-col gap-3 rounded-md border border-border px-4 py-3"
                 >
-                  <span className="text-ink">
-                    {member.display_name ?? "Sin nombre"}
-                    {member.is_eater ? "" : " · no come en casa"}
-                  </span>
-                  <Badge tone={member.role === "owner" ? "primary" : "neutral"}>
-                    {ROLE_LABELS[member.role] ?? member.role}
-                  </Badge>
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink">
+                      {member.display_name ?? "Sin nombre"}
+                      {member.is_eater ? "" : " · no come en casa"}
+                    </span>
+                    <Badge tone={member.role === "owner" ? "primary" : "neutral"}>
+                      {ROLE_LABELS[member.role] ?? member.role}
+                    </Badge>
+                  </div>
+                  {canManageMembers ? (
+                    <MemberNutritionGoalForm householdId={householdId} member={member} />
+                  ) : null}
                 </li>
               ))}
             </ul>

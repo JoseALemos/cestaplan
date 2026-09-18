@@ -9,6 +9,7 @@ import type { OnboardingMemberDraft } from "@/lib/onboarding/types";
 import { TagListInput } from "./TagListInput";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 
 export interface MemberDietEditorProps {
@@ -95,6 +96,34 @@ export function MemberDietEditor({ member, onChange }: MemberDietEditorProps) {
             })}
           </div>
         ) : null}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium text-ink">Meta nutricional (opcional)</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Input
+            label="Energía objetivo (kcal/día)"
+            type="number"
+            min={0}
+            max={20000}
+            placeholder="2000"
+            value={member.energy_target_kcal}
+            onChange={(event) => onChange({ energy_target_kcal: event.target.value })}
+          />
+          <Input
+            label="Proteína objetivo (g/día)"
+            type="number"
+            min={0}
+            max={2000}
+            placeholder="50"
+            value={member.protein_target_g}
+            onChange={(event) => onChange({ protein_target_g: event.target.value })}
+          />
+        </div>
+        <p className="text-xs text-ink-muted">
+          Orientativo. La referencia europea de ingesta es ~2.000 kcal/día para un adulto;
+          ajústalo a tu caso. No es consejo médico.
+        </p>
       </div>
 
       <TagListInput

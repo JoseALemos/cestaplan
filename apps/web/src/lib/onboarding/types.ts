@@ -21,6 +21,13 @@ export interface OnboardingMemberDraft {
    */
   relative_servings: number;
   diet_type: string | null;
+  /**
+   * Optional per-member nutrition target, wizard-side as raw input strings ("" = not set).
+   * Sent to the API as `nutrition_goal` (see `buildMemberPayload`) — never a prescribed
+   * value, the person enters their own numbers.
+   */
+  energy_target_kcal: string;
+  protein_target_g: string;
   allergies: AllergyIn[];
   intolerances: string[];
   rejected_ingredients: string[];
