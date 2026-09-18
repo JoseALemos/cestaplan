@@ -539,7 +539,7 @@ INGREDIENTS: Final[list[IngredientSpec]] = [
         [(500, "1.15"), (1000, "2.15")],
     ),
     _ing(
-        "alubias_blancas",
+        "alubia",
         "Alubias blancas",
         "legumbres",
         "g",
@@ -1405,7 +1405,7 @@ RECIPES: Final[list[RecipeSpec]] = [
         45,
         ["stovetop"],
         [
-            ("alubias_blancas", 400, False, None),
+            ("alubia", 400, False, None),
             ("cebolla", 100, False, None),
             ("zanahoria", 100, False, None),
             ("ajo", 10, False, None),
@@ -2280,7 +2280,7 @@ RECIPES: Final[list[RecipeSpec]] = [
         25,
         ["stovetop"],
         [
-            ("alubias_blancas", 500, False, None),
+            ("alubia", 500, False, None),
             ("calabacin", 200, False, None),
             ("zanahoria", 150, False, None),
             ("tomate_triturado", 200, False, None),

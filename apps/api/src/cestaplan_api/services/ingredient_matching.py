@@ -233,8 +233,8 @@ def _rules() -> list[_NameRule]:
         r("garbanzos_cocido", ("garbanzos", "bote"), (), "0.82"),
         r("garbanzos_seco", ("garbanzos", "secos"), (), "0.82"),
         r("lentejas", ("lentejas",), ("sopa",), "0.80"),
-        r("alubias_blancas", ("alubias", "blancas"), (), "0.85"),
-        r("alubias_blancas", ("alubia", "blanca"), (), "0.82"),
+        r("alubia", ("alubias", "blancas"), (), "0.85"),
+        r("alubia", ("alubia", "blanca"), (), "0.82"),
         r("guisantes", ("guisantes",), g, "0.82"),
         r("soja_texturizada", ("soja", "texturizada"), (), "0.85"),
         # --- panaderia ---
