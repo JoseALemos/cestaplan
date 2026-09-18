@@ -119,10 +119,12 @@ def build_seed_candidates(
     (backward-compatible: a retailer with no priced catalogue still yields candidates).
     """
     priceable = set(allow_list) if allow_list else None
-    ingredient_allergens = {
-        ing_id: set(codes or [])
-        for ing_id, codes in db.execute(
-            select(Ingredient.id, Ingredient.allergen_codes)
+    # id -> (allergen codes, category_code). Category feeds the dietary validator so a diet
+    # (vegano/vegetariano/…) can exclude whole animal classes by ingredient category.
+    ingredient_meta: dict[int, tuple[set[str], str | None]] = {
+        ing_id: (set(codes or []), category)
+        for ing_id, codes, category in db.execute(
+            select(Ingredient.id, Ingredient.allergen_codes, Ingredient.category_code)
         ).all()
     }
 
@@ -147,7 +149,8 @@ def build_seed_candidates(
         ingredients: list[RecipeIngredientDTO] = []
         declared: set[str] = set()
         for ri in recipe.ingredients:
-            declared |= ingredient_allergens.get(ri.ingredient_id, set())
+            codes, category = ingredient_meta.get(ri.ingredient_id, (set(), None))
+            declared |= codes
             ingredients.append(
                 RecipeIngredientDTO(
                     canonical_name=ri.canonical_name,
@@ -156,6 +159,7 @@ def build_seed_candidates(
                     unit=ri.unit,
                     optional=ri.optional,
                     substitution_group=ri.substitution_group,
+                    category=category,
                 )
             )
 
@@ -442,6 +446,7 @@ class OpenAICandidateProvider:
                         unit=unit,
                         optional=ing.optional,
                         substitution_group=ing.substitution_group,
+                        category=ingredient.category_code,
                     )
                 )
 

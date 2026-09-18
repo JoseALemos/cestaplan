@@ -166,6 +166,11 @@ class RecipeIngredientDTO(_Base):
     unit: str
     optional: bool = False
     substitution_group: str | None = None
+    # Ingredient category_code (carne / pescado_marisco / lacteos / huevos / verduras / ...).
+    # Carried so the dietary validator can exclude whole animal classes (a vegan/vegetarian
+    # filter needs "carne", not the free-form canonical_name "pollo_pechuga"). Optional: an
+    # unclassified ingredient simply contributes no category token.
+    category: str | None = None
 
 
 class CandidateRecipeDTO(_Base):

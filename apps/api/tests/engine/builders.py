@@ -76,7 +76,13 @@ def product(
 
 
 def ingredient(
-    canonical: str, qty: str, unit: str, *, optional: bool = False, group: str | None = None
+    canonical: str,
+    qty: str,
+    unit: str,
+    *,
+    optional: bool = False,
+    group: str | None = None,
+    category: str | None = None,
 ) -> RecipeIngredientDTO:
     return RecipeIngredientDTO(
         canonical_name=canonical,
@@ -85,6 +91,7 @@ def ingredient(
         unit=unit,
         optional=optional,
         substitution_group=group,
+        category=category,
     )
 
 

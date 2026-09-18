@@ -17,15 +17,47 @@ from cestaplan_engine.contracts import (
 )
 
 # Dietary restrictions that forbid whole ingredient classes. Values are the
-# allergen/tag tokens (lowercased) that, if present, make a recipe non-compliant.
+# allergen/tag/category tokens (lowercased) that, if present, make a recipe non-compliant.
 _RESTRICTION_FORBIDDEN: dict[str, set[str]] = {
-    "vegan": {"meat", "fish", "shellfish", "milk", "dairy", "egg", "eggs", "honey"},
+    "vegan": {"meat", "poultry", "fish", "shellfish", "milk", "dairy", "egg", "eggs", "honey"},
     "vegetarian": {"meat", "fish", "shellfish", "poultry"},
     "gluten_free": {"gluten", "wheat", "barley", "rye"},
     "lactose_free": {"lactose", "milk", "dairy"},
     "pescatarian": {"meat", "poultry"},
     "halal": {"pork", "alcohol"},
     "kosher": {"pork", "shellfish"},
+}
+
+# The UI (and real households) send diet types in Spanish; the restriction table above keys on
+# canonical English. Without this bridge ``_RESTRICTION_FORBIDDEN.get("vegano")`` is ``None`` and
+# the whole diet becomes a silent no-op. Maps to "" for "no restriction" (omnívoro). English
+# values pass through unchanged.
+_DIET_ALIASES: dict[str, str] = {
+    "vegano": "vegan",
+    "vegana": "vegan",
+    "vegetariano": "vegetarian",
+    "vegetariana": "vegetarian",
+    "pescetariano": "pescatarian",
+    "pescetariana": "pescatarian",
+    "pescatariano": "pescatarian",
+    "sin_gluten": "gluten_free",
+    "sin gluten": "gluten_free",
+    "sin_lactosa": "lactose_free",
+    "sin lactosa": "lactose_free",
+    "omnivoro": "",
+    "omnívoro": "",
+}
+
+# Ingredient category_code -> diet tokens it contributes. Meat/poultry, fish/shellfish, eggs and
+# dairy are excluded by diet through the ingredient's CATEGORY, because the recipe's ingredient
+# tokens are canonical names ("pollo_pechuga", "cerdo_lomo") that never equal the generic "meat".
+# ("carne" holds poultry and pork too; the seed does not split them finer, so it maps to both meat
+# and poultry — enough for vegan/vegetarian/pescatarian, which forbid whole classes.)
+_CATEGORY_FORBIDS: dict[str, set[str]] = {
+    "carne": {"meat", "poultry"},
+    "pescado_marisco": {"fish", "shellfish"},
+    "huevos": {"egg", "eggs"},
+    "lacteos": {"milk", "dairy"},
 }
 
 
@@ -105,6 +137,8 @@ class DietaryRestrictionValidator:
         for ing in recipe.ingredients:
             tokens.add(ing.canonical_name.strip().lower())
             tokens |= self._by_ingredient.get(ing.canonical_name, set())
+            if ing.category:
+                tokens |= _CATEGORY_FORBIDS.get(ing.category.strip().lower(), set())
         return tokens
 
     def validate(
@@ -115,13 +149,16 @@ class DietaryRestrictionValidator:
 
         for member in members:
             for restriction in _lower_set(member.hard_restrictions):
-                forbidden = _RESTRICTION_FORBIDDEN.get(restriction)
+                # Bridge Spanish diet names to canonical English before the lookup; "" (omnívoro)
+                # falls through as "no dietary class", leaving free-form ingredient exclusions.
+                diet = _DIET_ALIASES.get(restriction, restriction)
+                forbidden = _RESTRICTION_FORBIDDEN.get(diet)
                 if forbidden is not None:
                     hit = tokens & forbidden
                     if hit:
                         result.valid = False
                         result.hard_violations.append(
-                            f"restriction:{restriction} ({', '.join(sorted(hit))}) "
+                            f"restriction:{diet} ({', '.join(sorted(hit))}) "
                             f"for {member.alias}"
                         )
                 elif restriction in tokens:
