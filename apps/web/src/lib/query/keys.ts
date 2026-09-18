@@ -17,6 +17,7 @@ export const queryKeys = {
     ["retailers", retailerId, "stores", storeId, "prices", { page, search }] as const,
   recipe: (recipeId: string) => ["recipes", recipeId] as const,
   runStatus: (runId: string) => ["plans", "runs", runId] as const,
+  plans: (householdId: string) => ["plans", "list", householdId] as const,
   plan: (mealPlanId: string) => ["plans", mealPlanId] as const,
   comparison: (mealPlanId: string) => ["plans", mealPlanId, "comparison"] as const,
   favorites: (householdId: string) => ["plans", "recipes", "favorites", householdId] as const,

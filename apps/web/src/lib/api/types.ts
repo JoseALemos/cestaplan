@@ -705,6 +705,19 @@ export interface MealPlanDetail {
   grocery_summary?: Record<string, unknown>;
 }
 
+/** Light row for the plan history list (`GET /api/v1/plans`) — no meals/costing, see `MealPlanDetail`. */
+export interface PlanSummary {
+  id: Uuid;
+  status: string;
+  start_date: IsoDate;
+  end_date: IsoDate;
+  created_at: IsoDateTime;
+  budget_amount: MoneyString | null;
+  currency: string;
+  meal_count: number;
+  retailer_name: string | null;
+}
+
 export type FeedbackSentiment = "like" | "reject" | "no_show";
 
 export interface FeedbackRequest {

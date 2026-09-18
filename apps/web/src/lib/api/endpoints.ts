@@ -50,6 +50,7 @@ import type {
   PantryItemUpdate,
   PasswordRecoveryRequest,
   PlannerReadiness,
+  PlanSummary,
   ProviderPromotionResult,
   ProviderPromotionStatus,
   ProviderProductionApproval,
@@ -290,6 +291,11 @@ export function listStorePrices(
 // ---------------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------------
+
+/** The household's meal plans, newest first. Backs the `/planes` history page. */
+export function listPlans(householdId: Uuid): Promise<PlanSummary[]> {
+  return apiFetch<PlanSummary[]>(`/api/v1/plans?household_id=${householdId}`);
+}
 
 export function generatePlan(body: GenerateRequest): Promise<GeneratePlanAccepted> {
   return apiFetch<GeneratePlanAccepted>("/api/v1/plans/generate", { method: "POST", body });

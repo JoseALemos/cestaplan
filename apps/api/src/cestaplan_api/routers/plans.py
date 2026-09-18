@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.deps import (
@@ -21,7 +21,15 @@ from cestaplan_api.deps import (
     rate_limit,
     verify_csrf,
 )
-from cestaplan_api.models import FavoriteRecipe, Household, PlannedMeal, Recipe, RecipeFeedback
+from cestaplan_api.models import (
+    FavoriteRecipe,
+    Household,
+    MealPlan,
+    PlannedMeal,
+    Recipe,
+    RecipeFeedback,
+    Retailer,
+)
 from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
 from cestaplan_api.security import plan_generation_rate_limiter
 from cestaplan_api.services.audit import record_audit
@@ -65,6 +73,47 @@ def _serialize_recipe_brief(recipe: Recipe) -> dict:
         "cooking_minutes": recipe.cooking_minutes,
         "tags": list(recipe.preference_tags or []),
     }
+
+
+# --------------------------------------------------------------------------- #
+# History (list)
+# --------------------------------------------------------------------------- #
+@router.get("")
+def list_plans(ctx: HouseholdCtx, user: CurrentUser, db: DbSession) -> list[dict]:
+    """List the household's meal plans, newest first. Needs ``?household_id=``.
+
+    Excludes soft-deleted plans. Light rows only (no full costing/meals) — use
+    ``GET /{meal_plan_id}`` for the full persisted plan.
+    """
+    meal_count = (
+        select(func.count(PlannedMeal.id))
+        .where(PlannedMeal.meal_plan_id == MealPlan.id)
+        .correlate(MealPlan)
+        .scalar_subquery()
+    )
+    rows = db.execute(
+        select(MealPlan, Retailer, meal_count.label("meal_count"))
+        .outerjoin(Retailer, Retailer.id == MealPlan.retailer_id)
+        .where(
+            MealPlan.household_id == ctx.household.id,
+            MealPlan.deleted_at.is_(None),
+        )
+        .order_by(MealPlan.created_at.desc(), MealPlan.id.desc())
+    ).all()
+    return [
+        {
+            "id": str(plan.public_id),
+            "status": plan.status,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+            "created_at": plan.created_at,
+            "budget_amount": str(plan.budget_amount) if plan.budget_amount is not None else None,
+            "currency": plan.currency,
+            "meal_count": meal_count_value,
+            "retailer_name": retailer.name if retailer is not None else None,
+        }
+        for plan, retailer, meal_count_value in rows
+    ]
 
 
 # --------------------------------------------------------------------------- #

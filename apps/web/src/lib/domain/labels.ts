@@ -226,6 +226,33 @@ export const RUN_STATUS_LABELS: Record<string, string> = {
   cancelled: "Generación cancelada",
 };
 
+/** `MealPlan.status` (draft/generating/ready/failed/archived) — plan history list. */
+export const PLAN_STATUS_LABELS: Record<string, string> = {
+  draft: "Borrador",
+  generating: "Generando",
+  ready: "Completado",
+  failed: "Fallido",
+  archived: "Archivado",
+};
+
+export const PLAN_STATUS_TONE: Record<string, "success" | "info" | "warning" | "error" | "neutral"> = {
+  draft: "neutral",
+  generating: "info",
+  ready: "success",
+  failed: "error",
+  archived: "neutral",
+};
+
+export function planStatusLabel(status: string): string {
+  return PLAN_STATUS_LABELS[status] ?? status;
+}
+
+export function planStatusTone(
+  status: string,
+): "success" | "info" | "warning" | "error" | "neutral" {
+  return PLAN_STATUS_TONE[status] ?? "neutral";
+}
+
 export const RUN_STATUS_ORDER = [
   "queued",
   "collecting_data",

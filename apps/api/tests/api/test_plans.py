@@ -255,3 +255,97 @@ def _create_household_no_csrf_guard(client, email, db_session) -> str:
     token = login(client, email)
     hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
     return hh["id"]
+
+
+def _generate_plan(client: TestClient, household_id: str, token: str, days: int = 3) -> str:
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": household_id,
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=days)).isoformat(),
+            "budget_amount": "300",
+            "requirements": [
+                {"meal_type": "lunch", "requested_count": 2, "default_servings": 2}
+            ],
+        },
+        headers=csrf(token),
+    ).json()
+    return gen["meal_plan_id"]
+
+
+def test_list_plans_newest_first(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh["id"])
+
+    first_id = _generate_plan(client, hh["id"], token)
+    second_id = _generate_plan(client, hh["id"], token)
+
+    resp = client.get(f"/api/v1/plans?household_id={hh['id']}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [row["id"] for row in body] == [second_id, first_id]
+    row = body[0]
+    assert set(row) == {
+        "id",
+        "status",
+        "start_date",
+        "end_date",
+        "created_at",
+        "budget_amount",
+        "currency",
+        "meal_count",
+        "retailer_name",
+    }
+    assert row["budget_amount"] == "300.0000"
+    assert row["currency"] == "EUR"
+    assert row["meal_count"] == 0  # not yet processed by the worker
+
+
+def test_list_plans_requires_household_id(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    login(client, email)
+    resp = client.get("/api/v1/plans")
+    assert resp.status_code == 422
+
+
+def test_list_plans_requires_membership(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    owner_email = _email()
+    register(client, owner_email)
+    owner_token = login(client, owner_email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(owner_token)).json()
+    _add_equipment(db_session, hh["id"])
+    _generate_plan(client, hh["id"], owner_token)
+
+    # A different user must not see this household's plans (404, no existence disclosure).
+    other_email = _email()
+    register(client, other_email)
+    login(client, other_email)
+    resp = client.get(f"/api/v1/plans?household_id={hh['id']}")
+    assert resp.status_code == 404
+
+
+def test_list_plans_excludes_other_households(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+
+    hh_a = client.post("/api/v1/households", json={"name": "Casa A"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh_a["id"])
+    hh_b = client.post("/api/v1/households", json={"name": "Casa B"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh_b["id"])
+
+    _generate_plan(client, hh_a["id"], token)
+
+    resp = client.get(f"/api/v1/plans?household_id={hh_b['id']}")
+    assert resp.status_code == 200
+    assert resp.json() == []

@@ -10,6 +10,7 @@ import {
   getPlanComparison,
   getRunStatus,
   listFavorites,
+  listPlans,
   listRecipeFeedback,
   regenerateMeal,
   regeneratePlan,
@@ -45,6 +46,15 @@ export function usePlanQuery(mealPlanId: string | null | undefined) {
     queryKey: queryKeys.plan(mealPlanId ?? ""),
     queryFn: () => getPlan(mealPlanId as string),
     enabled: Boolean(mealPlanId),
+  });
+}
+
+/** The household's meal plan history, newest first. Backs the `/planes` list page. */
+export function usePlansQuery(householdId: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.plans(householdId ?? ""),
+    queryFn: () => listPlans(householdId as string),
+    enabled: Boolean(householdId),
   });
 }
 
