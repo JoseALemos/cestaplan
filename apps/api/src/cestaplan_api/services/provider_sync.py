@@ -318,8 +318,21 @@ def _append_observation(
         .scalars()
         .first()
     )
-    if prior is not None and prior.amount == product.regular_price:
-        return  # unchanged price -> idempotent no-op
+    if (
+        prior is not None
+        and prior.amount == product.regular_price
+        and prior.currency == product.currency
+    ):
+        # Unchanged price: REVALIDATE the open row in place (mirrors
+        # price_history.record_observation) rather than a bare no-op — bump observed_at/
+        # imported_at so a monthly re-crawl refreshes freshness WITHOUT duplicating history.
+        # Without this, a stable price ages out of the freshness window between crawls even
+        # though every crawl re-confirms it, so plans warn "expired prices" all month long.
+        prior.observed_at = product.observed_at
+        prior.imported_at = as_of
+        metrics.observations_reused += 1
+        db.flush()
+        return
     if prior is not None and prior.valid_from <= product.observed_at:
         prior.valid_until = product.observed_at
         prior.closed_by_run_id = run_id
