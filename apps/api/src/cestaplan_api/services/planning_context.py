@@ -366,6 +366,17 @@ def _build_conversions(db: Session) -> list[IngredientConversionDTO]:
                 canonical_name=name, from_unit="unidad", to_unit="g", factor=Decimal(str(grams))
             )
         )
+    # Volumen medio por PIEZA/envase (ml) de ingredientes líquidos que las recetas miden en ml
+    # pero cuyo producto se factura por "unidad"/envase (el motor puentea ml->unidad->unit).
+    for name, millilitres in _PIECE_ML.items():
+        conversions.append(
+            IngredientConversionDTO(
+                canonical_name=name,
+                from_unit="unidad",
+                to_unit="ml",
+                factor=Decimal(str(millilitres)),
+            )
+        )
     return conversions
 
 
@@ -389,6 +400,22 @@ _PIECE_GRAMS: dict[str, float] = {
     "pepino": 300,
     "berenjena": 250,
     "puerro": 100,
+    # Añadidos 2026-09-19: recetas en g pero producto Mercadona facturado por "unidad"/envase.
+    # Peso = contenido neto real del envase mapeado donde existe (jamón 0,45 kg, miel 1 kg,
+    # judía 0,75 kg), convencional por pieza donde no (coliflor/champiñón/sardina); alcachofa
+    # cubre además el aviso pre-existente "unidad -> kg".
+    "coliflor": 600,
+    "champiñón": 250,
+    "judía verde": 750,
+    "sardina": 90,
+    "jamon_cocido": 450,
+    "miel": 1000,
+    "alcachofa": 120,
+}
+
+# Volumen medio por envase (ml) para líquidos medidos en ml cuyo producto se factura por "unidad".
+_PIECE_ML: dict[str, float] = {
+    "nata": 600,  # contenido neto del brik mapeado (0,6 l)
 }
 
 
