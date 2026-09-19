@@ -72,6 +72,11 @@ function AuthActions({ onNavigate, layout }: { onNavigate?: () => void; layout: 
             Planes
           </Button>
         </Link>
+        <Link href="/favoritos" onClick={onNavigate}>
+          <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
+            Favoritos
+          </Button>
+        </Link>
         <Link href="/despensa" onClick={onNavigate}>
           <Button variant={layout === "desktop" ? "ghost" : "outline"} size={layout === "desktop" ? "sm" : "md"}>
             Despensa

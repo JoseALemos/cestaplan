@@ -118,8 +118,8 @@ flowchart TB
 
 | Elemento | Estado | Cuándo se activaría |
 |---|---|---|
-| **OR-Tools** | Interfaz preparada en `PlanOptimizer`, no introducida | Cuando el greedy+backtracking no baste para la escala/objetivos |
-| **SSE** | Endpoint de stream preparado, no obligatorio | Mejora de UX sobre el polling con backoff; no cambia el contrato de `POST /generate` |
+| **OR-Tools** | NO introducido (sin dependencia ni interfaz en el repo); el greedy+backtracking cubre la escala actual | Cuando el greedy+backtracking no baste para la escala/objetivos |
+| **SSE** | NO implementado — hoy solo polling con backoff; no hay endpoint de stream | Mejora de UX sobre el polling; no cambiaría el contrato de `POST /generate` |
 | **Redis** | No usado | Solo si la cola en Postgres deja de escalar; hoy `SELECT FOR UPDATE SKIP LOCKED` es suficiente |
 | **Pagos / suscripciones** | Fuera de alcance | Post-MVP; `UsageLedger` ya modela el consumo |
 | **Adaptadores de cadenas** | Esqueletos (Aldi, Lidl, Carrefour, Dia, Alcampo, Deza) | FASE 4+ con datos y licencias adecuados |
