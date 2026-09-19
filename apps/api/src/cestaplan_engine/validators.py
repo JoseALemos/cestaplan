@@ -8,6 +8,7 @@ Missing allergen data is treated conservatively — we warn rather than assume
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from cestaplan_engine.contracts import (
@@ -189,7 +190,13 @@ class DietaryRestrictionValidator:
         tokens = _lower_set(set(recipe.preference_tags))
         tokens |= _lower_set(recipe.allergens_declared)
         for ing in recipe.ingredients:
-            tokens.add(ing.canonical_name.strip().lower())
+            cn = ing.canonical_name.strip().lower()
+            tokens.add(cn)
+            # Also index the WORD-PARTS of the canonical name so an avoided/disliked ingredient
+            # given generically ("pollo") matches its specific variants ("pollo_pechuga",
+            # "pollo_muslo"). Split only on "_"/whitespace (word boundaries), never substring —
+            # so "pan" does NOT match "panceta".
+            tokens |= {p for p in re.split(r"[_\s]+", cn) if p}
             tokens |= self._by_ingredient.get(ing.canonical_name, set())
             if ing.category:
                 tokens |= _CATEGORY_FORBIDS.get(ing.category.strip().lower(), set())

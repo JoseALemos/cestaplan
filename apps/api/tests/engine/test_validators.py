@@ -148,3 +148,21 @@ def test_dietary_soft_preference_penalized_not_rejected():
     result = DietaryRestrictionValidator().validate(r, [m])
     assert result.valid is True
     assert result.soft_violations
+
+
+def test_avoid_matches_canonical_word_parts():
+    # "avoid: pollo" (hard) must block a recipe with "pollo_pechuga" (generic → specific variant).
+    r = recipe("r", {"lunch"}, [ingredient("pollo_pechuga", "200", "g", category="carne")])
+    assert DietaryRestrictionValidator().validate(r, [member("A", hard={"pollo"})]).valid is False
+
+
+def test_avoid_does_not_substring_falsematch():
+    # "pan" must NOT block "panceta" (word-part matching, not substring).
+    r = recipe("r", {"lunch"}, [ingredient("panceta", "50", "g", category="carne")])
+    assert DietaryRestrictionValidator().validate(r, [member("A", hard={"pan"})]).valid is True
+
+
+def test_dislike_matches_word_parts_softly():
+    r = recipe("r", {"lunch"}, [ingredient("pollo_muslo", "200", "g", category="carne")])
+    result = DietaryRestrictionValidator().validate(r, [member("A", soft=["avoid:pollo"])])
+    assert result.valid is True and result.soft_violations
