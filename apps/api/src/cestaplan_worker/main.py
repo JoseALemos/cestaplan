@@ -12,11 +12,14 @@ released, then processed by :func:`process_job`.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
+import subprocess
+import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -26,9 +29,47 @@ from cestaplan_api.db import SessionLocal
 from cestaplan_api.models import GenerationJob
 from cestaplan_worker.processor import process_job
 
+logger = logging.getLogger(__name__)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+# The always-on generation worker doubles as the trigger for the monthly Mercadona price
+# refresh (there is no separate cron service). Once a day it fires a cadence-aware, ISOLATED
+# subprocess that self-skips (via --min-age-days) unless a refresh is actually due, so plan
+# generation is never blocked and a crawl failure can never crash this loop.
+_PRICE_REFRESH_CHECK_INTERVAL = timedelta(hours=24)
+_PRICE_REFRESH_MIN_AGE_DAYS = 28
+_price_refresh_state: dict[str, datetime | None] = {"last_check": None}
+
+
+def _maybe_refresh_prices(settings, now: datetime | None = None) -> None:
+    """Once a day, trigger the cadence-aware Mercadona price refresh in a detached subprocess.
+
+    Best-effort maintenance: any failure is logged and swallowed so the job loop is unaffected.
+    The subprocess itself enforces the monthly cadence and the production activation gate.
+    """
+    now = now or _now()
+    if not getattr(settings, "mercadona_connector_enabled", False):
+        return
+    last = _price_refresh_state["last_check"]
+    if last is not None and (now - last) < _PRICE_REFRESH_CHECK_INTERVAL:
+        return
+    _price_refresh_state["last_check"] = now
+    try:
+        subprocess.Popen(
+            [
+                sys.executable, "-m", "cestaplan_api.jobs.sync_price_provider",
+                "--provider", "apify-mercadona", "--retailer", "mercadona",
+                "--production", "--min-age-days", str(_PRICE_REFRESH_MIN_AGE_DAYS),
+            ],
+            start_new_session=True,  # detached: survives a worker restart, never blocks the loop
+        )
+        logger.info("price refresh: triggered cadence-aware Mercadona sync subprocess")
+    except Exception:
+        logger.warning("price refresh: could not spawn sync subprocess", exc_info=True)
 
 
 def claim_job(
@@ -77,6 +118,7 @@ def run_worker(
         return bool(stop) and bool(getattr(stop, "is_set", lambda: False)())
 
     while not _should_stop():
+        _maybe_refresh_prices(settings)
         processed = _poll_once(worker_id)
         if processed:
             idle = 0

@@ -13,7 +13,7 @@ from cestaplan_api.services.provider_sync import SyncMode
 def _run_main(monkeypatch, argv: list[str]) -> SyncMode:
     captured: dict[str, SyncMode] = {}
 
-    def fake_run(provider_code, retailer_slug, mode, limit):
+    def fake_run(provider_code, retailer_slug, mode, limit, min_age_days=None):
         captured["mode"] = mode
         return 0
 

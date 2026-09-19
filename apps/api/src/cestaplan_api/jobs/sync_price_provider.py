@@ -12,18 +12,39 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.db import SessionLocal
 from cestaplan_api.ingestion.providers.contracts import ProductQuery
 from cestaplan_api.ingestion.providers.registry import registry
-from cestaplan_api.models import Retailer
+from cestaplan_api.models import CrawlRun, Retailer
 from cestaplan_api.services.provider_sync import SyncMode, run_provider_sync
 
 
-def run(provider_code: str, retailer_slug: str | None, mode: SyncMode, limit: int | None) -> int:
+def _last_price_crawl_age_days(db, retailer_id: int) -> float | None:
+    """Age (in days) of the most recent completed price crawl for the retailer, or None."""
+    last = db.execute(
+        select(func.max(CrawlRun.created_at)).where(
+            CrawlRun.retailer_id == retailer_id,
+            CrawlRun.run_type == "prices",
+            CrawlRun.status == "completed",
+        )
+    ).scalar()
+    if last is None:
+        return None
+    return (datetime.now(UTC) - last).total_seconds() / 86400.0
+
+
+def run(
+    provider_code: str,
+    retailer_slug: str | None,
+    mode: SyncMode,
+    limit: int | None,
+    min_age_days: float | None = None,
+) -> int:
     if not registry.has(provider_code):
         print(f"Proveedor desconocido: {provider_code!r} (conocidos: {registry.codes()})")
         return 1
@@ -35,6 +56,16 @@ def run(provider_code: str, retailer_slug: str | None, mode: SyncMode, limit: in
         if retailer is None:
             print(f"Retailer no encontrado: {slug!r}")
             return 1
+        # Cadence gate: skip the crawl entirely when a recent one already exists. Lets a daily
+        # trigger stay idempotent — it only actually crawls when the monthly refresh is due.
+        if min_age_days is not None:
+            age = _last_price_crawl_age_days(db, retailer.id)
+            if age is not None and age < min_age_days:
+                print(json.dumps({
+                    "skipped": True, "reason": "recent_crawl",
+                    "age_days": round(age, 1), "min_age_days": min_age_days,
+                }, ensure_ascii=False))
+                return 0
         report = run_provider_sync(
             db,
             provider,
@@ -64,6 +95,9 @@ def main() -> None:
     # production and the crawl quality is accepted. Never selected implicitly.
     parser.add_argument("--production", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    # Cadence gate for automated triggers: skip the crawl if the last completed one is younger
+    # than this many days (so a daily trigger only crawls when the monthly refresh is due).
+    parser.add_argument("--min-age-days", type=float, default=None)
     args = parser.parse_args()
     if args.production:
         mode = SyncMode.PRODUCTION
@@ -73,7 +107,7 @@ def main() -> None:
         mode = SyncMode.DRY_RUN
     else:
         mode = SyncMode.DRY_RUN  # safe default: never hit production implicitly
-    raise SystemExit(run(args.provider, args.retailer, mode, args.limit))
+    raise SystemExit(run(args.provider, args.retailer, mode, args.limit, args.min_age_days))
 
 
 if __name__ == "__main__":
