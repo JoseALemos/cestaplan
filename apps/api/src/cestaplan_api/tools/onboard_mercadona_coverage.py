@@ -63,9 +63,17 @@ MATCH_METHOD = "mercadona_catalog_curated"
 # (dairy desserts, smoothies, prepared dishes). Matched as substrings, term-aware (skipped when
 # genuinely part of the ingredient term). Complements onboard_dia_coverage._JUNK_STEMS.
 _EXTRA_JUNK: tuple[str, ...] = (
+    # dairy desserts / flavored / smoothies
     "smoothie", "petit", "danonino", "actimel", "yopro", "griego", "azucarad",
     "sabor", "bombon", "flan", "gelatina", "tarta", "bizcocho", "ensalada", "salteado",
     "wok", "pizza", "sandwich", "sándwich", "relleno", "gratinad", "empanadilla",
+    # prepared dishes / derivatives (a recipe wants the raw staple, not the ready meal)
+    "pastel", "bollo", "dulce", "helad", "arreglo", "guiso", "callos", "madrilena",
+    "chicle", "gragea", "caramelo", "infusion", "manzanilla",
+    # NON-FOOD: Mercadona droguería / cosmética (Deliplus etc.) never a cooking ingredient
+    "deliplus", "oxigenad", "afeitar", "mascarilla", "acondicionador", "enjuague",
+    "fragancia", "listerine", "color mask", "desodorante", "colutorio", "maquillaje",
+    "esmalte", "perfilad", "dentifric", "pasta de dientes", "bosque verde", "limpiahogar",
 )
 
 
