@@ -43,7 +43,11 @@ def run(provider_code: str, retailer_slug: str | None, mode: SyncMode, limit: in
             mode=mode,
             query=ProductQuery(max_products=limit),
         )
-        if mode is not SyncMode.DRY_RUN:
+        # A quarantined run wrote nothing (bad crawl never replaces good prices): roll back
+        # so an empty/aborted production run leaves the live catalogue untouched.
+        if mode is SyncMode.DRY_RUN or report.quarantined:
+            db.rollback()
+        else:
             db.commit()
     print(json.dumps(report.as_dict(), indent=2, ensure_ascii=False))
     return 0
@@ -55,9 +59,15 @@ def main() -> None:
     parser.add_argument("--retailer", default=None)  # defaults to the provider's own retailer
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--staging-import", action="store_true")
+    # Explicit, auditable production refresh. Still passes through the activation gate
+    # (guard_production_sync): it only writes when the provider is human-approved for
+    # production and the crawl quality is accepted. Never selected implicitly.
+    parser.add_argument("--production", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
-    if args.staging_import:
+    if args.production:
+        mode = SyncMode.PRODUCTION
+    elif args.staging_import:
         mode = SyncMode.STAGING
     elif args.dry_run:
         mode = SyncMode.DRY_RUN
