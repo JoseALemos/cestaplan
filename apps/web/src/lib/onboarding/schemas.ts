@@ -27,10 +27,12 @@ export const allergySeveritySchema = z.enum(["intolerance", "allergy", "anaphyla
 
 export const memberDietSchema = z.object({
   diet_type: z.string().trim().max(100).optional().or(z.literal("")),
-  // Optional nutrition target (kcal/day, protein g/day) — reference values the person enters
-  // themselves, never a prescribed default. Limits mirror the API's NutritionGoalIn.
+  // Optional nutrition target (per day) — reference values the person enters themselves,
+  // never a prescribed default. Limits mirror the API's NutritionGoalIn.
   energy_target_kcal: z.union([z.coerce.number().min(0).max(20000), z.literal("")]).optional(),
   protein_target_g: z.union([z.coerce.number().min(0).max(2000), z.literal("")]).optional(),
+  carb_target_g: z.union([z.coerce.number().min(0).max(2000), z.literal("")]).optional(),
+  fat_target_g: z.union([z.coerce.number().min(0).max(2000), z.literal("")]).optional(),
 });
 export type MemberDietFormValues = z.infer<typeof memberDietSchema>;
 
@@ -39,6 +41,8 @@ export type MemberDietFormValues = z.infer<typeof memberDietSchema>;
 export const memberNutritionGoalSchema = memberDietSchema.pick({
   energy_target_kcal: true,
   protein_target_g: true,
+  carb_target_g: true,
+  fat_target_g: true,
 });
 export type MemberNutritionGoalFormValues = z.infer<typeof memberNutritionGoalSchema>;
 
@@ -52,7 +56,7 @@ export const budgetSchema = z.object({
   currency: z.string().length(3),
   mode: z.enum(["strict", "flexible"]),
   marginPercent: z.coerce.number().min(0).max(50),
-  priority: z.enum(["waste", "price"]),
+  priority: z.enum(["waste", "price", "nutrition"]),
 });
 export type BudgetFormValues = z.infer<typeof budgetSchema>;
 

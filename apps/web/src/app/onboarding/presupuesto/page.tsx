@@ -68,10 +68,11 @@ export default function PresupuestoPage() {
           </div>
           <Select
             label="¿Qué priorizamos?"
-            hint="Más variedad: aprovecha el presupuesto para maximizar variedad y aprovechamiento. Menor precio: busca el plan más barato posible."
+            hint="Más variedad: aprovecha el presupuesto para maximizar variedad. Menor precio: el plan más barato posible. Mi objetivo nutricional: ajusta el plan a tus metas de kcal/macros (requiere haber fijado metas nutricionales)."
             options={[
               { value: "waste", label: "Más variedad (aprovecha el presupuesto)" },
               { value: "price", label: "Menor precio (lo más barato)" },
+              { value: "nutrition", label: "Mi objetivo nutricional (ajustar a mis metas)" },
             ]}
             {...register("priority")}
           />

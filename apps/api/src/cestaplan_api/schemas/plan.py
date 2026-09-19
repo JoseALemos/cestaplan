@@ -58,8 +58,10 @@ class GenerateRequest(BaseModel):
     end_date: date
     budget_amount: Decimal = Field(ge=0, le=1_000_000)
     # How to use the budget: "waste" (default) maximizes variety within the budget;
-    # "price" minimizes cost (the cheapest plan). Preserves current behavior by default.
-    priority: Literal["price", "waste"] = "waste"
+    # "price" minimizes cost (the cheapest plan); "nutrition" fits the household's
+    # per-day macro target within the budget (needs a nutrition goal to have any
+    # effect). Preserves current behavior by default.
+    priority: Literal["price", "waste", "nutrition"] = "waste"
     currency: str = Field(default="EUR", min_length=3, max_length=3)
     # The chain (retailer) whose prices this plan is costed against. Prices are aggregated
     # across ALL of the chain's stores (the specific store is irrelevant) and never mixed

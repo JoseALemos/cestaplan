@@ -8,9 +8,32 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import DietaryProfile, HouseholdMember
-from cestaplan_api.services.planning_context import build_plan_input
+from cestaplan_api.services.planning_context import (
+    _NUTRITION_PRIORITY_WEIGHT,
+    _weights_for_priority,
+    build_plan_input,
+)
+from cestaplan_engine.contracts import ScoringWeights
 
 from .factory import enqueue_plan, make_household
+
+
+def test_weights_for_priority_only_nutrition_deviates() -> None:
+    default = ScoringWeights().nutrition_deviation
+    assert _weights_for_priority("waste").nutrition_deviation == default
+    assert _weights_for_priority("price").nutrition_deviation == default
+    assert _weights_for_priority("nutrition").nutrition_deviation == _NUTRITION_PRIORITY_WEIGHT
+    assert default < _NUTRITION_PRIORITY_WEIGHT
+
+
+def test_nutrition_priority_propagates_to_plan_input(db_session: Session) -> None:
+    _user, household, member = make_household(db_session, allergen=None)
+    meal_plan, run, _job = enqueue_plan(
+        db_session, household, member, budget_priority="nutrition"
+    )
+    plan_input = build_plan_input(db_session, meal_plan, seed=run.seed)
+    assert plan_input.budget.priority == "nutrition"
+    assert plan_input.weights.nutrition_deviation == _NUTRITION_PRIORITY_WEIGHT
 
 
 def _owner_profile(db: Session, household_id: int) -> DietaryProfile:

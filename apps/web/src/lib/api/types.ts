@@ -493,7 +493,7 @@ export interface MealRequirementIn {
  * - "waste" (default): budget is an envelope — maximize variety and low waste within it.
  * - "price": minimize cost — the cheapest plan that still meets every constraint.
  */
-export type BudgetPriority = "waste" | "price";
+export type BudgetPriority = "waste" | "price" | "nutrition";
 
 export interface GenerateRequest {
   household_id: Uuid;

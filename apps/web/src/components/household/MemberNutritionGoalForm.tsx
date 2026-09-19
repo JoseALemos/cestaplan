@@ -38,11 +38,17 @@ export function MemberNutritionGoalForm({ householdId, member }: MemberNutrition
     values: {
       energy_target_kcal: member.profile?.energy_target_kcal ?? "",
       protein_target_g: member.profile?.protein_target_g ?? "",
+      carb_target_g: member.profile?.carb_target_g ?? "",
+      fat_target_g: member.profile?.fat_target_g ?? "",
     },
   });
 
   const onSubmit = handleSubmit(async (values) => {
-    const hasGoal = values.energy_target_kcal !== "" || values.protein_target_g !== "";
+    const hasGoal =
+      values.energy_target_kcal !== "" ||
+      values.protein_target_g !== "" ||
+      values.carb_target_g !== "" ||
+      values.fat_target_g !== "";
     try {
       await updateMember.mutateAsync({
         memberId: member.id,
@@ -51,8 +57,8 @@ export function MemberNutritionGoalForm({ householdId, member }: MemberNutrition
             ? {
                 energy_target_kcal: values.energy_target_kcal === "" ? null : values.energy_target_kcal,
                 protein_target_g: values.protein_target_g === "" ? null : values.protein_target_g,
-                carb_target_g: null,
-                fat_target_g: null,
+                carb_target_g: values.carb_target_g === "" ? null : values.carb_target_g,
+                fat_target_g: values.fat_target_g === "" ? null : values.fat_target_g,
               }
             : null,
         },
@@ -91,10 +97,29 @@ export function MemberNutritionGoalForm({ householdId, member }: MemberNutrition
           error={errors.protein_target_g?.message}
           {...register("protein_target_g")}
         />
+        <Input
+          label="Carbohidratos objetivo (g/día)"
+          type="number"
+          min={0}
+          max={2000}
+          placeholder="250"
+          error={errors.carb_target_g?.message}
+          {...register("carb_target_g")}
+        />
+        <Input
+          label="Grasa objetivo (g/día)"
+          type="number"
+          min={0}
+          max={2000}
+          placeholder="70"
+          error={errors.fat_target_g?.message}
+          {...register("fat_target_g")}
+        />
       </div>
       <p className="text-xs text-ink-muted">
         Orientativo. La referencia europea de ingesta es ~2.000 kcal/día para un adulto;
-        ajústalo a tu caso. No es consejo médico.
+        ajústalo a tu caso. Deja en blanco las macros que no quieras fijar. No es consejo médico.
+        Para que el plan se ajuste a estas metas, elige «Mi objetivo nutricional» al generarlo.
       </p>
       <Button
         type="submit"

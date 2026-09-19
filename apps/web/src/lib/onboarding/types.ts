@@ -53,7 +53,7 @@ export interface OnboardingStore {
 }
 
 export type BudgetMode = "strict" | "flexible";
-export type BudgetPriority = "waste" | "price";
+export type BudgetPriority = "waste" | "price" | "nutrition";
 
 export interface OnboardingBudget {
   amount: string;

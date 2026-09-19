@@ -98,7 +98,11 @@ class BudgetDTO(_Base):
     # variety + preference fit + low waste, and does NOT drive cost to the minimum.
     # "price": the household wants the cheapest plan, so cost re-enters the score as
     # an active minimization term (see optimizer._score).
-    priority: Literal["price", "waste"] = "waste"
+    # "nutrition": within the budget envelope, fit the household's per-day macro target
+    # (the service raises ``ScoringWeights.nutrition_deviation`` to the variety level so
+    # macros shape the plan). Cost stays an envelope, never minimized — you still stay
+    # under budget. Inert without a ``nutrition_target`` (nothing to fit -> like "waste").
+    priority: Literal["price", "waste", "nutrition"] = "waste"
 
 
 class PackageOptionDTO(_Base):

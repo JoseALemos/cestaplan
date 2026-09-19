@@ -51,6 +51,7 @@ from cestaplan_engine import (
     PackageOptionDTO,
     PantryItemDTO,
     PlanInput,
+    ScoringWeights,
 )
 
 
@@ -86,6 +87,7 @@ def build_plan_input(
         currency=meal_plan.currency,
         priority=meal_plan.budget_priority or "waste",  # type: ignore[arg-type]
     )
+    weights = _weights_for_priority(budget.priority)
 
     equipment = _build_equipment(db, household_id)
     catalog = _build_catalog(db, meal_plan.retailer_id)
@@ -128,9 +130,27 @@ def build_plan_input(
         favorites=_build_favorites(db, household_id),
         conversions=_build_conversions(db),
         nutrition_target=_build_nutrition_target(db, household_id),
+        weights=weights,
         seed=seed,
         as_of=effective_as_of,
     )
+
+
+# When the household picks the "nutrition" priority we raise the nutrition-fitting weight
+# to the variety driver's level (see ScoringWeights.repetition == 12): strong enough that
+# hitting the per-day macro target beats the secondary terms (time, waste, soft prefs, and
+# cost as an envelope), but co-equal with — never dominating — variety, so the plan still
+# spreads across distinct dishes instead of collapsing onto the single best-macro recipe.
+# Budget and allergen safety stay HARD (1e9 caps), unaffected by this term. Under any other
+# priority the default weight (1.2) keeps nutrition a gentle tie-breaker, unchanged.
+_NUTRITION_PRIORITY_WEIGHT = Decimal("12")
+
+
+def _weights_for_priority(priority: str) -> ScoringWeights:
+    """Score weights for the plan. Only "nutrition" priority deviates from the defaults."""
+    if priority == "nutrition":
+        return ScoringWeights(nutrition_deviation=_NUTRITION_PRIORITY_WEIGHT)
+    return ScoringWeights()
 
 
 # --------------------------------------------------------------------------- #

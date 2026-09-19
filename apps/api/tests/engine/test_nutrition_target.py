@@ -11,7 +11,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 from cestaplan_engine import generate_plan
-from cestaplan_engine.contracts import NutritionDTO, NutritionTargetDTO, PlanResult
+from cestaplan_engine.contracts import (
+    NutritionDTO,
+    NutritionTargetDTO,
+    PlanResult,
+    ScoringWeights,
+)
 
 from .builders import ingredient, member, package, plan_input, product, recipe, requirement
 
@@ -107,6 +112,72 @@ def test_nutrition_summary_present_and_correct_with_target():
     # A macro with no target reads as "unknown" with no target_per_day.
     assert summary.fat_g.status == "unknown"
     assert summary.fat_g.target_per_day is None
+
+
+# --- the "nutrition" priority: a strong nutrition weight overrides competing terms ------------
+# Same high/low-protein recipes, but now the low-protein recipe is FAR faster to cook (10 vs 60
+# min). Under the default nutrition weight (1.2) that big time edge makes the fast low-protein
+# plan win even with a protein target set; raising the weight to the variety level (12, the
+# "nutrition" priority) makes fitting the protein target win despite the time cost.
+_CHICKEN_SLOW = product(
+    "chicken_300",
+    "chicken",
+    [package("chicken_300", "300", "g", "3.00")],
+    category="meat",
+    nutrition=NutritionDTO(protein_g=Decimal("30"), kcal=Decimal("150")),
+)
+_RICE_FAST = product(
+    "rice_300",
+    "rice",
+    [package("rice_300", "300", "g", "1.50")],
+    category="grains",
+    nutrition=NutritionDTO(protein_g=Decimal("2"), kcal=Decimal("130")),
+)
+
+
+def _make_time_edge_input(weights: ScoringWeights | None):
+    highs = [
+        recipe(
+            f"high{i}", {"lunch"}, [ingredient("chicken", "300", "g")],
+            servings=2, prep=10, cook=60,
+        )
+        for i in range(_SLOTS)
+    ]
+    lows = [
+        recipe(
+            f"low{i}", {"lunch"}, [ingredient("rice", "300", "g")],
+            servings=2, prep=10, cook=10,
+        )
+        for i in range(_SLOTS)
+    ]
+    return plan_input(
+        members=[member("A")],
+        requirements=[requirement("lunch", _SLOTS, servings=2)],
+        catalog=[_CHICKEN_SLOW, _RICE_FAST],
+        candidates=[*highs, *lows],
+        budget_amount="100",
+        nutrition_target=NutritionTargetDTO(protein_g=Decimal("90")),
+        weights=weights,
+    )
+
+
+def test_nutrition_priority_weight_overrides_competing_terms():
+    # Default weight: the time edge wins, so the plan carries little protein.
+    default_plan = generate_plan(_make_time_edge_input(None))
+    # "nutrition" priority weight (== variety driver): the protein target wins instead.
+    priority_plan = generate_plan(
+        _make_time_edge_input(ScoringWeights(nutrition_deviation=Decimal("12")))
+    )
+    assert isinstance(default_plan, PlanResult)
+    assert isinstance(priority_plan, PlanResult)
+
+    # The boosted nutrition weight yields a strictly higher-protein plan.
+    assert _total_protein(priority_plan) > _total_protein(default_plan)
+
+    # Hard guarantees untouched: still within budget, still fully varied (no repeats).
+    assert priority_plan.cost_total.total <= Decimal("100")
+    ids = [m.recipe_id for m in priority_plan.planned_meals]
+    assert len(set(ids)) == len(ids) == _SLOTS
 
 
 def test_no_target_leaves_result_unchanged_and_reproducible():
