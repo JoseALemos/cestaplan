@@ -87,6 +87,13 @@ def _extra_junk_hit(name_norm: str, term_norm: str) -> str | None:
     return None
 
 
+# A package larger than this (in base g/ml/unit) is "bulk": a recipe using a small portion would
+# be forced to buy the whole bulk pack (the engine buys WHOLE packages), inflating the plan cost
+# (e.g. a 5 kg bag of oranges for one orange). Prefer a reasonably-sized pack when one exists;
+# fall back to bulk only if nothing smaller is available.
+_MAX_REASONABLE_BASE = Decimal("3000")
+
+
 def _variant_net_base(v: ProductVariant) -> Decimal | None:
     """Variant net content in its canonical base unit (g/ml/unit), or None if not usable."""
     if v.net_content_quantity is None or not v.net_content_unit:
@@ -108,8 +115,16 @@ class VScored:
 
     @property
     def sort_key(self) -> tuple[int, Decimal, int, int]:
+        # Tier: reasonably-sized pack first, then bulk, then no usable net content. Within a tier,
+        # cheapest per base unit, then the plainer (shorter) name, then stable id.
+        if self.net_base is None:
+            size_tier = 2
+        elif self.net_base <= _MAX_REASONABLE_BASE:
+            size_tier = 0
+        else:
+            size_tier = 1
         return (
-            0 if self.net_base is not None else 1,
+            size_tier,
             self.price if self.price is not None else Decimal("999999"),
             len(self.variant.display_name),
             self.variant.id,
@@ -283,13 +298,54 @@ def _resolve_names(db: Session, ingredients: str | None, file: Path | None) -> l
     ).scalars().all())
 
 
+def deactivate(db: Session, ingredient_names: Sequence[str]) -> dict[str, Any]:
+    """Deactivate this tool's curated mappings for the given ingredients (remediation).
+
+    Only touches rows created by this tool (``match_method == MATCH_METHOD``), never manual or
+    provider-onboarded mappings. Caller owns the commit.
+    """
+    retailer_id = db.execute(
+        select(Retailer.id).where(Retailer.slug == RETAILER_SLUG)
+    ).scalar_one()
+    result: dict[str, int] = {}
+    for raw in ingredient_names:
+        canonical = raw.strip()
+        if not canonical:
+            continue
+        ingredient = _match_ingredient(db, canonical)
+        if ingredient is None:
+            result[canonical] = -1  # unknown ingredient
+            continue
+        n = 0
+        rows = db.execute(
+            select(IngredientProductMapping).where(
+                IngredientProductMapping.ingredient_id == ingredient.id,
+                IngredientProductMapping.retailer_id == retailer_id,
+                IngredientProductMapping.match_method == MATCH_METHOD,
+                IngredientProductMapping.is_active.is_(True),
+            )
+        ).scalars().all()
+        for row in rows:
+            row.is_active = False
+            n += 1
+        result[canonical] = n
+    db.flush()
+    return result
+
+
 def run(
-    *, ingredients: str | None = None, file: Path | None = None, commit: bool = False
+    *, ingredients: str | None = None, file: Path | None = None,
+    commit: bool = False, deactivate_names: bool = False,
 ) -> dict[str, Any]:
     db = SessionLocal()
     try:
         names = _resolve_names(db, ingredients, file)
-        diff = onboard(db, names)
+        if deactivate_names:
+            deactivated = deactivate(db, names)
+            payload: dict[str, Any] = {"action": "deactivate", "deactivated": deactivated}
+        else:
+            diff = onboard(db, names)
+            payload = {"action": "onboard", "ingredient_count": len(names), "diff": diff.as_dict()}
         if commit:
             db.commit()
         else:
@@ -298,8 +354,7 @@ def run(
             "mode": "commit" if commit else "dry-run",
             "retailer": RETAILER_SLUG,
             "committed": commit,
-            "ingredient_count": len(names),
-            "diff": diff.as_dict(),
+            **payload,
         }
     finally:
         db.close()
@@ -311,11 +366,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--ingredients", help="comma-separated canonical_names")
     parser.add_argument("--file", type=Path, help="file with one canonical_name per line")
+    parser.add_argument(
+        "--deactivate", action="store_true",
+        help="deactivate this tool's curated mappings for the given ingredients (remediation)",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true", help="run + rollback (default)")
     group.add_argument("--commit", action="store_true", help="run + commit")
     args = parser.parse_args(argv)
-    result = run(ingredients=args.ingredients, file=args.file, commit=bool(args.commit))
+    result = run(
+        ingredients=args.ingredients, file=args.file,
+        commit=bool(args.commit), deactivate_names=bool(args.deactivate),
+    )
     json.dump(result, sys.stdout, indent=2, ensure_ascii=False, default=str)
     sys.stdout.write("\n")
     return 0

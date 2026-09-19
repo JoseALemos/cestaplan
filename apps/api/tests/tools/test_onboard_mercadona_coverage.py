@@ -56,6 +56,24 @@ def test_unmapped_variant_is_never_eligible() -> None:
     assert _choose("pan de molde", variants, {}) is None
 
 
+def test_reasonable_size_beats_bulk_even_if_cheaper_per_unit() -> None:
+    # A 1 L bottle must win over a 5 L bulk one (the engine buys whole packs, so bulk over-buys),
+    # even though the 5 L is cheaper per litre.
+    variants = [
+        _v(1, "Aceite de girasol Hacendado", "5", "l", pid=50),
+        _v(2, "Aceite de girasol Hacendado", "1", "l", pid=51),
+    ]
+    chosen = _choose("aceite de girasol", variants, {50: Decimal("8.60"), 51: Decimal("1.80")})
+    assert chosen is not None
+    assert chosen.variant.id == 2  # the 1 L, not the 5 L bulk
+
+
+def test_bulk_still_chosen_when_nothing_smaller_exists() -> None:
+    variants = [_v(1, "Naranjas", "5", "kg", pid=60)]
+    chosen = _choose("naranja", variants, {60: Decimal("6.25")})
+    assert chosen is not None and chosen.variant.id == 1  # bulk is better than no coverage
+
+
 def test_plain_packaged_staple_is_chosen() -> None:
     variants = [
         _v(1, "Pan de molde blanco Hacendado", "0.46", "kg", pid=40),
