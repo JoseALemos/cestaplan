@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { useCurrentHouseholdId } from "@/lib/household/current-household";
 import { MEAL_TYPE_ORDER } from "@/lib/domain/labels";
+import { useHouseholdQuery } from "@/lib/query/hooks/use-households";
 import { usePlanQuery, useRegeneratePlanMutation } from "@/lib/query/hooks/use-plans";
 import { formatDateLong } from "@/lib/utils/format";
 import type { PlannedMeal } from "@/lib/api/types";
@@ -12,6 +13,7 @@ import type { PlannedMeal } from "@/lib/api/types";
 import { MealCard } from "@/components/plan/MealCard";
 import { NutritionSummaryPanel } from "@/components/plan/NutritionSummaryPanel";
 import { PlanHeader } from "@/components/plan/PlanHeader";
+import { SavingsVsHabitual } from "@/components/plan/SavingsVsHabitual";
 import { Alert } from "@/components/ui/Alert";
 import { Card } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -42,6 +44,7 @@ export default function PlanPage() {
   const householdId = searchParams.get("householdId") ?? currentHouseholdId ?? "";
 
   const planQuery = usePlanQuery(mealPlanId);
+  const householdQuery = useHouseholdQuery(householdId);
   const regeneratePlanMutation = useRegeneratePlanMutation(mealPlanId);
 
   const goToEstado = (runId: string) => {
@@ -92,6 +95,11 @@ export default function PlanPage() {
           const accepted = await regeneratePlanMutation.mutateAsync();
           goToEstado(accepted.optimization_run_id);
         }}
+      />
+
+      <SavingsVsHabitual
+        plan={plan}
+        habitualWeeklySpend={householdQuery.data?.habitual_weekly_spend ?? null}
       />
 
       {plan.nutrition_summary ? (

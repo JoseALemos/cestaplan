@@ -46,6 +46,14 @@ export const memberNutritionGoalSchema = memberDietSchema.pick({
 });
 export type MemberNutritionGoalFormValues = z.infer<typeof memberNutritionGoalSchema>;
 
+/** Household-level "usual weekly grocery spend" (optional), reference for the savings estimate. */
+export const householdSpendSchema = z.object({
+  habitual_weekly_spend: z
+    .union([z.coerce.number().min(0).max(100000), z.literal("")])
+    .optional(),
+});
+export type HouseholdSpendFormValues = z.infer<typeof householdSpendSchema>;
+
 export const equipmentSchema = z.object({
   equipment: z.array(z.enum(EQUIPMENT_CODES)),
 });

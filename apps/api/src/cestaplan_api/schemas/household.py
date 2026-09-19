@@ -35,12 +35,15 @@ def _decimal_str(value: Decimal | None) -> str | None:
 class HouseholdCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     currency: str = Field(default="EUR", min_length=3, max_length=3)
+    # Gasto semanal habitual (opcional): referencia para estimar el ahorro del plan.
+    habitual_weekly_spend: Decimal | None = Field(default=None, ge=0, le=100000)
 
 
 class HouseholdResponse(BaseModel):
     id: uuid.UUID
     name: str
     currency: str
+    habitual_weekly_spend: str | None = None
     my_role: Role
     member_count: int
     created_at: datetime
@@ -58,6 +61,7 @@ class HouseholdResponse(BaseModel):
             id=household.public_id,
             name=household.name,
             currency=household.currency,
+            habitual_weekly_spend=_decimal_str(household.habitual_weekly_spend),
             my_role=my_role,  # type: ignore[arg-type]
             member_count=member_count,
             created_at=household.created_at,

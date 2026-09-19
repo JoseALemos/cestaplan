@@ -40,6 +40,41 @@ def test_create_and_list_household(client: TestClient) -> None:
     assert hh["id"] in ids
 
 
+def test_habitual_weekly_spend_roundtrips_on_create_and_update(client: TestClient) -> None:
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+
+    # Absent on create -> null (optional).
+    plain = _create_household(client, token, "Sin gasto")
+    assert plain["habitual_weekly_spend"] is None
+
+    # Provided on create -> echoed back as a money string.
+    hh = client.post(
+        "/api/v1/households",
+        json={"name": "Con gasto", "habitual_weekly_spend": "90.00"},
+        headers=csrf(token),
+    ).json()
+    assert hh["habitual_weekly_spend"] == "90.00"
+
+    # Owner can change it via PATCH.
+    updated = client.patch(
+        f"/api/v1/households/{hh['id']}",
+        json={"name": "Con gasto", "currency": "EUR", "habitual_weekly_spend": "75.50"},
+        headers=csrf(token),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["habitual_weekly_spend"] == "75.50"
+
+    # Negative is rejected by validation.
+    bad = client.post(
+        "/api/v1/households",
+        json={"name": "Malo", "habitual_weekly_spend": "-5"},
+        headers=csrf(token),
+    )
+    assert bad.status_code == 422
+
+
 def test_create_requires_csrf(client: TestClient) -> None:
     email = _email()
     register(client, email)

@@ -85,7 +85,12 @@ def create_household(
 ) -> HouseholdResponse:
     """Create a household; the caller becomes its owner and first member."""
     now = datetime.now(UTC)
-    household = Household(name=payload.name, owner_user_id=user.id, currency=payload.currency)
+    household = Household(
+        name=payload.name,
+        owner_user_id=user.id,
+        currency=payload.currency,
+        habitual_weekly_spend=payload.habitual_weekly_spend,
+    )
     db.add(household)
     db.flush()
 
@@ -140,9 +145,10 @@ def update_household(
     user: CurrentUser,
     db: DbSession,
 ) -> HouseholdResponse:
-    """Rename a household or change its currency (owner only)."""
+    """Rename a household or change its currency / habitual weekly spend (owner only)."""
     ctx.household.name = payload.name
     ctx.household.currency = payload.currency
+    ctx.household.habitual_weekly_spend = payload.habitual_weekly_spend
     record_audit(db, action="household.update", actor_user_id=user.id,
                  household_id=ctx.household.id, entity_type="household",
                  entity_public_id=ctx.household.public_id)

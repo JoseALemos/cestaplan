@@ -60,6 +60,8 @@ export type HouseholdRole = "owner" | "editor" | "viewer";
 export interface HouseholdCreate {
   name: string;
   currency?: string;
+  /** Declared usual weekly grocery spend (money string), for the "savings vs your usual" estimate. */
+  habitual_weekly_spend?: string | null;
 }
 
 /** Result of geocoding `address_text` server-side. `null` before any address has been saved. */
@@ -69,6 +71,7 @@ export interface HouseholdResponse {
   id: Uuid;
   name: string;
   currency: string;
+  habitual_weekly_spend: string | null;
   my_role: HouseholdRole;
   member_count: number;
   created_at: IsoDateTime;

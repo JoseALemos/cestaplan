@@ -10,6 +10,7 @@ import {
   listHouseholds,
   listMembers,
   putEquipment,
+  updateHousehold,
   updateHouseholdAddress,
   updateMember,
 } from "@/lib/api/endpoints";
@@ -40,6 +41,20 @@ export function useCreateHouseholdMutation() {
   return useMutation({
     mutationFn: (body: HouseholdCreate) => createHousehold(body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.households() }),
+  });
+}
+
+/** Updates the household's basic settings (name / currency / habitual weekly spend). Invalidates
+ * the household and every plan (the "savings vs your usual" estimate keys off the habitual spend). */
+export function useUpdateHouseholdMutation(householdId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: HouseholdCreate) => updateHousehold(householdId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.household(householdId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.households() });
+      void queryClient.invalidateQueries({ queryKey: ["plans"] });
+    },
   });
 }
 

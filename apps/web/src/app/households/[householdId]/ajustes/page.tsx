@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth/auth-context";
 import { useHouseholdQuery } from "@/lib/query/hooks/use-households";
 
 import { AddressForm } from "@/components/household/AddressForm";
+import { HabitualSpendForm } from "@/components/household/HabitualSpendForm";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -69,6 +70,19 @@ export default function HouseholdSettingsPage() {
         </CardHeader>
         <CardContent>
           <AddressForm householdId={householdId} household={householdQuery.data} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Gasto habitual</CardTitle>
+          <CardDescription>
+            Cuánto sueles gastar a la semana en la compra. Con esto estimamos cuánto ahorras
+            con cada plan frente a tu gasto de referencia. Es opcional y solo para ti.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <HabitualSpendForm householdId={householdId} household={householdQuery.data} />
         </CardContent>
       </Card>
     </div>

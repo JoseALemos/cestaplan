@@ -49,6 +49,10 @@ class Household(BaseModel):
     )
     default_store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("store.id"))
     currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="EUR")
+    # Gasto semanal habitual en la compra que declara el hogar (opcional). Referencia para estimar
+    # el ahorro del plan frente a lo que suele gastar. Dato aportado por el usuario, NO categoría
+    # especial (art. 9 RGPD); nullable = el hogar que no lo declara no ve la estimación.
+    habitual_weekly_spend: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Domicilio (FASE 2, coste de desplazamiento) — todos nullable: un hogar sin dirección
