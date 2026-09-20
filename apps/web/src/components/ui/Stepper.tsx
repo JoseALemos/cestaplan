@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+
 import { cn } from "@/lib/utils/cn";
 
 export interface StepperStep {
@@ -32,6 +36,19 @@ function CheckIcon() {
  */
 export function Stepper({ steps, currentStepId, className }: StepperProps) {
   const currentIndex = steps.findIndex((step) => step.id === currentStepId);
+  const currentRef = useRef<HTMLLIElement>(null);
+
+  // Keep the active step in view when the list overflows horizontally (mobile).
+  useEffect(() => {
+    const el = currentRef.current;
+    if (!el) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({
+      behavior: reduce ? "auto" : "smooth",
+      inline: "center",
+      block: "nearest",
+    });
+  }, [currentStepId]);
 
   return (
     <nav aria-label="Progreso del alta" className={cn("w-full", className)}>
@@ -41,7 +58,11 @@ export function Stepper({ steps, currentStepId, className }: StepperProps) {
           const isCurrent = index === currentIndex;
 
           return (
-            <li key={step.id} className="flex shrink-0 items-center gap-2">
+            <li
+              key={step.id}
+              ref={isCurrent ? currentRef : undefined}
+              className="flex shrink-0 items-center gap-2"
+            >
               <div
                 className={cn(
                   "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-xs font-semibold transition-colors duration-base",

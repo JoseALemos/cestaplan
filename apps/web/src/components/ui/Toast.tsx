@@ -63,7 +63,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div
         aria-live="polite"
         aria-atomic="true"
-        className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4 sm:items-end"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 px-4 sm:items-end"
+        style={{
+          paddingTop: "1rem",
+          // Clear the home indicator and sit above the cookie banner when it is showing.
+          paddingBottom:
+            "calc(1rem + env(safe-area-inset-bottom, 0px) + var(--cookie-notice-height, 0px))",
+        }}
       >
         {toasts.map((toast) => (
           <div

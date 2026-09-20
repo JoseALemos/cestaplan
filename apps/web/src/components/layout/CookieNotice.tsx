@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/Button";
 
@@ -48,11 +48,28 @@ function acceptCookieNotice(): void {
  */
 export function CookieNotice() {
   const accepted = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Publish the banner's height so bottom-anchored toasts can sit ABOVE it instead of
+  // overlapping. Cleared when the banner is gone so toasts drop back to the edge.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (accepted || !ref.current) {
+      root.style.setProperty("--cookie-notice-height", "0px");
+      return;
+    }
+    root.style.setProperty("--cookie-notice-height", `${ref.current.offsetHeight}px`);
+    return () => root.style.setProperty("--cookie-notice-height", "0px");
+  }, [accepted]);
 
   if (accepted) return null;
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-50 border-t border-border bg-surface px-4 py-4 shadow-lg sm:px-6">
+    <div
+      ref={ref}
+      className="fixed inset-x-0 bottom-0 z-50 border-t border-border bg-surface px-4 pt-4 shadow-lg sm:px-6"
+      style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom, 0px))" }}
+    >
       <div className="mx-auto flex max-w-6xl flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-ink-muted">
           Usamos únicamente cookies esenciales para el funcionamiento de CestaPlan (como
