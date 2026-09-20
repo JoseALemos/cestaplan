@@ -22,6 +22,7 @@ from cestaplan_api.models import (
     RecipeStep,
     Retailer,
     Store,
+    User,
 )
 
 from .conftest import login, register
@@ -242,3 +243,100 @@ def test_recipe_detail_unknown_404(db_session: Session) -> None:
     register(client, email)
     login(client, email)
     assert client.get(f"/api/v1/recipes/{uuid.uuid4()}").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Recipe browse (GET /recipes): curated public showcase
+# --------------------------------------------------------------------------- #
+def _make_public_recipe(
+    db_session: Session,
+    title: str,
+    *,
+    verification_status: str | None,
+    meal_types: list[str],
+) -> Recipe:
+    recipe = Recipe(
+        household_id=None,
+        origin="ai_generated" if verification_status else "seed",
+        is_public=True,
+        is_synthetic=False,
+        title=title,
+        description="showcase",
+        servings=2,
+        meal_types=meal_types,
+        verification_status=verification_status,
+    )
+    db_session.add(recipe)
+    db_session.flush()
+    return recipe
+
+
+def test_list_recipes_hides_pending_rejected_and_private(db_session: Session) -> None:
+    client = _catalog_client(db_session)
+    email = _email()
+    register(client, email)
+    login(client, email)
+
+    # Unique "ZZZ" prefix isolates these from the seed catalogue.
+    verified = _make_public_recipe(
+        db_session, "ZZZ Tortilla verificada", verification_status="verified",
+        meal_types=["lunch"],
+    )
+    seed_like = _make_public_recipe(
+        db_session, "ZZZ Guiso semilla", verification_status=None, meal_types=["dinner"],
+    )
+    _make_public_recipe(
+        db_session, "ZZZ Importada pendiente", verification_status="pending_review",
+        meal_types=["lunch"],
+    )
+    _make_public_recipe(
+        db_session, "ZZZ Rechazada", verification_status="rejected", meal_types=["lunch"],
+    )
+    # A private household recipe must never surface in the public showcase.
+    owner = db_session.execute(select(User).where(User.email == email)).scalar_one()
+    household = Household(name="Casa oculta", owner_user_id=owner.id, currency="EUR")
+    db_session.add(household)
+    db_session.flush()
+    private = _make_private_recipe(db_session, household.id)
+
+    resp = client.get("/api/v1/recipes", params={"search": "ZZZ"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    titles = {item["title"] for item in data["items"]}
+    assert titles == {verified.title, seed_like.title}
+    assert data["count"] == 2
+    assert private.title not in titles
+    # Summary shape: light fields only, no ingredients/steps.
+    sample = data["items"][0]
+    assert set(sample) >= {"id", "title", "servings", "meal_types", "preparation_minutes"}
+    assert "ingredients" not in sample and "steps" not in sample
+
+
+def test_list_recipes_meal_type_filter_and_validation(db_session: Session) -> None:
+    client = _catalog_client(db_session)
+    email = _email()
+    register(client, email)
+    login(client, email)
+
+    _make_public_recipe(
+        db_session, "ZZZ Desayuno único", verification_status="verified",
+        meal_types=["breakfast"],
+    )
+
+    only_breakfast = client.get(
+        "/api/v1/recipes", params={"search": "ZZZ Desayuno", "meal_type": "breakfast"}
+    ).json()
+    assert only_breakfast["count"] == 1
+
+    none_dinner = client.get(
+        "/api/v1/recipes", params={"search": "ZZZ Desayuno", "meal_type": "dinner"}
+    ).json()
+    assert none_dinner["count"] == 0
+
+    bad = client.get("/api/v1/recipes", params={"meal_type": "brunch"})
+    assert bad.status_code == 422
+
+
+def test_list_recipes_requires_auth(db_session: Session) -> None:
+    client = _catalog_client(db_session)
+    assert client.get("/api/v1/recipes").status_code == 401

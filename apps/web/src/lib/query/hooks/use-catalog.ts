@@ -5,6 +5,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   getRecipe,
   listPriceProviders,
+  listRecipes,
   listRetailers,
   listStorePrices,
   listStores,
@@ -60,6 +61,28 @@ export function useStorePricesQuery(
     enabled: Boolean(retailerId) && Boolean(storeId),
     retry: false,
     // Keep the previous page's rows visible while a new page/search fetches.
+    placeholderData: keepPreviousData,
+  });
+}
+
+export interface UseRecipesOptions {
+  search?: string;
+  mealType?: string;
+  page?: number;
+  size?: number;
+}
+
+/** Curated public recipe catalogue for the `/recetas` browse page. */
+export function useRecipesQuery({
+  search = "",
+  mealType = "",
+  page = 1,
+  size = 24,
+}: UseRecipesOptions = {}) {
+  return useQuery({
+    queryKey: queryKeys.recipes(search, mealType, page),
+    queryFn: () => listRecipes({ search, mealType, page, size }),
+    retry: false,
     placeholderData: keepPreviousData,
   });
 }

@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from cestaplan_api.deps import CurrentUser, DbSession
 from cestaplan_api.ingestion.providers.onboarding import RETAILER_MATRIX
@@ -502,6 +502,80 @@ def list_ingredients(
         }
         for ing in rows
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Recipe browse (curated public showcase)
+# --------------------------------------------------------------------------- #
+_RECIPE_MEAL_TYPES = ("breakfast", "lunch", "dinner", "snack")
+
+
+@router.get("/recipes")
+def list_recipes(
+    user: CurrentUser,
+    db: DbSession,
+    search: str | None = None,
+    meal_type: str | None = None,
+    page: int = Query(1, ge=1),
+    size: int = Query(24, ge=1, le=60),
+) -> dict[str, Any]:
+    """Browsable catalogue of curated recipes — for exploring before setting up a household.
+
+    Only *presentable* recipes are listed: public/synthetic, not deleted, and either
+    needing no review (seed) or already ``verified``. AI-estimated, pending-review imports
+    never surface here (they still resolve by direct link from a plan via
+    :func:`get_recipe`), so this showcase is deliberately narrower than recipe detail and
+    honours the "AI recipes are reviewed before being shown" rule.
+    """
+    filters = [
+        Recipe.deleted_at.is_(None),
+        or_(Recipe.is_public.is_(True), Recipe.is_synthetic.is_(True)),
+        or_(
+            Recipe.verification_status.is_(None),
+            Recipe.verification_status == "verified",
+        ),
+    ]
+    search = (search or "").strip()
+    if search:
+        filters.append(Recipe.title.ilike(f"%{search}%"))
+    meal_type = (meal_type or "").strip().lower()
+    if meal_type:
+        if meal_type not in _RECIPE_MEAL_TYPES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail="meal_type no válido"
+            )
+        filters.append(Recipe.meal_types.any(meal_type))
+
+    total = db.execute(
+        select(func.count()).select_from(Recipe).where(*filters)
+    ).scalar_one()
+    rows = (
+        db.execute(
+            select(Recipe)
+            .where(*filters)
+            .order_by(Recipe.title.asc(), Recipe.id.asc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+        .scalars()
+        .all()
+    )
+
+    items = [
+        {
+            "id": str(r.public_id),
+            "title": r.title,
+            "description": r.description,
+            "servings": r.servings,
+            "meal_types": list(r.meal_types or []),
+            "cuisine": r.cuisine,
+            "preference_tags": list(r.preference_tags or []),
+            "preparation_minutes": r.preparation_minutes,
+            "cooking_minutes": r.cooking_minutes,
+        }
+        for r in rows
+    ]
+    return {"page": page, "size": size, "count": total, "items": items}
 
 
 # --------------------------------------------------------------------------- #

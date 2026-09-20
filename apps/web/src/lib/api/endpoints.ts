@@ -56,6 +56,7 @@ import type {
   ProviderProductionApproval,
   Recipe,
   RecipeFeedbackListItem,
+  RecipeListResponse,
   RegisterRequest,
   Retailer,
   Store,
@@ -264,6 +265,24 @@ export function listStores(retailerId: Uuid): Promise<Store[]> {
 
 export function getRecipe(recipeId: Uuid): Promise<Recipe> {
   return apiFetch<Recipe>(`/api/v1/recipes/${recipeId}`);
+}
+
+export interface ListRecipesParams {
+  search?: string;
+  mealType?: string;
+  page?: number;
+  size?: number;
+}
+
+/** Curated public recipe catalogue — backs the `/recetas` browse page. */
+export function listRecipes(params: ListRecipesParams = {}): Promise<RecipeListResponse> {
+  const query = new URLSearchParams();
+  if (params.search) query.set("search", params.search);
+  if (params.mealType) query.set("meal_type", params.mealType);
+  if (params.page) query.set("page", String(params.page));
+  if (params.size) query.set("size", String(params.size));
+  const qs = query.toString();
+  return apiFetch<RecipeListResponse>(`/api/v1/recipes${qs ? `?${qs}` : ""}`);
 }
 
 export interface ListStorePricesParams {

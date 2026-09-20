@@ -465,6 +465,26 @@ export interface Recipe {
   nutrition: Record<string, string> | null;
 }
 
+/** Lightweight recipe row for the browse/showcase list (no ingredients/steps). */
+export interface RecipeSummary {
+  id: Uuid;
+  title: string;
+  description: string | null;
+  servings: number;
+  meal_types: string[];
+  cuisine: string | null;
+  preference_tags: string[];
+  preparation_minutes: number | null;
+  cooking_minutes: number | null;
+}
+
+export interface RecipeListResponse {
+  page: number;
+  size: number;
+  count: number;
+  items: RecipeSummary[];
+}
+
 // ---------------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------------
