@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     # Freshness thresholds for a stored price (hours) — used by coverage/health downstream.
     stale_price_hours: int = 24
     expired_price_hours: int = 48
+    # How old a price may be before a PLAN's costing treats it as expired (coverage -> stale).
+    # Tied to the crawl cadence (~monthly), NOT the stricter observation band above: a plan on
+    # month-old prices is still a fair estimate; only a clearly overdue refresh should warn.
+    plan_price_max_age_days: int = 45
     # Circuit breaker: open a domain after N consecutive failures, for this many minutes.
     connector_failure_threshold: int = 5
     connector_circuit_open_minutes: int = 30

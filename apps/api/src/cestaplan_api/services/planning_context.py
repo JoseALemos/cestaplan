@@ -17,7 +17,7 @@ Mapping notes (see the vertical-slice spec):
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -450,6 +450,7 @@ _PIECE_GRAMS: dict[str, float] = {
 
 def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductDTO]:
     latest = _latest_prices(db, retailer_id)
+    price_max_age_days = get_settings().plan_price_max_age_days
     rows = db.execute(
         select(IngredientProductMapping, Product)
         .join(Product, Product.id == IngredientProductMapping.product_id)
@@ -479,7 +480,7 @@ def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductD
             price = latest.get(product.id)
             if price is None:
                 continue
-            packages.append(_package_option(product, price))
+            packages.append(_package_option(product, price, price_max_age_days))
             nutr = product.nutrition
             if nutr is not None:
                 allergens |= set(nutr.allergens or [])
@@ -506,7 +507,17 @@ def _build_catalog(db: Session, retailer_id: int | None) -> list[CatalogProductD
     return catalog
 
 
-def _package_option(product: Product, price: ProductPrice) -> PackageOptionDTO:
+def _package_option(
+    product: Product, price: ProductPrice, price_max_age_days: int
+) -> PackageOptionDTO:
+    observed = price.observed_at.date() if price.observed_at else None
+    expires = price.expires_at.date() if price.expires_at else None
+    # Real prices carry no explicit expiry, so the engine (which only expires on
+    # ``expires_at``) would treat a months-old price as fresh forever. Derive an expiry
+    # from the observation date + the plan-price horizon so a stale catalogue surfaces as
+    # ``coverage_status="stale"`` — matching what the price pages already show by age.
+    if expires is None and observed is not None and price_max_age_days > 0:
+        expires = observed + timedelta(days=price_max_age_days)
     return PackageOptionDTO(
         product_id=str(product.id),
         package_quantity=price.package_quantity,
@@ -516,8 +527,8 @@ def _package_option(product: Product, price: ProductPrice) -> PackageOptionDTO:
         availability=price.availability or "unknown",  # type: ignore[arg-type]
         source_type=price.source_type,
         source_name=price.source_name,
-        observed_at=price.observed_at.date() if price.observed_at else None,
-        expires_at=price.expires_at.date() if price.expires_at else None,
+        observed_at=observed,
+        expires_at=expires,
         confidence_score=price.confidence_score,
         has_price=True,
     )
