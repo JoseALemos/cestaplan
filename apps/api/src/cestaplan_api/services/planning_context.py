@@ -34,12 +34,14 @@ from cestaplan_api.models import (
     PantryItem,
     Product,
     ProductPrice,
+    ProductVariant,
     RecipeFeedback,
 )
 from cestaplan_api.services.candidate_providers import (
     CandidateRequest,
     get_candidate_provider,
 )
+from cestaplan_api.services.recipe_costing import to_base
 from cestaplan_engine import (
     BudgetDTO,
     CatalogProductDTO,
@@ -366,17 +368,43 @@ def _build_conversions(db: Session) -> list[IngredientConversionDTO]:
                 canonical_name=name, from_unit="unidad", to_unit="g", factor=Decimal(str(grams))
             )
         )
-    # Volumen medio por PIEZA/envase (ml) de ingredientes líquidos que las recetas miden en ml
-    # pero cuyo producto se factura por "unidad"/envase (el motor puentea ml->unidad->unit).
-    for name, millilitres in _PIECE_ML.items():
+    # Data-driven bridge (ends the whack-a-mole): ANY active ingredient->product mapping whose
+    # product is billed per "unit"/pack but whose variant declares a real net content gets a
+    # unidad->g/ml conversion derived from that net content, so gram/ml recipes cost against it.
+    # Authoritative (real net content) and automatic for present + future mappings. The hardcoded
+    # _PIECE_GRAMS above takes PRECEDENCE (per-piece produce and net-content-less items).
+    _DIM_BASE = {"mass": "g", "volume": "ml"}
+    hardcoded = set(_PIECE_GRAMS)
+    bridged: set[str] = set()
+    net_rows = db.execute(
+        select(
+            Ingredient.canonical_name,
+            ProductVariant.net_content_quantity,
+            ProductVariant.net_content_unit,
+        )
+        .join(IngredientProductMapping, IngredientProductMapping.ingredient_id == Ingredient.id)
+        .join(ProductVariant, ProductVariant.id == IngredientProductMapping.product_variant_id)
+        .where(
+            IngredientProductMapping.is_active.is_(True),
+            ProductVariant.net_content_quantity.is_not(None),
+            ProductVariant.net_content_unit.is_not(None),
+        )
+    ).all()
+    for name, nq, nu in net_rows:
+        if name in hardcoded or name in bridged:
+            continue
+        based = to_base(nq, nu)
+        if based is None or based[0] <= 0:
+            continue
+        base_unit = _DIM_BASE.get(based[1])
+        if base_unit is None:  # counted net content carries no mass/volume bridge
+            continue
         conversions.append(
             IngredientConversionDTO(
-                canonical_name=name,
-                from_unit="unidad",
-                to_unit="ml",
-                factor=Decimal(str(millilitres)),
+                canonical_name=name, from_unit="unidad", to_unit=base_unit, factor=based[0]
             )
         )
+        bridged.add(name)
     return conversions
 
 
@@ -400,22 +428,23 @@ _PIECE_GRAMS: dict[str, float] = {
     "pepino": 300,
     "berenjena": 250,
     "puerro": 100,
-    # Añadidos 2026-09-19: recetas en g pero producto Mercadona facturado por "unidad"/envase.
-    # Peso = contenido neto real del envase mapeado donde existe (jamón 0,45 kg, miel 1 kg,
-    # judía 0,75 kg), convencional por pieza donde no (coliflor/champiñón/sardina); alcachofa
-    # cubre además el aviso pre-existente "unidad -> kg".
+    # Piezas/envases SIN contenido neto en el catálogo (el puente data-driven de abajo no los
+    # cubre): peso medio convencional por unidad para productos Mercadona facturados por "unidad".
+    # Los que SÍ declaran contenido neto (jamón, miel, nata, yogur, queso rallado, mejillones…)
+    # los cubre automáticamente _build_conversions con el contenido neto real.
     "coliflor": 600,
     "champiñón": 250,
-    "judía verde": 750,
     "sardina": 90,
-    "jamon_cocido": 450,
-    "miel": 1000,
-    "alcachofa": 120,
-}
-
-# Volumen medio por envase (ml) para líquidos medidos en ml cuyo producto se factura por "unidad".
-_PIECE_ML: dict[str, float] = {
-    "nata": 600,  # contenido neto del brik mapeado (0,6 l)
+    "boquerón": 90,
+    "conejo": 1000,
+    "guisantes": 400,
+    "morcilla": 200,
+    "pimiento verde": 150,
+    "queso manchego": 250,
+    "repollo": 1000,
+    "sepia": 300,
+    "trucha": 250,
+    "alcachofa": 120,  # producto en kg pero receta en "unidad" (una alcachofa ~120 g)
 }
 
 
