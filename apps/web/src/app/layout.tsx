@@ -69,11 +69,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="es" className={`${bricolageGrotesque.variable} ${figtree.variable}`}>
       <body className="flex min-h-screen flex-col">
+        <a href="#contenido" className="skip-link">
+          Saltar al contenido
+        </a>
         <Providers>
           <ToastProvider>
             <ServiceWorkerRegister />
             <SiteHeader />
-            <main className="flex-1">{children}</main>
+            <main id="contenido" tabIndex={-1} className="flex-1">
+              {children}
+            </main>
             <SiteFooter />
             <CookieNotice />
           </ToastProvider>

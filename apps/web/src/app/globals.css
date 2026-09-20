@@ -59,7 +59,9 @@
   --color-surface-raised: #ffffff;
   --color-ink: #211a29;
   --color-ink-muted: #5b5468;
-  --color-ink-faint: #948da3;
+  /* Faint text is still used for small captions/metadata, so it must clear WCAG AA
+     (>=4.5:1). #746c86 is ~4.75:1 on --color-bg while staying lighter than ink-muted. */
+  --color-ink-faint: #746c86;
   --color-border: #e4dfec;
   --color-border-strong: #cfc6df;
 
@@ -158,7 +160,7 @@
   --color-surface-raised: #ffffff;
   --color-ink: #211a29;
   --color-ink-muted: #5b5468;
-  --color-ink-faint: #948da3;
+  --color-ink-faint: #746c86;
   --color-border: #e4dfec;
   --color-border-strong: #cfc6df;
   --color-primary: #7a2e5c;
@@ -208,6 +210,12 @@
     border-radius: var(--radius-xs);
   }
 
+  /* The skip-link target is focused programmatically; a full-width outline around
+     the whole content region would be noise, so suppress it there only. */
+  main:focus {
+    outline: none;
+  }
+
   h1,
   h2,
   h3,
@@ -216,10 +224,43 @@
     font-weight: 600;
     color: var(--color-ink);
   }
+
+  /* Skip to content: hidden until keyboard focus, then a visible pill at top-left. */
+  .skip-link {
+    position: fixed;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 100;
+    transform: translateY(-150%);
+    padding: 0.625rem 1rem;
+    border-radius: var(--radius-sm);
+    background-color: var(--color-primary);
+    color: var(--color-primary-ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-md);
+    transition: transform var(--duration-fast) var(--ease-plan);
+  }
+
+  .skip-link:focus {
+    transform: translateY(0);
+  }
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+}
+
+/* Honor users who ask for less motion: neutralize animations and transitions but
+   keep functionality (no `display` changes here, only timing). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
