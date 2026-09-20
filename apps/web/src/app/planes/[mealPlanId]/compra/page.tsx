@@ -152,6 +152,12 @@ export default function GroceryListPage() {
             confirmados · {list.source_counts.estimated} estimados ·{" "}
             {list.source_counts.unavailable} sin precio
           </p>
+          {!isOnline ? (
+            <p className="rounded-md bg-bg-subtle px-3 py-2 text-xs text-ink-muted">
+              Sin conexión: mostrando la última lista guardada. Lo que marques se
+              sincronizará al reconectar.
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="primary" size="sm" onClick={handleShare}>
               Compartir

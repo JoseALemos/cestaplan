@@ -3,14 +3,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { addGroceryItem, getGroceryList, substituteGroceryItem } from "@/lib/api/endpoints";
+import { getListSnapshot, saveListSnapshot } from "@/lib/offline/grocery-db";
 import { queryKeys } from "@/lib/query/keys";
 import type { GroceryItemIn, SubstituteRequest, Uuid } from "@/lib/api/types";
 
 export function useGroceryListQuery(mealPlanId: string | null | undefined) {
   return useQuery({
     queryKey: queryKeys.groceryList(mealPlanId ?? ""),
-    queryFn: () => getGroceryList(mealPlanId as string),
+    queryFn: async () => {
+      const id = mealPlanId as string;
+      try {
+        const list = await getGroceryList(id);
+        // Cache the fresh list so the screen can open cold with no signal (in-store).
+        void saveListSnapshot(id, list);
+        return list;
+      } catch (err) {
+        // Offline / fetch failed: fall back to the last saved snapshot if we have one.
+        // The checklist overlay still shows the right bought state on top of it.
+        const cached = await getListSnapshot(id);
+        if (cached) return cached;
+        throw err;
+      }
+    },
     enabled: Boolean(mealPlanId),
+    // A snapshot fallback shouldn't be hammered with retries when offline.
+    retry: false,
   });
 }
 
