@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.db import SessionLocal
 from cestaplan_api.models import Recipe, RecipeIngredient, RecipeStep
+from cestaplan_api.services.equipment_normalize import normalize_equipment
 from cestaplan_api.services.importer import _match_ingredient
 
 # Marker recorded on every recipe so the provenance is unambiguously AI-estimated (not verified).
@@ -170,7 +171,9 @@ def _load_one(session: Session, spec: dict[str, Any], *, now: datetime, model_ma
         preference_tags=list(spec.get("preference_tags") or []) or None,
         preparation_minutes=spec.get("preparation_minutes"),
         cooking_minutes=spec.get("cooking_minutes"),
-        required_equipment=list(spec.get("required_equipment") or []) or None,
+        # Normalize free-text equipment (olla, sarten, horno…) to canonical codes so the
+        # engine's subset filter can actually match; utensils/unknowns impose no need.
+        required_equipment=normalize_equipment(spec.get("required_equipment")) or None,
         leftover_reuse=spec.get("leftover_reuse"),
         storage_instructions=spec.get("storage_instructions"),
         reheating_instructions=spec.get("reheating_instructions"),
