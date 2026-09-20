@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.db import SessionLocal
+from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.ingestion.providers.contracts import ProductQuery
 from cestaplan_api.ingestion.providers.registry import registry
 from cestaplan_api.models import CrawlRun, Retailer
@@ -76,11 +77,22 @@ def run(
         )
         # A quarantined run wrote nothing (bad crawl never replaces good prices): roll back
         # so an empty/aborted production run leaves the live catalogue untouched.
+        projected: int | None = None
         if mode is SyncMode.DRY_RUN or report.quarantined:
             db.rollback()
         else:
+            # A production refresh must reach the ENGINE's prices, not just the observation
+            # log: bridge the fresh observations into ProductPrice (the source the planner
+            # costs against) with the same projection the promotion/orchestration paths use.
+            # Without this the crawl updates coverage/freshness but plans keep costing against
+            # stale prices.
+            if mode is SyncMode.PRODUCTION:
+                projected = CurrentPriceService().project_current_prices(db, retailer.id)
             db.commit()
-    print(json.dumps(report.as_dict(), indent=2, ensure_ascii=False))
+    payload = report.as_dict()
+    if projected is not None:
+        payload["projected_product_prices"] = projected
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 
