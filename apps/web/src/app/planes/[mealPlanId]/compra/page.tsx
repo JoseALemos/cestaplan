@@ -8,7 +8,11 @@ import { useCurrentHouseholdId } from "@/lib/household/current-household";
 import { useGroceryListQuery } from "@/lib/query/hooks/use-grocery";
 import { useGroceryChecklistSync } from "@/lib/offline/use-grocery-checklist";
 import { useOnlineStatus } from "@/lib/offline/use-online-status";
-import { exportGroceryListAsCsv, exportGroceryListAsJson } from "@/lib/utils/export";
+import {
+  exportGroceryListAsCsv,
+  exportGroceryListAsJson,
+  groceryListToText,
+} from "@/lib/utils/export";
 import { formatMoney } from "@/lib/utils/format";
 import { formatCategoryLabel } from "@/lib/utils/shopping-format";
 import { queryKeys } from "@/lib/query/keys";
@@ -69,6 +73,37 @@ export default function GroceryListPage() {
 
   const list = listQuery.data;
 
+  // Share the list as text (the natural in-store gesture: send it to WhatsApp). Uses the
+  // Web Share sheet where available, else copies to the clipboard. No network, no public
+  // link — the text never leaves the device except where the user sends it.
+  const handleShare = async () => {
+    const text = groceryListToText(list);
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+      try {
+        await navigator.share({ title: "Lista de la compra · CestaPlan", text });
+        return;
+      } catch (err) {
+        // The user dismissed the share sheet — not an error; don't fall back or toast.
+        // (Some browsers throw a plain Error, not a DOMException, so match by name.)
+        if ((err as { name?: string } | null)?.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast({
+        title: "Lista copiada",
+        description: "Pégala donde quieras: WhatsApp, notas…",
+        tone: "success",
+      });
+    } catch {
+      showToast({
+        title: "No se pudo compartir",
+        description: "Copia la lista a mano o usa Exportar.",
+        tone: "error",
+      });
+    }
+  };
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-10 sm:px-6 print:px-0">
       <Card className="print:hidden">
@@ -118,6 +153,9 @@ export default function GroceryListPage() {
             {list.source_counts.unavailable} sin precio
           </p>
           <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="primary" size="sm" onClick={handleShare}>
+              Compartir
+            </Button>
             <Button type="button" variant="outline" size="sm" onClick={() => window.print()}>
               Imprimir
             </Button>

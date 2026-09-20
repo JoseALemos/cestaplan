@@ -1,5 +1,6 @@
 import type { GroceryList } from "@/lib/api/types";
-import { formatCategoryLabel } from "@/lib/utils/shopping-format";
+import { formatMoney } from "@/lib/utils/format";
+import { formatCategoryLabel, formatRequiredQuantity } from "@/lib/utils/shopping-format";
 
 function downloadBlob(content: string, filename: string, mimeType: string): void {
   const blob = new Blob([content], { type: mimeType });
@@ -11,6 +12,27 @@ function downloadBlob(content: string, filename: string, mimeType: string): void
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Plain-text rendering of the list, for sharing (WhatsApp/Notes) or the clipboard.
+ * Uses `*bold*` category headers (WhatsApp renders them) and ☑/☐ so a half-checked list
+ * shared mid-shop still reads correctly. No prices per line — just what to buy — with the
+ * total outlay at the foot. A non-breaking space keeps "500 g" from wrapping oddly.
+ */
+export function groceryListToText(list: GroceryList): string {
+  const lines: string[] = ["🛒 Lista de la compra — CestaPlan", ""];
+  for (const category of list.categories) {
+    lines.push(`*${formatCategoryLabel(category.category)}*`);
+    for (const item of category.items) {
+      const mark = item.is_checked ? "☑" : "☐";
+      const qty = formatRequiredQuantity(item.required_quantity, item.required_unit);
+      lines.push(`${mark} ${item.generic_name} — ${qty}`.replace(/ /g, " "));
+    }
+    lines.push("");
+  }
+  lines.push(`Desembolso estimado: ${formatMoney(list.purchase_outlay, list.currency)}`);
+  return lines.join("\n").trimEnd();
 }
 
 export function exportGroceryListAsJson(list: GroceryList): void {
