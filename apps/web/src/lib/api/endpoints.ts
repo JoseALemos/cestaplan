@@ -54,6 +54,8 @@ import type {
   ProviderPromotionResult,
   ProviderPromotionStatus,
   ProviderProductionApproval,
+  QuickStartAccepted,
+  QuickStartRequest,
   Recipe,
   RecipeFeedbackListItem,
   RecipeListResponse,
@@ -318,6 +320,11 @@ export function listPlans(householdId: Uuid): Promise<PlanSummary[]> {
 
 export function generatePlan(body: GenerateRequest): Promise<GeneratePlanAccepted> {
   return apiFetch<GeneratePlanAccepted>("/api/v1/plans/generate", { method: "POST", body });
+}
+
+/** One-tap first plan: creates a household with defaults and generates a real plan. */
+export function quickStartPlan(body: QuickStartRequest = {}): Promise<QuickStartAccepted> {
+  return apiFetch<QuickStartAccepted>("/api/v1/plans/quick-start", { method: "POST", body });
 }
 
 export function getRunStatus(

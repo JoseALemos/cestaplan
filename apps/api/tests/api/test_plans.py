@@ -11,7 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import get_db
-from cestaplan_api.models import Equipment, GenerationJob, Household, MealPlan
+from cestaplan_api.models import (
+    Equipment,
+    GenerationJob,
+    Household,
+    HouseholdMember,
+    MealPlan,
+    MealRequirement,
+)
 from cestaplan_worker.processor import process_job
 
 from .conftest import csrf, login, register
@@ -404,3 +411,73 @@ def test_list_plans_excludes_other_households(db_session: Session) -> None:
     resp = client.get(f"/api/v1/plans?household_id={hh_b['id']}")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# --------------------------------------------------------------------------- #
+# Quick-start: one-tap first plan for a new user
+# --------------------------------------------------------------------------- #
+def test_quick_start_creates_household_and_generates_real_plan(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+
+    # Bare body -> all defaults; a generous budget isolates orchestration+generation from
+    # whether the 90 EUR default is enough against the (synthetic) test prices.
+    resp = client.post(
+        "/api/v1/plans/quick-start",
+        json={"budget_amount": "500"},
+        headers=csrf(token),
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert set(body) == {
+        "household_id", "optimization_run_id", "meal_plan_id", "status", "status_url"
+    }
+    assert body["status_url"] == f"/api/v1/plans/runs/{body['optimization_run_id']}"
+
+    household = db_session.execute(
+        select(Household).where(Household.public_id == uuid.UUID(body["household_id"]))
+    ).scalar_one()
+    # Caller is the sole owner + eater; no extra members needed for a first plan.
+    members = db_session.execute(
+        select(HouseholdMember).where(HouseholdMember.household_id == household.id)
+    ).scalars().all()
+    assert len(members) == 1 and members[0].role == "owner" and members[0].is_eater
+    # A well-equipped kitchen is declared so the recipe pool is wide (all known codes).
+    equipment = db_session.execute(
+        select(Equipment).where(Equipment.household_id == household.id)
+    ).scalars().all()
+    assert len(equipment) == 11 and all(e.available for e in equipment)
+    # A week of lunches + dinners, cooked for the default 2 people.
+    plan = db_session.execute(
+        select(MealPlan).where(MealPlan.household_id == household.id)
+    ).scalar_one()
+    reqs = db_session.execute(
+        select(MealRequirement).where(MealRequirement.meal_plan_id == plan.id)
+    ).scalars().all()
+    assert {r.meal_type for r in reqs} == {"lunch", "dinner"}
+    assert all(r.requested_count == 7 and r.default_servings == 2 for r in reqs)
+    assert plan.budget_priority == "price"
+    assert plan.retailer_id is not None  # a chain was resolved
+
+    # The worker turns it into a real, ready plan (14 meals = 7 lunch + 7 dinner).
+    job = db_session.execute(
+        select(GenerationJob).order_by(GenerationJob.id.desc())
+    ).scalars().first()
+    assert job is not None
+    process_job(job, db_session)
+    assert client.get(body["status_url"]).json()["status"] == "completed"
+
+    result = client.get(f"/api/v1/plans/{body['meal_plan_id']}").json()
+    assert result["status"] == "ready"
+    assert len(result["planned_meals"]) == 14
+
+
+def test_quick_start_requires_csrf(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    login(client, email)
+    resp = client.post("/api/v1/plans/quick-start", json={})
+    assert resp.status_code == 403

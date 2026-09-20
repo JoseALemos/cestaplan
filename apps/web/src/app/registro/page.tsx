@@ -41,7 +41,9 @@ export default function RegistroPage() {
       // session + CSRF cookies are set before we head into onboarding.
       await loginMutation.mutateAsync({ email: values.email, password: values.password });
       await refetch();
-      router.push("/onboarding/hogar");
+      // Lead with the one-tap quick-start (a real plan in a minute); it links to the
+      // step-by-step wizard for anyone who prefers full control.
+      router.push("/empezar");
     } catch {
       // surfaced below
     }

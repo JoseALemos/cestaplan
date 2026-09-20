@@ -214,6 +214,58 @@ def resolve_plan_retailer(
     return retailer, store
 
 
+# Costable-unit vocabulary (mirrors routers.catalog, kept local to avoid a router<-service
+# import cycle): only mass/volume packages can be turned into a per-ingredient cost.
+_COSTABLE_UNITS = ("g", "kg", "mg", "ml", "l", "cl")
+
+
+def select_costable_retailer(db: Session) -> Retailer | None:
+    """Pick the best chain to cost a first (quick-start) plan against.
+
+    Prefers the active chain that prices the most ingredients in a costable unit from real
+    (non-synthetic) prices — Mercadona in production. Chains with no costable ingredients
+    sort last but remain a fallback, so a plan can still be generated on a sparse dataset.
+    Returns ``None`` only when there is no active chain at all.
+    """
+    counts = dict(
+        db.execute(
+            select(
+                ProductPrice.retailer_id,
+                func.count(func.distinct(IngredientProductMapping.ingredient_id)),
+            )
+            .join(Product, Product.id == ProductPrice.product_id)
+            .join(
+                IngredientProductMapping,
+                IngredientProductMapping.product_id == Product.id,
+            )
+            .where(
+                ProductPrice.is_synthetic.is_(False),
+                IngredientProductMapping.is_active.is_(True),
+                Product.deleted_at.is_(None),
+                func.lower(ProductPrice.package_unit).in_(_COSTABLE_UNITS),
+            )
+            .group_by(ProductPrice.retailer_id)
+        ).all()
+    )
+    # Any-price fallback: a chain with prices (even a synthetic demo like MercaEjemplo)
+    # beats an empty chain when no chain has real costable prices yet.
+    any_priced = {
+        rid
+        for (rid,) in db.execute(
+            select(ProductPrice.retailer_id).distinct()
+        ).all()
+    }
+    retailers = (
+        db.execute(select(Retailer).where(Retailer.is_active.is_(True))).scalars().all()
+    )
+    if not retailers:
+        return None
+    return max(
+        retailers,
+        key=lambda r: (counts.get(r.id, 0), 1 if r.id in any_priced else 0),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Create + enqueue
 # --------------------------------------------------------------------------- #

@@ -52,6 +52,21 @@ class MealRequirementIn(BaseModel):
         }
 
 
+class QuickStartRequest(BaseModel):
+    """One-tap first plan for a new user: sensible defaults, refine later.
+
+    Every field is optional, so a bare ``{}`` yields a full, REAL plan (not a mock). The
+    endpoint creates a new household (caller becomes owner), declares a well-equipped
+    kitchen and generates a week of lunches + dinners against the best-priced chain. The
+    user edits everything afterwards; nothing here is throwaway.
+    """
+
+    household_name: str = Field(default="Mi hogar", min_length=1, max_length=200)
+    people: int = Field(default=2, ge=1, le=50)
+    budget_amount: Decimal = Field(default=Decimal("90"), ge=0, le=1_000_000)
+    currency: str = Field(default="EUR", min_length=3, max_length=3)
+
+
 class GenerateRequest(BaseModel):
     household_id: uuid.UUID
     start_date: date

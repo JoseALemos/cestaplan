@@ -8,6 +8,8 @@ verifies household membership server-side (no IDOR); money is returned as string
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import get_args
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
@@ -22,16 +24,24 @@ from cestaplan_api.deps import (
     verify_csrf,
 )
 from cestaplan_api.models import (
+    Equipment,
     FavoriteRecipe,
     GroceryList,
     Household,
+    HouseholdMember,
     MealPlan,
     PlannedMeal,
     Recipe,
     RecipeFeedback,
     Retailer,
 )
-from cestaplan_api.schemas.plan import FeedbackRequest, FeedbackSentiment, GenerateRequest
+from cestaplan_api.schemas.household import KnownEquipment
+from cestaplan_api.schemas.plan import (
+    FeedbackRequest,
+    FeedbackSentiment,
+    GenerateRequest,
+    QuickStartRequest,
+)
 from cestaplan_api.security import plan_generation_rate_limiter
 from cestaplan_api.services.audit import record_audit
 from cestaplan_api.services.plan_comparison import compare_plan_with_travel
@@ -43,6 +53,7 @@ from cestaplan_api.services.plan_service import (
     resolve_plan,
     resolve_plan_retailer,
     resolve_run,
+    select_costable_retailer,
     serialize_plan,
     serialize_run,
 )
@@ -190,6 +201,110 @@ def generate_plan_endpoint(
         entity_public_id=meal_plan.public_id,
     )
     return {
+        "optimization_run_id": str(run.public_id),
+        "meal_plan_id": str(meal_plan.public_id),
+        "status": run.status,
+        "status_url": _status_url(run.public_id),
+    }
+
+
+# Quick-start defaults: a full week of lunches + dinners is the smallest set that still
+# reads as a real weekly plan. Priority "price" both showcases savings and minimizes the
+# chance of a budget-infeasible first plan (the engine picks the cheapest).
+_QUICK_START_DAYS = 7
+_QUICK_START_MEALS = ("lunch", "dinner")
+
+
+@router.post(
+    "/quick-start",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(verify_csrf),
+        Depends(rate_limit(plan_generation_rate_limiter)),
+    ],
+)
+def quick_start_endpoint(
+    payload: QuickStartRequest, user: CurrentUser, db: DbSession
+) -> dict:
+    """Create a household with sensible defaults and generate a REAL first plan (async).
+
+    A one-tap path for new users: a well-equipped kitchen, a week of lunches + dinners,
+    priced against the best-priced chain and minimizing cost. It is an ordinary household
+    the user edits afterwards — nothing here is a throwaway mock. Returns the same 202 body
+    as ``/generate`` plus the new ``household_id`` so the client can navigate.
+    """
+    now = datetime.now(UTC)
+    household = Household(
+        name=payload.household_name,
+        owner_user_id=user.id,
+        currency=payload.currency,
+    )
+    db.add(household)
+    db.flush()
+    db.add(
+        HouseholdMember(
+            household_id=household.id,
+            user_id=user.id,
+            role="owner",
+            display_name=user.display_name,
+            is_eater=True,
+            joined_at=now,
+        )
+    )
+    # Assume a well-equipped kitchen so the candidate pool is wide (the engine filters
+    # recipes by available equipment); the user narrows it later from the household.
+    for code in get_args(KnownEquipment):
+        db.add(
+            Equipment(household_id=household.id, equipment_code=code, available=True)
+        )
+    db.flush()
+
+    ctx = get_household_context(household.public_id, user, db)
+    check_generation_quota(db, household_id=ctx.household.id, user_id=user.id)
+
+    chain = select_costable_retailer(db)
+    if chain is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="No hay ninguna cadena disponible para generar un plan.",
+        )
+    retailer, store = resolve_plan_retailer(db, ctx.household, chain.public_id)
+
+    start = now.date()
+    end = start + timedelta(days=_QUICK_START_DAYS - 1)
+    requirements = [
+        {
+            "meal_type": meal,
+            "requested_count": _QUICK_START_DAYS,
+            "default_servings": payload.people,
+            "selected_dates": None,
+            "auto_distribute": True,
+            "preferred_days": None,
+            "maximum_preparation_minutes": None,
+            "requires_tupper": False,
+            "reheating_available": True,
+        }
+        for meal in _QUICK_START_MEALS
+    ]
+    meal_plan, run, _job = create_generation(
+        db,
+        ctx,
+        start_date=start,
+        end_date=end,
+        budget_amount=payload.budget_amount,
+        currency=payload.currency,
+        requirements=requirements,
+        retailer=retailer,
+        store=store,
+        budget_priority="price",
+    )
+    record_audit(
+        db, action="plan.quick_start", actor_user_id=user.id,
+        household_id=ctx.household.id, entity_type="meal_plan",
+        entity_public_id=meal_plan.public_id,
+    )
+    return {
+        "household_id": str(household.public_id),
         "optimization_run_id": str(run.public_id),
         "meal_plan_id": str(meal_plan.public_id),
         "status": run.status,

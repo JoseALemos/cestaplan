@@ -546,6 +546,19 @@ export interface GeneratePlanAccepted {
   status_url?: string;
 }
 
+/** One-tap first plan: all fields optional (sensible server defaults). */
+export interface QuickStartRequest {
+  household_name?: string;
+  people?: number;
+  budget_amount?: MoneyString;
+  currency?: string;
+}
+
+export interface QuickStartAccepted extends GeneratePlanAccepted {
+  household_id: Uuid;
+  status: string;
+}
+
 export type OptimizationRunStatus =
   | "queued"
   | "collecting_data"

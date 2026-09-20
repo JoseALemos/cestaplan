@@ -12,6 +12,7 @@ import {
   listFavorites,
   listPlans,
   listRecipeFeedback,
+  quickStartPlan,
   regenerateMeal,
   duplicatePlan,
   regeneratePlan,
@@ -19,12 +20,23 @@ import {
   unfavoriteRecipe,
 } from "@/lib/api/endpoints";
 import { queryKeys } from "@/lib/query/keys";
-import type { FeedbackRequest, FeedbackSentiment, GenerateRequest, Uuid } from "@/lib/api/types";
+import type {
+  FeedbackRequest,
+  FeedbackSentiment,
+  GenerateRequest,
+  QuickStartRequest,
+  Uuid,
+} from "@/lib/api/types";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function useGeneratePlanMutation() {
   return useMutation({ mutationFn: (body: GenerateRequest) => generatePlan(body) });
+}
+
+/** One-tap first plan: creates a household with defaults and enqueues generation. */
+export function useQuickStartMutation() {
+  return useMutation({ mutationFn: (body: QuickStartRequest) => quickStartPlan(body) });
 }
 
 /** Polls the optimization run with capped exponential backoff (1.5s → 8s), stopping once terminal. */
