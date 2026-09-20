@@ -19,10 +19,13 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings
 from cestaplan_api.db import get_db
-from cestaplan_api.models import Household, UsageLedger
+from cestaplan_api.models import Household, HouseholdMember, UsageLedger
 from cestaplan_api.routers import usage as usage_router
 from cestaplan_api.services import quota as quota_service
-from cestaplan_api.services.quota import check_generation_quota
+from cestaplan_api.services.quota import (
+    check_generation_quota,
+    check_generation_quota_for_new_household,
+)
 from tests.api.conftest import csrf, login, register
 from tests.worker.factory import enqueue_plan, make_household
 
@@ -96,6 +99,56 @@ def test_cloud_token_quota_blocks(db_session: Session) -> None:
         )
     assert exc.value.status_code == 429
     assert "tokens" in exc.value.detail
+
+
+def test_user_quota_counts_across_households_quick_start_bypass(db_session: Session) -> None:
+    """A per-household cap is dodged by minting a fresh household per call. The user-scoped
+    check counts across ALL the user's households, so quick-start cannot bypass it."""
+    from datetime import UTC, datetime
+
+    user, hh1, m1 = make_household(db_session, allergen=None)
+    enqueue_plan(db_session, hh1, m1, budget="500")  # run #1 for this user
+
+    # A second household owned by the SAME user, with its own generation.
+    hh2 = Household(name="Casa 2", owner_user_id=user.id, currency="EUR")
+    db_session.add(hh2)
+    db_session.flush()
+    m2 = HouseholdMember(
+        household_id=hh2.id, user_id=user.id, role="owner",
+        display_name="Alex", is_eater=True, joined_at=datetime.now(UTC),
+    )
+    db_session.add(m2)
+    db_session.flush()
+    enqueue_plan(db_session, hh2, m2, budget="500")  # run #2 for this user
+
+    # The per-household check on the fresh household would NOT bind (it has 1 run),
+    # which is exactly the bypass.
+    check_generation_quota(
+        db_session, household_id=hh2.id,
+        settings=_cloud_settings(cloud_monthly_generation_limit=2),
+    )
+    # The user-scoped check DOES bind (2 runs across the user's households >= 2).
+    with pytest.raises(HTTPException) as exc:
+        check_generation_quota_for_new_household(
+            db_session, user_id=user.id,
+            settings=_cloud_settings(cloud_monthly_generation_limit=2),
+        )
+    assert exc.value.status_code == 429
+    # Under the limit (2 < 3) -> allowed.
+    check_generation_quota_for_new_household(
+        db_session, user_id=user.id,
+        settings=_cloud_settings(cloud_monthly_generation_limit=3),
+    )
+
+
+def test_user_quota_self_hosted_never_limited(db_session: Session) -> None:
+    user, hh, m = make_household(db_session, allergen=None)
+    for _ in range(3):
+        enqueue_plan(db_session, hh, m, budget="500")
+    check_generation_quota_for_new_household(
+        db_session, user_id=user.id,
+        settings=Settings(deployment_mode="self_hosted", cloud_monthly_generation_limit=1),
+    )
 
 
 def test_self_hosted_never_limited(db_session: Session) -> None:

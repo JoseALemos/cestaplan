@@ -57,7 +57,10 @@ from cestaplan_api.services.plan_service import (
     serialize_plan,
     serialize_run,
 )
-from cestaplan_api.services.quota import check_generation_quota
+from cestaplan_api.services.quota import (
+    check_generation_quota,
+    check_generation_quota_for_new_household,
+)
 
 router = APIRouter(prefix="/api/v1/plans", tags=["plans"])
 
@@ -233,6 +236,11 @@ def quick_start_endpoint(
     the user edits afterwards — nothing here is a throwaway mock. Returns the same 202 body
     as ``/generate`` plus the new ``household_id`` so the client can navigate.
     """
+    # Quota FIRST (before creating anything): each call would otherwise mint a fresh
+    # household and dodge the per-household cap, so it is enforced across the user's
+    # households. No-op outside cloud mode.
+    check_generation_quota_for_new_household(db, user_id=user.id)
+
     now = datetime.now(UTC)
     household = Household(
         name=payload.household_name,
@@ -260,7 +268,6 @@ def quick_start_endpoint(
     db.flush()
 
     ctx = get_household_context(household.public_id, user, db)
-    check_generation_quota(db, household_id=ctx.household.id, user_id=user.id)
 
     chain = select_costable_retailer(db)
     if chain is None:
