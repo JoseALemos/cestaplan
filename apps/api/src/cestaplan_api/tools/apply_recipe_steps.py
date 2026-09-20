@@ -2,8 +2,8 @@
 
 Steps are drafted by AI and REVIEWED by a human before landing here; this tool only writes
 them. Input is a JSON object mapping a recipe ``public_id`` to an ordered list of step
-strings, committed at ``apps/api/data/recipes/generated_steps.json`` so the diff itself is
-the review record.
+strings, committed next to this tool at ``recipe_steps.json`` (under ``src/`` so it ships
+in the image) — the diff itself is the review record.
 
 SAFETY: a recipe that already has steps is skipped (never duplicate/overwrite existing
 content), and an unknown/mismatched id is reported, never silently ignored. Dry-run by
@@ -27,9 +27,9 @@ from sqlalchemy.orm import Session
 from cestaplan_api.db import SessionLocal
 from cestaplan_api.models import Recipe, RecipeStep
 
-_DEFAULT_PATH = (
-    Path(__file__).resolve().parents[2] / "data" / "recipes" / "generated_steps.json"
-)
+# Co-located with this tool under ``src/`` so it ships in the deployed image (the repo's
+# ``data/`` dir is NOT copied into the container — only ``src/``).
+_DEFAULT_PATH = Path(__file__).resolve().parent / "recipe_steps.json"
 
 
 def run(session: Session, *, path: Path, commit: bool) -> dict[str, object]:
