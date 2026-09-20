@@ -35,7 +35,11 @@ export function MealCard({
   const { showToast } = useToast();
   const [explanationOpen, setExplanationOpen] = useState(false);
   const feedbackLog = useFeedbackLog();
-  const currentStatus = feedbackLog.find((entry) => entry.recipeId === meal.recipe_id)?.status ?? null;
+  // The server is the source of truth for ♥ (localStorage is per-device); a local log
+  // entry is a recent optimistic action that overrides it until the plan refetches.
+  const logStatus = feedbackLog.find((entry) => entry.recipeId === meal.recipe_id)?.status ?? null;
+  const isFavorite = logStatus === "favorite" || (logStatus === null && meal.is_favorite === true);
+  const isRejected = logStatus === "rejected";
 
   const favoriteMutation = useFavoriteRecipeMutation(householdId);
   const feedbackMutation = useRecipeFeedbackMutation(householdId, mealPlanId);
@@ -47,7 +51,7 @@ export function MealCard({
   const hasPrice = imputable !== null && imputable !== "" && Number(imputable) > 0;
 
   const toggleFavorite = async () => {
-    const nextFavorited = currentStatus !== "favorite";
+    const nextFavorited = !isFavorite;
     try {
       await favoriteMutation.mutateAsync({ recipeId: meal.recipe_id, favorite: nextFavorited });
       setFeedbackStatus(meal.recipe_id, meal.title, householdId, nextFavorited ? "favorite" : null);
@@ -99,11 +103,11 @@ export function MealCard({
         <button
           type="button"
           onClick={toggleFavorite}
-          aria-pressed={currentStatus === "favorite"}
-          aria-label={currentStatus === "favorite" ? "Quitar de favoritos" : "Añadir a favoritos"}
+          aria-pressed={isFavorite}
+          aria-label={isFavorite ? "Quitar de favoritos" : "Añadir a favoritos"}
           className="shrink-0 rounded-full p-2 text-lg text-accent-strong transition-colors hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)]"
         >
-          {currentStatus === "favorite" ? "♥" : "♡"}
+          {isFavorite ? "♥" : "♡"}
         </button>
       </div>
 
@@ -147,9 +151,9 @@ export function MealCard({
           size="sm"
           loading={feedbackMutation.isPending}
           onClick={reject}
-          disabled={currentStatus === "rejected"}
+          disabled={isRejected}
         >
-          {currentStatus === "rejected" ? "Rechazada" : "No volver a mostrar"}
+          {isRejected ? "Rechazada" : "No volver a mostrar"}
         </Button>
       </div>
     </li>

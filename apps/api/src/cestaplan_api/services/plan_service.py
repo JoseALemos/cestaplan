@@ -828,6 +828,9 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
         .all()
     )
     recipe_public = _recipe_public_ids(db, [m.recipe_id for m in meals_db])
+    # Server-authoritative favourite state (the client's ♥ must not rely on localStorage,
+    # which is per-device). Computed once and reused by the personalization summary.
+    favorite_recipe_ids = _household_favorite_recipe_ids(db, meal_plan.household_id)
 
     planned: list[dict[str, Any]] = []
     for db_meal, dto in zip(meals_db, summary.get("planned_meals", []), strict=False):
@@ -844,6 +847,7 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
                 "nutrition": dto.get("nutrition"),
                 "nutrition_complete": dto.get("nutrition_complete"),
                 "explanation": dto.get("explanation"),
+                "is_favorite": db_meal.recipe_id in favorite_recipe_ids,
             }
         )
 
@@ -855,15 +859,31 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     base["budget_diff"] = summary.get("budget_diff")
     base["coverage"] = summary.get("coverage")
     base["nutrition_summary"] = summary.get("nutrition_summary")
-    base["personalization"] = _personalization_summary(db, meal_plan, meals_db)
+    base["personalization"] = _personalization_summary(
+        db, meal_plan, meals_db, favorite_recipe_ids
+    )
     base["warnings"] = summary.get("warnings", [])
     base["explanations"] = summary.get("explanations", [])
     base["grocery_summary"] = _grocery_summary(db, meal_plan)
     return base
 
 
+def _household_favorite_recipe_ids(db: Session, household_id: int) -> set[int]:
+    """Internal recipe ids the household has favourited (server-authoritative ♥ state)."""
+    return set(
+        db.execute(
+            select(FavoriteRecipe.recipe_id).where(
+                FavoriteRecipe.household_id == household_id
+            )
+        ).scalars().all()
+    )
+
+
 def _personalization_summary(
-    db: Session, meal_plan: MealPlan, meals_db: list[PlannedMeal]
+    db: Session,
+    meal_plan: MealPlan,
+    meals_db: list[PlannedMeal],
+    favorite_recipe_ids: set[int],
 ) -> dict[str, Any]:
     """What the plan did FOR this household — made visible (the engine already applied it).
 
@@ -873,13 +893,6 @@ def _personalization_summary(
     the plan, and the number of recipes the household has rejected (hidden from every plan).
     """
     household_id = meal_plan.household_id
-    favorite_recipe_ids = set(
-        db.execute(
-            select(FavoriteRecipe.recipe_id).where(
-                FavoriteRecipe.household_id == household_id
-            )
-        ).scalars().all()
-    )
     favorites_included = sum(1 for m in meals_db if m.recipe_id in favorite_recipe_ids)
 
     rejected_hidden = int(

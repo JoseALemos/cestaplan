@@ -680,6 +680,11 @@ def test_plan_exposes_personalization_summary(db_session: Session) -> None:
         headers=csrf(token),
     ).status_code in (200, 201)
 
-    after = client.get(f"/api/v1/plans/{meal_plan_id}").json()["personalization"]
-    assert after["favorites_included"] == 1
-    assert after["rejected_hidden"] == 1
+    after_plan = client.get(f"/api/v1/plans/{meal_plan_id}").json()
+    assert after_plan["personalization"]["favorites_included"] == 1
+    assert after_plan["personalization"]["rejected_hidden"] == 1
+    # Per-meal ♥ is server-authoritative (not localStorage): the favourited recipe's
+    # planned meal reports is_favorite; the other does not.
+    by_recipe = {m["recipe_id"]: m for m in after_plan["planned_meals"]}
+    assert by_recipe[fav_recipe]["is_favorite"] is True
+    assert by_recipe[rej_recipe]["is_favorite"] is False

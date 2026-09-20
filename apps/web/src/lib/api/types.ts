@@ -671,6 +671,8 @@ export interface PlannedMeal {
   nutrition: MealNutrition | null;
   nutrition_complete: boolean;
   explanation: string | null;
+  /** Server-authoritative ♥ state (this recipe is a household favourite). */
+  is_favorite?: boolean;
 }
 
 export interface MealPlanCoverage {
