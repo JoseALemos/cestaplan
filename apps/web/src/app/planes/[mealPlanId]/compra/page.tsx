@@ -205,6 +205,7 @@ export default function GroceryListPage() {
                 <GroceryItemRow
                   key={item.id}
                   item={item}
+                  mealPlanId={mealPlanId}
                   currency={list.currency}
                   checked={checklist.effectiveChecked(item.id, item.is_checked)}
                   onToggle={() => void checklist.toggle(item.id, item.is_checked)}

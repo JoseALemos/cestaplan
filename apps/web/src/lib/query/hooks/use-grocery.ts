@@ -2,7 +2,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { addGroceryItem, getGroceryList, substituteGroceryItem } from "@/lib/api/endpoints";
+import {
+  addGroceryItem,
+  getGroceryList,
+  searchGroceryProducts,
+  substituteGroceryItem,
+} from "@/lib/api/endpoints";
 import { getListSnapshot, saveListSnapshot } from "@/lib/offline/grocery-db";
 import { queryKeys } from "@/lib/query/keys";
 import type { GroceryItemIn, SubstituteRequest, Uuid } from "@/lib/api/types";
@@ -37,6 +42,17 @@ export function useAddGroceryItemMutation(mealPlanId: string) {
     mutationFn: (body: GroceryItemIn) => addGroceryItem(mealPlanId, body),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: queryKeys.groceryList(mealPlanId) }),
+  });
+}
+
+/** Live product search for the substitute picker; only runs for a query of >= 2 chars. */
+export function useProductSearchQuery(mealPlanId: string, search: string, enabled: boolean) {
+  const term = search.trim();
+  return useQuery({
+    queryKey: queryKeys.groceryProductSearch(mealPlanId, term),
+    queryFn: () => searchGroceryProducts(mealPlanId, term),
+    enabled: enabled && term.length >= 2,
+    retry: false,
   });
 }
 

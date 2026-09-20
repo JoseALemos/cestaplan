@@ -53,6 +53,7 @@ import type {
   PlanSummary,
   ProviderPromotionResult,
   ProviderPromotionStatus,
+  ProductSearchResponse,
   ProviderProductionApproval,
   QuickStartAccepted,
   QuickStartRequest,
@@ -446,6 +447,17 @@ export function substituteGroceryItem(
   return apiFetch(
     `/api/v1/plans/${mealPlanId}/grocery-list/items/${itemId}/substitute`,
     { method: "POST", body },
+  );
+}
+
+/** Search the plan's chain catalogue for a product to substitute into a line. */
+export function searchGroceryProducts(
+  mealPlanId: Uuid,
+  search: string,
+): Promise<ProductSearchResponse> {
+  const qs = new URLSearchParams({ search }).toString();
+  return apiFetch<ProductSearchResponse>(
+    `/api/v1/plans/${mealPlanId}/grocery-list/product-search?${qs}`,
   );
 }
 

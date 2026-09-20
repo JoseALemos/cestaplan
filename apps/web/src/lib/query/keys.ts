@@ -26,6 +26,8 @@ export const queryKeys = {
   feedback: (householdId: string, sentiment?: string) =>
     ["plans", "recipes", "feedback", householdId, sentiment ?? "all"] as const,
   groceryList: (mealPlanId: string) => ["plans", mealPlanId, "grocery-list"] as const,
+  groceryProductSearch: (mealPlanId: string, search: string) =>
+    ["plans", mealPlanId, "grocery-list", "product-search", search] as const,
   adminSources: () => ["admin", "sources"] as const,
   adminImports: () => ["admin", "imports"] as const,
   adminImport: (importId: string) => ["admin", "imports", importId] as const,

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,6 +19,8 @@ from cestaplan_api.models import (
     HouseholdMember,
     MealPlan,
     MealRequirement,
+    Product,
+    ProductPrice,
 )
 from cestaplan_worker.processor import process_job
 
@@ -481,3 +484,133 @@ def test_quick_start_requires_csrf(db_session: Session) -> None:
     login(client, email)
     resp = client.post("/api/v1/plans/quick-start", json={})
     assert resp.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Grocery product search + substitute (P3 slice 3)
+# --------------------------------------------------------------------------- #
+def _price_for_retailer(
+    db: Session, retailer_id: int, store_id: int | None, product: Product, amount: str
+) -> None:
+    now = datetime.now(UTC)
+    db.add(
+        ProductPrice(
+            retailer_id=retailer_id,
+            store_id=store_id,
+            product_id=product.id,
+            amount=Decimal(amount),
+            currency="EUR",
+            package_quantity=Decimal("500"),
+            package_unit="g",
+            source_type="demo",
+            source_name="MercaEjemplo demo",
+            observed_at=now,
+            imported_at=now,
+            confidence_score=Decimal("1.0"),
+        )
+    )
+    db.flush()
+
+
+def test_product_search_and_substitute_recosts(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh["id"])
+
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=2)).isoformat(),
+            "budget_amount": "300",
+            "requirements": [{"meal_type": "lunch", "requested_count": 2, "default_servings": 2}],
+        },
+        headers=csrf(token),
+    ).json()
+    meal_plan_id = gen["meal_plan_id"]
+    job = db_session.execute(
+        select(GenerationJob).order_by(GenerationJob.id.desc())
+    ).scalars().first()
+    assert job is not None
+    process_job(job, db_session)
+
+    plan = db_session.execute(
+        select(MealPlan).where(MealPlan.public_id == uuid.UUID(meal_plan_id))
+    ).scalar_one()
+    assert plan.retailer_id is not None
+
+    # A product priced FOR THE PLAN'S CHAIN — the only kind the picker should offer.
+    sub = Product(name="Sustituto ZZZ 500 g", is_synthetic=True)
+    db_session.add(sub)
+    db_session.flush()
+    _price_for_retailer(db_session, plan.retailer_id, plan.store_id, sub, "1.23")
+
+    # Search finds it; a blank query returns nothing (never dumps the catalogue).
+    found = client.get(
+        f"/api/v1/plans/{meal_plan_id}/grocery-list/product-search", params={"search": "ZZZ"}
+    ).json()
+    assert found["count"] >= 1
+    match = next(i for i in found["items"] if i["product_name"] == "Sustituto ZZZ 500 g")
+    assert Decimal(match["amount"]) == Decimal("1.23") and match["package_unit"] == "g"
+    empty = client.get(
+        f"/api/v1/plans/{meal_plan_id}/grocery-list/product-search", params={"search": ""}
+    ).json()
+    assert empty["count"] == 0
+
+    # Substitute the first grocery line with the found product -> it re-costs.
+    gl = client.get(f"/api/v1/plans/{meal_plan_id}/grocery-list").json()
+    item_id = gl["categories"][0]["items"][0]["id"]
+    resp = client.post(
+        f"/api/v1/plans/{meal_plan_id}/grocery-list/items/{item_id}/substitute",
+        json={"product_id": match["product_id"]},
+        headers=csrf(token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["product_id"] == match["product_id"]
+
+    after = client.get(f"/api/v1/plans/{meal_plan_id}/grocery-list").json()
+    line = next(
+        i for cat in after["categories"] for i in cat["items"] if i["id"] == item_id
+    )
+    assert line["product_name"] == "Sustituto ZZZ 500 g"
+    assert line["price_status"] == "known"
+
+    # State-mutating -> CSRF required.
+    assert client.post(
+        f"/api/v1/plans/{meal_plan_id}/grocery-list/items/{item_id}/substitute",
+        json={"product_id": match["product_id"]},
+    ).status_code == 403
+
+
+def test_product_search_requires_membership(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    owner = _email()
+    register(client, owner)
+    owner_token = login(client, owner)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(owner_token)).json()
+    _add_equipment(db_session, hh["id"])
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": start.isoformat(),
+            "budget_amount": "300",
+            "requirements": [{"meal_type": "lunch", "requested_count": 1, "default_servings": 2}],
+        },
+        headers=csrf(owner_token),
+    ).json()
+    other = _email()
+    register(client, other)
+    login(client, other)
+    resp = client.get(
+        f"/api/v1/plans/{gen['meal_plan_id']}/grocery-list/product-search",
+        params={"search": "tomate"},
+    )
+    assert resp.status_code == 404

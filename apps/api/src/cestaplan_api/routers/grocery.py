@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 
 from cestaplan_api.deps import CurrentUser, DbSession, verify_csrf
@@ -56,6 +56,22 @@ def _latest_price(db: DbSession, product_id: int) -> ProductPrice | None:
     ).scalars().first()
 
 
+def _latest_price_for_retailer(
+    db: DbSession, product_id: int, retailer_id: int | None
+) -> ProductPrice | None:
+    """Latest price for a product WITHIN one chain — prices are never mixed across chains."""
+    if retailer_id is None:
+        return None
+    return db.execute(
+        select(ProductPrice)
+        .where(
+            ProductPrice.product_id == product_id,
+            ProductPrice.retailer_id == retailer_id,
+        )
+        .order_by(ProductPrice.observed_at.desc(), ProductPrice.id.desc())
+    ).scalars().first()
+
+
 @router.get("/{meal_plan_id}/grocery-list")
 def get_grocery_list(
     meal_plan_id: uuid.UUID, user: CurrentUser, db: DbSession
@@ -63,6 +79,63 @@ def get_grocery_list(
     """Consolidated grocery list grouped by category."""
     meal_plan = resolve_plan(db, user.id, meal_plan_id)
     return serialize_grocery_list(db, meal_plan)
+
+
+@router.get("/{meal_plan_id}/grocery-list/product-search")
+def search_products(
+    meal_plan_id: uuid.UUID,
+    user: CurrentUser,
+    db: DbSession,
+    search: str = Query("", max_length=120),
+    limit: int = Query(20, ge=1, le=40),
+) -> dict:
+    """Search the plan's chain catalogue for a product to substitute into a line.
+
+    Scoped to the plan's retailer (prices are never mixed across chains), so every product
+    returned has a price that will actually re-cost the line — unlike the community
+    "Precios reales" (Open Prices) viewer, which is a separate source the planner never
+    uses. Returns nothing for a blank query (never dumps the whole catalogue).
+    """
+    meal_plan = resolve_plan(db, user.id, meal_plan_id)
+    term = search.strip()
+    if not term or meal_plan.retailer_id is None:
+        return {"items": [], "count": 0}
+
+    # Latest price per product within the plan's chain, matched by product name.
+    rows = list(
+        db.execute(
+            select(ProductPrice, Product)
+            .distinct(ProductPrice.product_id)
+            .join(Product, Product.id == ProductPrice.product_id)
+            .where(
+                ProductPrice.retailer_id == meal_plan.retailer_id,
+                Product.deleted_at.is_(None),
+                Product.name.ilike(f"%{term}%"),
+            )
+            .order_by(
+                ProductPrice.product_id,
+                ProductPrice.observed_at.desc(),
+                ProductPrice.id.desc(),
+            )
+        ).all()
+    )
+    rows.sort(key=lambda row: (row[1].name or "", row[1].id))
+    rows = rows[:limit]
+    items = [
+        {
+            "product_id": str(product.public_id),
+            "product_name": product.name,
+            "brand": product.brand,
+            "package_quantity": (
+                str(price.package_quantity) if price.package_quantity is not None else None
+            ),
+            "package_unit": price.package_unit,
+            "amount": str(price.amount) if price.amount is not None else None,
+            "currency": price.currency,
+        }
+        for price, product in rows
+    ]
+    return {"items": items, "count": len(items)}
 
 
 @router.post(
@@ -165,7 +238,9 @@ def substitute_item(
     if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
 
-    price = _latest_price(db, product.id)
+    # Price from the plan's chain only (never mix chains). The picker only offers
+    # products priced for this chain, so a real substitution always finds a price.
+    price = _latest_price_for_retailer(db, product.id, meal_plan.retailer_id)
     item.product_id = product.id
     if price is not None:
         item.unit_price = price.unit_price

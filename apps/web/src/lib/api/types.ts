@@ -878,6 +878,22 @@ export interface SubstituteRequest {
   product_id: Uuid;
 }
 
+/** A candidate product from the plan's chain catalogue, for the substitute picker. */
+export interface ProductSearchItem {
+  product_id: Uuid;
+  product_name: string;
+  brand: string | null;
+  package_quantity: string | null;
+  package_unit: string | null;
+  amount: MoneyString | null;
+  currency: string;
+}
+
+export interface ProductSearchResponse {
+  items: ProductSearchItem[];
+  count: number;
+}
+
 // ---------------------------------------------------------------------------
 // Multi-chain price comparison — `GET /plans/{id}/comparison`. Costs are the
 // PURCHASE basket (whole packages, empty pantry): bigger pack formats can look

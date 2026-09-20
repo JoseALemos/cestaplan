@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { formatQuantity } from "@/lib/utils/format";
+import { formatMoney, formatQuantity } from "@/lib/utils/format";
 import {
   formatNormalizedUnitPrice,
   formatPackagePrice,
@@ -10,6 +10,7 @@ import {
   formatRequiredQuantity,
   formatSourceLabel,
 } from "@/lib/utils/shopping-format";
+import { useProductSearchQuery } from "@/lib/query/hooks/use-grocery";
 import type { GroceryItem, PriceSourceKind } from "@/lib/api/types";
 
 import { Badge } from "@/components/ui/Badge";
@@ -19,6 +20,7 @@ import { cn } from "@/lib/utils/cn";
 
 export interface GroceryItemRowProps {
   item: GroceryItem;
+  mealPlanId: string;
   currency: string;
   checked: boolean;
   onToggle: () => void;
@@ -51,6 +53,7 @@ const SOURCE_KIND_SHORT: Record<PriceSourceKind, string> = {
 
 export function GroceryItemRow({
   item,
+  mealPlanId,
   currency,
   checked,
   onToggle,
@@ -58,7 +61,23 @@ export function GroceryItemRow({
   substituting,
 }: GroceryItemRowProps) {
   const [substituteOpen, setSubstituteOpen] = useState(false);
-  const [productId, setProductId] = useState("");
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+
+  // Debounce the query so we don't hit the catalogue on every keystroke.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebounced(search.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [search]);
+
+  const searchQuery = useProductSearchQuery(mealPlanId, debounced, substituteOpen);
+  const results = searchQuery.data?.items ?? [];
+
+  const closeSubstitute = () => {
+    setSubstituteOpen(false);
+    setSearch("");
+    setDebounced("");
+  };
 
   return (
     <li className={cn("rounded-md border border-border p-4", checked && "bg-bg-subtle")}>
@@ -126,29 +145,60 @@ export function GroceryItemRow({
 
           <div className="mt-2">
             {substituteOpen ? (
-              <form
-                className="flex items-end gap-2"
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  if (!productId.trim()) return;
-                  await onSubstitute(productId.trim());
-                  setProductId("");
-                  setSubstituteOpen(false);
-                }}
-              >
+              <div className="flex flex-col gap-2">
                 <Input
-                  label="ID del producto sustituto"
-                  value={productId}
-                  onChange={(event) => setProductId(event.target.value)}
-                  className="w-56"
+                  label="Buscar producto sustituto"
+                  placeholder="p. ej. tomate frito, garbanzos…"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  autoFocus
                 />
-                <Button type="submit" size="sm" loading={substituting}>
-                  Sustituir
-                </Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => setSubstituteOpen(false)}>
-                  Cancelar
-                </Button>
-              </form>
+                {searchQuery.isError ? (
+                  <p className="text-xs text-error">No se pudo buscar. Inténtalo de nuevo.</p>
+                ) : searchQuery.isFetching ? (
+                  <p className="text-xs text-ink-faint">Buscando…</p>
+                ) : debounced.length >= 2 && results.length === 0 ? (
+                  <p className="text-xs text-ink-muted">Sin resultados para «{debounced}».</p>
+                ) : debounced.length < 2 ? (
+                  <p className="text-xs text-ink-faint">Escribe al menos 2 letras.</p>
+                ) : null}
+
+                {results.length > 0 ? (
+                  <ul className="flex max-h-56 flex-col gap-1 overflow-y-auto">
+                    {results.map((product) => (
+                      <li key={product.product_id}>
+                        <button
+                          type="button"
+                          disabled={substituting}
+                          onClick={async () => {
+                            await onSubstitute(product.product_id);
+                            closeSubstitute();
+                          }}
+                          className="flex w-full items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-left transition-colors hover:border-primary hover:bg-bg-subtle disabled:opacity-50"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm text-ink">{product.product_name}</span>
+                            {product.brand ? (
+                              <span className="block truncate text-xs text-ink-faint">{product.brand}</span>
+                            ) : null}
+                          </span>
+                          {product.amount ? (
+                            <span className="shrink-0 text-sm text-ink-muted">
+                              {formatMoney(product.amount, product.currency)}
+                            </span>
+                          ) : null}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                <div>
+                  <Button type="button" size="sm" variant="ghost" onClick={closeSubstitute}>
+                    Cancelar
+                  </Button>
+                </div>
+              </div>
             ) : (
               <Button type="button" size="sm" variant="ghost" onClick={() => setSubstituteOpen(true)}>
                 Sustituir producto
