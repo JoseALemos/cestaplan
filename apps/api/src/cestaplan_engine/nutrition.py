@@ -25,14 +25,17 @@ class NutritionCalculator:
         self._matcher = matcher
         self._converter = converter
 
-    def for_meal(self, meal: MealAssignment) -> tuple[NutritionDTO | None, bool]:
-        """Return ``(nutrition, complete)`` for one meal."""
-        recipe = meal.recipe
-        scale = Decimal(meal.servings) / Decimal(recipe.servings)
-        totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
+    def _accumulate(
+        self, recipe, scale: Decimal, totals: dict[str, Decimal]
+    ) -> tuple[bool, bool]:
+        """Add ``recipe``'s nutrition at ``scale`` into ``totals``.
+
+        Returns ``(complete, contributed)``: ``complete`` is ``False`` if any macro
+        or ingredient could not be resolved; ``contributed`` is ``True`` if at least
+        one ingredient added nutrition.
+        """
         complete = True
         contributed = False
-
         for ing in recipe.ingredients:
             product = self._matcher.match_ingredient(ing)
             if product is None or product.nutrition is None:
@@ -54,7 +57,14 @@ class NutritionCalculator:
                     continue
                 totals[macro] += value * factor
             contributed = True
+        return complete, contributed
 
+    def for_meal(self, meal: MealAssignment) -> tuple[NutritionDTO | None, bool]:
+        """Return ``(nutrition, complete)`` for one meal's full cooked batch."""
+        recipe = meal.recipe
+        scale = Decimal(meal.servings) / Decimal(recipe.servings)
+        totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
+        complete, contributed = self._accumulate(recipe, scale, totals)
         if not contributed:
             return None, False
         return (
@@ -67,25 +77,30 @@ class NutritionCalculator:
             complete,
         )
 
-    def for_meals(
+    def for_meals_per_serving(
         self, meals: list[MealAssignment]
     ) -> tuple[dict[str, Decimal], bool]:
-        """Sum each macro across a set of meals (the plan's total nutrition).
+        """Sum each macro across meals counting ONE standard serving per meal.
+
+        Batch-size independent: a meal cooked in 4 servings contributes the same as
+        one cooked in 2, because nutrition targets are compared against the number of
+        eaters (``comensales``), not how many portions are batch-cooked for leftovers.
+        The caller scales this per-serving total by the household's eater weight.
 
         Returns ``(totals, complete)`` where ``complete`` is ``True`` only if every
-        meal's nutrition could be fully computed. Reuses :meth:`for_meal` so the
-        per-meal and plan-level numbers stay consistent.
+        meal's nutrition could be fully computed.
         """
         totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
         complete = True
         for meal in meals:
-            nutrition, meal_complete = self.for_meal(meal)
+            scale = Decimal("1") / Decimal(meal.recipe.servings)
+            meal_totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
+            meal_complete, contributed = self._accumulate(
+                meal.recipe, scale, meal_totals
+            )
             if not meal_complete:
                 complete = False
-            if nutrition is None:
-                continue
-            for macro in _MACROS:
-                value = getattr(nutrition, macro)
-                if value is not None:
-                    totals[macro] += value
+            if contributed:
+                for macro in _MACROS:
+                    totals[macro] += meal_totals[macro]
         return totals, complete

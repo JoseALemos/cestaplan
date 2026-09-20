@@ -112,6 +112,7 @@ def generate_plan(plan_input: PlanInput) -> PlanResult | InfeasibleResult:
 
     nutrition_calc = NutritionCalculator(matcher, converter)
     num_days = len({slot.date for slot in slots})
+    comensal_weight = _comensal_weight(plan_input)
 
     optimizer = PlanOptimizer(
         provisioner=provisioner,
@@ -124,6 +125,7 @@ def generate_plan(plan_input: PlanInput) -> PlanResult | InfeasibleResult:
         nutrition_target=plan_input.nutrition_target,
         nutrition_calc=nutrition_calc,
         num_days=num_days,
+        comensal_weight=comensal_weight,
     )
     outcome = optimizer.optimize(slots, feasible)
 
@@ -217,8 +219,6 @@ def _build_result(
     planned: list[PlannedMealDTO] = []
     cost_per_day: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     prev_total = Decimal("0")
-    nutrition_totals: dict[str, Decimal] = {m: Decimal("0") for m in _MACROS}
-    nutrition_all_complete = True
 
     for i, meal in enumerate(meals):
         step_prov = provisioner.provision(meals[: i + 1])
@@ -227,13 +227,6 @@ def _build_result(
 
         imputable = prov.imputable_by_meal.get(meal.slot_index, Decimal("0"))
         nutrition, complete = nutrition_calc.for_meal(meal)
-        if not complete:
-            nutrition_all_complete = False
-        if nutrition is not None:
-            for macro in _MACROS:
-                value = getattr(nutrition, macro)
-                if value is not None:
-                    nutrition_totals[macro] += value
         explanation = explain_meal(meal, plan_input.favorites, plan_input.budget, imputable)
         explainer_meals.append(explanation)
 
@@ -269,11 +262,15 @@ def _build_result(
     )
 
     num_days = len({slot.date for slot in slots}) or 1
+    # Nutrition is compared against comensales, not batch size: sum one serving per
+    # meal, then scale by the household's eater weight.
+    per_serving_totals, nutrition_complete = nutrition_calc.for_meals_per_serving(meals)
     nutrition_summary = _build_nutrition_summary(
         plan_input.nutrition_target,
-        nutrition_totals,
-        nutrition_all_complete,
+        per_serving_totals,
+        nutrition_complete,
         num_days,
+        _comensal_weight(plan_input),
     )
 
     return PlanResult(
@@ -296,19 +293,36 @@ def _build_result(
 _NUTRITION_TOLERANCE = Decimal("0.05")
 
 
+def _comensal_weight(plan_input: PlanInput) -> Decimal:
+    """Household eater weight: sum of members' ``relative_serving`` (>= 1).
+
+    Nutrition targets aggregate per-person goals scaled by ``relative_serving``, so the
+    plan's actual nutrition must be scaled by the same weight to compare like with like,
+    independent of how many portions each meal is batch-cooked in.
+    """
+    total = sum((m.relative_serving for m in plan_input.members), Decimal("0"))
+    return total if total > 0 else Decimal("1")
+
+
 def _build_nutrition_summary(
     target: NutritionTargetDTO | None,
-    totals: dict[str, Decimal],
+    per_serving_totals: dict[str, Decimal],
     complete: bool,
     num_days: int,
+    comensal_weight: Decimal,
 ) -> NutritionSummaryDTO | None:
-    """Per-day actual vs target for each macro. ``None`` when no target is set."""
+    """Per-day actual vs target for each macro. ``None`` when no target is set.
+
+    ``per_serving_totals`` holds one standard serving per meal; scaling by
+    ``comensal_weight`` (the number of eaters) gives the household's per-day intake,
+    which is what the target represents — batch size no longer distorts the result.
+    """
     if target is None:
         return None
     days = Decimal(num_days)
     macros: dict[str, MacroSummaryDTO] = {}
     for macro in _MACROS:
-        actual_per_day = totals[macro] / days
+        actual_per_day = per_serving_totals[macro] * comensal_weight / days
         goal = getattr(target, macro)
         if goal is None or goal <= 0:
             macros[macro] = MacroSummaryDTO(

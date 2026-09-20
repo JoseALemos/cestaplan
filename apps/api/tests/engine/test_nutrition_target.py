@@ -102,8 +102,10 @@ def test_nutrition_summary_present_and_correct_with_target():
     protein = summary.protein_g
     assert protein.target_per_day == Decimal("90")
     assert protein.actual_per_day is not None
-    # actual_per_day == plan total protein / days (consistent with per-meal nutrition).
-    expected_per_day = _total_protein(res) / Decimal(summary.days)
+    # actual_per_day = one serving per meal * comensales / days, independent of batch
+    # size. Here meals are batch-cooked in 2 servings (per-serving = half the displayed
+    # batch nutrition) and there is 1 comensal, so it is half the batch total per day.
+    expected_per_day = (_total_protein(res) / Decimal("2")) / Decimal(summary.days)
     assert protein.actual_per_day == expected_per_day
     assert protein.deviation == protein.actual_per_day - Decimal("90")
     assert protein.coverage_ratio == protein.actual_per_day / Decimal("90")
@@ -112,6 +114,53 @@ def test_nutrition_summary_present_and_correct_with_target():
     # A macro with no target reads as "unknown" with no target_per_day.
     assert summary.fat_g.status == "unknown"
     assert summary.fat_g.target_per_day is None
+
+
+# --- servings/comensales coupling: batch size must not distort the nutrition summary ---
+def _forced_input(target, *, servings: int, members):
+    """Exactly _SLOTS distinct high-protein recipes -> the assignment is forced, so
+    only ``servings`` (batch size) and ``members`` (comensales) vary between runs."""
+    cands = [_high(f"only{i}") for i in range(_SLOTS)]
+    return plan_input(
+        members=members,
+        requirements=[requirement("lunch", _SLOTS, servings=servings)],
+        catalog=[CHICKEN, RICE],
+        candidates=cands,
+        budget_amount="1000",
+        nutrition_target=target,
+    )
+
+
+def test_nutrition_summary_independent_of_batch_size():
+    """Cooking 8 servings/meal instead of 2 (batch for leftovers) must not change the
+    per-day nutrition summary: the target is about comensales, not portions cooked."""
+    target = NutritionTargetDTO(protein_g=Decimal("90"))
+    small = generate_plan(_forced_input(target, servings=2, members=[member("A")]))
+    big = generate_plan(_forced_input(target, servings=8, members=[member("A")]))
+    assert isinstance(small, PlanResult) and isinstance(big, PlanResult)
+
+    assert small.nutrition_summary is not None and big.nutrition_summary is not None
+    assert (
+        small.nutrition_summary.protein_g.actual_per_day
+        == big.nutrition_summary.protein_g.actual_per_day
+    )
+    # Sanity: per-meal displayed nutrition still reflects the cooked batch (4x here).
+    assert _total_protein(big) == _total_protein(small) * Decimal("4")
+
+
+def test_nutrition_summary_scales_with_comensales():
+    """Two comensales eat twice the household total of one -> actual_per_day doubles."""
+    target = NutritionTargetDTO(protein_g=Decimal("90"))
+    one = generate_plan(_forced_input(target, servings=2, members=[member("A")]))
+    two = generate_plan(
+        _forced_input(target, servings=2, members=[member("A"), member("B")])
+    )
+    assert isinstance(one, PlanResult) and isinstance(two, PlanResult)
+    assert one.nutrition_summary is not None and two.nutrition_summary is not None
+    assert (
+        two.nutrition_summary.protein_g.actual_per_day
+        == one.nutrition_summary.protein_g.actual_per_day * Decimal("2")
+    )
 
 
 # --- the "nutrition" priority: a strong nutrition weight overrides competing terms ------------

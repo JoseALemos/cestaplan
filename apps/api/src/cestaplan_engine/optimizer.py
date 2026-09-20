@@ -53,6 +53,7 @@ class PlanOptimizer:
         nutrition_target: NutritionTargetDTO | None = None,
         nutrition_calc: NutritionCalculator | None = None,
         num_days: int = 0,
+        comensal_weight: Decimal | None = None,
     ) -> None:
         self._prov = provisioner
         self._w = weights
@@ -67,6 +68,11 @@ class PlanOptimizer:
         self._nutrition_target = nutrition_target
         self._nutrition_calc = nutrition_calc
         self._num_days = num_days if num_days > 0 else 1
+        # Eater weight (sum of members' relative_serving). Nutrition is compared
+        # against the number of comensales, not the batch size cooked per meal.
+        self._comensal_weight = (
+            comensal_weight if comensal_weight and comensal_weight > 0 else Decimal("1")
+        )
         self._cheapest_cost: Decimal | None = None
         self._cheapest_assignment: list[CandidateRecipeDTO] = []
         self._cheapest_provision: Provision | None = None
@@ -108,14 +114,15 @@ class PlanOptimizer:
         calc = self._nutrition_calc
         if target is None or calc is None:
             return Decimal("0")
-        totals, _complete = calc.for_meals(self._build_meals(slots, recipes))
+        totals, _complete = calc.for_meals_per_serving(self._build_meals(slots, recipes))
         days = Decimal(self._num_days)
         penalty = Decimal("0")
         for macro in _MACROS:
             goal = getattr(target, macro)
             if goal is None or goal <= 0:
                 continue
-            actual_per_day = totals[macro] / days
+            # Per-serving plan nutrition * eaters = household intake per day.
+            actual_per_day = totals[macro] * self._comensal_weight / days
             penalty += abs(actual_per_day - goal) / goal
         return penalty
 
