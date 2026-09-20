@@ -130,9 +130,11 @@ export default function PreciosPage() {
         </p>
       </div>
 
-      <Alert tone="info" title="Esto es un visor, no el planificador">
-        Estos precios reales son orientativos y no se usan para generar planes; el
-        planificador usa el catálogo de demostración o tus importaciones.
+      <Alert tone="info" title="Este visor es una fuente distinta">
+        El planificador ya calcula el coste de tus planes con <b>precios reales de
+        supermercado</b> (Mercadona), actualizados periódicamente. Este visor muestra otra
+        fuente, comunitaria (Open Prices), útil para explorar precios pero que todavía no
+        alimenta al planificador.
       </Alert>
 
       <Card>
