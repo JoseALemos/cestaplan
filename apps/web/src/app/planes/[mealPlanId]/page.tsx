@@ -6,7 +6,11 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCurrentHouseholdId } from "@/lib/household/current-household";
 import { MEAL_TYPE_ORDER } from "@/lib/domain/labels";
 import { useHouseholdQuery } from "@/lib/query/hooks/use-households";
-import { usePlanQuery, useRegeneratePlanMutation } from "@/lib/query/hooks/use-plans";
+import {
+  useDuplicatePlanMutation,
+  usePlanQuery,
+  useRegeneratePlanMutation,
+} from "@/lib/query/hooks/use-plans";
 import { formatDateLong } from "@/lib/utils/format";
 import type { PlannedMeal } from "@/lib/api/types";
 
@@ -15,6 +19,7 @@ import { NutritionSummaryPanel } from "@/components/plan/NutritionSummaryPanel";
 import { PlanHeader } from "@/components/plan/PlanHeader";
 import { SavingsVsHabitual } from "@/components/plan/SavingsVsHabitual";
 import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
 
@@ -46,6 +51,7 @@ export default function PlanPage() {
   const planQuery = usePlanQuery(mealPlanId);
   const householdQuery = useHouseholdQuery(householdId);
   const regeneratePlanMutation = useRegeneratePlanMutation(mealPlanId);
+  const duplicatePlanMutation = useDuplicatePlanMutation(mealPlanId);
 
   const goToEstado = (runId: string) => {
     router.push(`/planes/estado/${runId}?mealPlanId=${mealPlanId}&householdId=${householdId}`);
@@ -101,6 +107,37 @@ export default function PlanPage() {
         plan={plan}
         habitualWeeklySpend={householdQuery.data?.habitual_weekly_spend ?? null}
       />
+
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-bg-subtle p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-medium text-ink">¿Te sirve este plan?</p>
+          <p className="text-xs text-ink-muted">
+            Genera el de la semana que viene en 1 toque, con tus mismos ajustes y platos nuevos.
+          </p>
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          loading={duplicatePlanMutation.isPending}
+          className="self-start sm:self-auto"
+          onClick={async () => {
+            try {
+              const accepted = await duplicatePlanMutation.mutateAsync();
+              router.push(
+                `/planes/estado/${accepted.optimization_run_id}` +
+                  `?mealPlanId=${accepted.meal_plan_id}&householdId=${householdId}`,
+              );
+            } catch {
+              // surfaced below
+            }
+          }}
+        >
+          Planificar la semana que viene
+        </Button>
+      </div>
+      {duplicatePlanMutation.isError ? (
+        <Alert tone="error">No se pudo crear el plan de la semana que viene. Inténtalo de nuevo.</Alert>
+      ) : null}
 
       {plan.nutrition_summary ? (
         <NutritionSummaryPanel summary={plan.nutrition_summary} />

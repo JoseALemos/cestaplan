@@ -324,6 +324,13 @@ export function regeneratePlan(mealPlanId: Uuid): Promise<GeneratePlanAccepted> 
   });
 }
 
+/** Clone a plan's config into a NEW plan for the next period (async). Returns the new run. */
+export function duplicatePlan(mealPlanId: Uuid): Promise<GeneratePlanAccepted> {
+  return apiFetch<GeneratePlanAccepted>(`/api/v1/plans/${mealPlanId}/duplicate`, {
+    method: "POST",
+  });
+}
+
 export function regenerateMeal(
   mealPlanId: Uuid,
   plannedMealId: Uuid,

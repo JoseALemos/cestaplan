@@ -10,7 +10,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -268,6 +268,76 @@ def create_generation(
 
     run, job = _enqueue_run(db, meal_plan, job_type="generate", seed=_new_seed())
     return meal_plan, run, job
+
+
+# Requirement columns copied verbatim when duplicating a plan (selected_dates is shifted, below).
+_REQUIREMENT_CLONE_FIELDS = (
+    "meal_type",
+    "requested_count",
+    "default_servings",
+    "auto_distribute",
+    "preferred_days",
+    "maximum_preparation_minutes",
+    "requires_tupper",
+    "reheating_available",
+)
+
+
+def _shift_iso_dates(dates: list | None, delta_days: int) -> list | None:
+    """Shift a JSONB list of ISO date strings by ``delta_days`` (None/empty stays as-is)."""
+    if not dates:
+        return dates
+    shifted: list[str] = []
+    for value in dates:
+        try:
+            moved = date.fromisoformat(str(value)) + timedelta(days=delta_days)
+            shifted.append(moved.isoformat())
+        except ValueError:
+            shifted.append(value)  # never drop a date we cannot parse
+    return shifted
+
+
+def duplicate_generation(
+    db: Session,
+    ctx: HouseholdContext,
+    source: MealPlan,
+    *,
+    today: date | None = None,
+) -> tuple[MealPlan, OptimizationRun, GenerationJob]:
+    """Clone ``source``'s configuration into a NEW plan for the next contiguous period.
+
+    Same household/budget/chain/meal requirements, dates shifted forward so the new plan starts
+    the day after the later of (source end, today) — never in the past. A fresh random seed
+    (``create_generation``) explores a different combination, so "next week" isn't a carbon copy.
+    Requirements' ``selected_dates`` are shifted by the same delta; everything else is verbatim.
+    """
+    today = today or date.today()
+    duration_days = (source.end_date - source.start_date).days
+    base = max(source.end_date, today)
+    new_start = base + timedelta(days=1)
+    new_end = new_start + timedelta(days=duration_days)
+    delta_days = (new_start - source.start_date).days
+
+    requirements: list[dict[str, Any]] = []
+    for req in source.requirements:
+        row: dict[str, Any] = {f: getattr(req, f) for f in _REQUIREMENT_CLONE_FIELDS}
+        row["selected_dates"] = _shift_iso_dates(req.selected_dates, delta_days)
+        requirements.append(row)
+
+    retailer = db.get(Retailer, source.retailer_id) if source.retailer_id else None
+    store = db.get(Store, source.store_id) if source.store_id else None
+    return create_generation(
+        db,
+        ctx,
+        start_date=new_start,
+        end_date=new_end,
+        budget_amount=source.budget_amount or Decimal("0"),
+        currency=source.currency,
+        requirements=requirements,
+        retailer=retailer,
+        store=store,
+        budget_priority=source.budget_priority or "waste",
+    )
 
 
 def enqueue_regeneration(

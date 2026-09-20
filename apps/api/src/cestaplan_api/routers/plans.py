@@ -37,6 +37,7 @@ from cestaplan_api.services.plan_comparison import compare_plan_with_travel
 from cestaplan_api.services.plan_service import (
     build_regenerate_meal_payload,
     create_generation,
+    duplicate_generation,
     enqueue_regeneration,
     resolve_plan,
     resolve_plan_retailer,
@@ -220,6 +221,40 @@ def regenerate_plan(
     record_audit(
         db, action="plan.regenerate", actor_user_id=user.id,
         household_id=meal_plan.household_id, entity_type="meal_plan",
+        entity_public_id=meal_plan.public_id,
+    )
+    return {
+        "optimization_run_id": str(run.public_id),
+        "meal_plan_id": str(meal_plan.public_id),
+        "status": run.status,
+        "status_url": _status_url(run.public_id),
+    }
+
+
+@router.post(
+    "/{meal_plan_id}/duplicate",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(verify_csrf),
+        Depends(rate_limit(plan_generation_rate_limiter)),
+    ],
+)
+def duplicate_plan(
+    meal_plan_id: uuid.UUID, user: CurrentUser, db: DbSession
+) -> dict:
+    """Clone a plan's configuration into a NEW plan for the next period (async).
+
+    Same household/budget/chain/meal requirements, dates shifted forward, fresh seed. One tap
+    to "plan next week" without re-entering everything — the core weekly-cadence retention hook.
+    """
+    source = resolve_plan(db, user.id, meal_plan_id, require_edit=True)
+    check_generation_quota(db, household_id=source.household_id, user_id=user.id)
+    household = db.get(Household, source.household_id)
+    ctx = get_household_context(household.public_id, user, db)
+    meal_plan, run, _job = duplicate_generation(db, ctx, source)
+    record_audit(
+        db, action="plan.duplicate", actor_user_id=user.id,
+        household_id=source.household_id, entity_type="meal_plan",
         entity_public_id=meal_plan.public_id,
     )
     return {

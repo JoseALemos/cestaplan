@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.db import get_db
-from cestaplan_api.models import Equipment, GenerationJob, Household
+from cestaplan_api.models import Equipment, GenerationJob, Household, MealPlan
 from cestaplan_worker.processor import process_job
 
 from .conftest import csrf, login, register
@@ -123,6 +123,57 @@ def test_generate_flow_end_to_end(db_session: Session) -> None:
     )
     assert toggled.status_code == 200
     assert toggled.json()["is_checked"] is True
+
+
+def test_duplicate_plan_clones_config_to_next_period(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
+    _add_equipment(db_session, hh["id"])
+
+    start = date.today()
+    end = start + timedelta(days=5)
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "budget_amount": "120",
+            "priority": "nutrition",
+            "requirements": [
+                {"meal_type": "lunch", "requested_count": 3, "default_servings": 2},
+                {"meal_type": "dinner", "requested_count": 3, "default_servings": 2},
+            ],
+        },
+        headers=csrf(token),
+    ).json()
+    source_id = gen["meal_plan_id"]
+
+    dup = client.post(f"/api/v1/plans/{source_id}/duplicate", headers=csrf(token))
+    assert dup.status_code == 202, dup.text
+    body = dup.json()
+    assert body["meal_plan_id"] != source_id
+    assert body["status_url"] == f"/api/v1/plans/runs/{body['optimization_run_id']}"
+
+    new = db_session.execute(
+        select(MealPlan).where(MealPlan.public_id == uuid.UUID(body["meal_plan_id"]))
+    ).scalar_one()
+    src = db_session.execute(
+        select(MealPlan).where(MealPlan.public_id == uuid.UUID(source_id))
+    ).scalar_one()
+    # Same length, shifted forward (never in the past), config carried over verbatim.
+    assert (new.end_date - new.start_date) == (src.end_date - src.start_date)
+    assert new.start_date > src.end_date
+    assert new.budget_amount == src.budget_amount
+    assert new.budget_priority == src.budget_priority == "nutrition"
+    assert new.retailer_id == src.retailer_id
+    assert {r.meal_type for r in new.requirements} == {"lunch", "dinner"}
+
+    # State-mutating -> CSRF required.
+    assert client.post(f"/api/v1/plans/{source_id}/duplicate").status_code == 403
 
 
 def test_get_plan_requires_membership(db_session: Session) -> None:

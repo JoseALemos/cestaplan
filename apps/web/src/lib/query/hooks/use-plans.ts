@@ -13,6 +13,7 @@ import {
   listPlans,
   listRecipeFeedback,
   regenerateMeal,
+  duplicatePlan,
   regeneratePlan,
   submitFeedback,
   unfavoriteRecipe,
@@ -72,6 +73,15 @@ export function useRegeneratePlanMutation(mealPlanId: string) {
   return useMutation({
     mutationFn: () => regeneratePlan(mealPlanId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.plan(mealPlanId) }),
+  });
+}
+
+/** Duplicate a plan into a new one for the next period; invalidates the plans list. */
+export function useDuplicatePlanMutation(mealPlanId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => duplicatePlan(mealPlanId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["plans"] }),
   });
 }
 
