@@ -719,6 +719,9 @@ export interface PlanSummary {
   currency: string;
   meal_count: number;
   retailer_name: string | null;
+  /** Persisted grocery-list cost of the plan (null until generated). */
+  cost_known: MoneyString | null;
+  cost_estimated: MoneyString | null;
 }
 
 export type FeedbackSentiment = "like" | "reject" | "no_show";

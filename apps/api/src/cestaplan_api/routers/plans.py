@@ -23,6 +23,7 @@ from cestaplan_api.deps import (
 )
 from cestaplan_api.models import (
     FavoriteRecipe,
+    GroceryList,
     Household,
     MealPlan,
     PlannedMeal,
@@ -92,8 +93,28 @@ def list_plans(ctx: HouseholdCtx, user: CurrentUser, db: DbSession) -> list[dict
         .correlate(MealPlan)
         .scalar_subquery()
     )
+
+    def _latest_grocery(column):
+        # Cost of the most recent grocery list for the plan (regeneration writes a new one).
+        return (
+            select(column)
+            .where(GroceryList.meal_plan_id == MealPlan.id)
+            .correlate(MealPlan)
+            .order_by(GroceryList.created_at.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
+    cost_known = _latest_grocery(GroceryList.known_cost_amount)
+    cost_estimated = _latest_grocery(GroceryList.estimated_cost_amount)
     rows = db.execute(
-        select(MealPlan, Retailer, meal_count.label("meal_count"))
+        select(
+            MealPlan,
+            Retailer,
+            meal_count.label("meal_count"),
+            cost_known.label("cost_known"),
+            cost_estimated.label("cost_estimated"),
+        )
         .outerjoin(Retailer, Retailer.id == MealPlan.retailer_id)
         .where(
             MealPlan.household_id == ctx.household.id,
@@ -112,8 +133,11 @@ def list_plans(ctx: HouseholdCtx, user: CurrentUser, db: DbSession) -> list[dict
             "currency": plan.currency,
             "meal_count": meal_count_value,
             "retailer_name": retailer.name if retailer is not None else None,
+            # Persisted cost of the plan's grocery list (None until a plan is generated).
+            "cost_known": str(known) if known is not None else None,
+            "cost_estimated": str(estimated) if estimated is not None else None,
         }
-        for plan, retailer, meal_count_value in rows
+        for plan, retailer, meal_count_value, known, estimated in rows
     ]
 
 
