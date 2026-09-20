@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from cestaplan_api.config import get_settings
 from cestaplan_api.deps import HouseholdContext
 from cestaplan_api.models import (
+    FavoriteRecipe,
     GenerationJob,
     GroceryList,
     GroceryListItem,
@@ -35,6 +36,7 @@ from cestaplan_api.models import (
     Product,
     ProductPrice,
     Recipe,
+    RecipeFeedback,
     Retailer,
     Store,
 )
@@ -853,10 +855,67 @@ def serialize_plan(db: Session, meal_plan: MealPlan) -> dict[str, Any]:
     base["budget_diff"] = summary.get("budget_diff")
     base["coverage"] = summary.get("coverage")
     base["nutrition_summary"] = summary.get("nutrition_summary")
+    base["personalization"] = _personalization_summary(db, meal_plan, meals_db)
     base["warnings"] = summary.get("warnings", [])
     base["explanations"] = summary.get("explanations", [])
     base["grocery_summary"] = _grocery_summary(db, meal_plan)
     return base
+
+
+def _personalization_summary(
+    db: Session, meal_plan: MealPlan, meals_db: list[PlannedMeal]
+) -> dict[str, Any]:
+    """What the plan did FOR this household — made visible (the engine already applied it).
+
+    Reuses the same signals the planner consumed: favourites (bonus), rejections (blocked),
+    and each eater's diet + serious allergens (hard filters). Read-only and derived from the
+    persisted plan; it never re-runs the engine. Counts are honest — favourites actually in
+    the plan, and the number of recipes the household has rejected (hidden from every plan).
+    """
+    household_id = meal_plan.household_id
+    favorite_recipe_ids = set(
+        db.execute(
+            select(FavoriteRecipe.recipe_id).where(
+                FavoriteRecipe.household_id == household_id
+            )
+        ).scalars().all()
+    )
+    favorites_included = sum(1 for m in meals_db if m.recipe_id in favorite_recipe_ids)
+
+    rejected_hidden = int(
+        db.execute(
+            select(func.count(func.distinct(RecipeFeedback.recipe_id))).where(
+                RecipeFeedback.household_id == household_id,
+                RecipeFeedback.sentiment.in_(("reject", "no_show")),
+            )
+        ).scalar_one()
+    )
+
+    members = db.execute(
+        select(HouseholdMember).where(
+            HouseholdMember.household_id == household_id,
+            HouseholdMember.is_eater.is_(True),
+        )
+    ).scalars().all()
+    diet_labels: set[str] = set()
+    allergens_avoided: set[str] = set()
+    for member in members:
+        profile = member.dietary_profiles[0] if member.dietary_profiles else None
+        if profile is None:
+            continue
+        if profile.diet_type:
+            diet_labels.add(profile.diet_type)
+        for allergy in profile.allergies:
+            # Serious allergies drive the fail-closed gate (mirrors planning_context).
+            if allergy.severity in ("allergy", "anaphylaxis"):
+                allergens_avoided.add(allergy.allergen_code)
+
+    return {
+        "favorites_included": favorites_included,
+        "rejected_hidden": rejected_hidden,
+        "diet_labels": sorted(diet_labels),
+        "allergens_avoided": sorted(allergens_avoided),
+    }
 
 
 def _store_summary(db: Session, meal_plan: MealPlan) -> dict[str, Any] | None:

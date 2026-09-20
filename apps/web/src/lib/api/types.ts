@@ -736,9 +736,20 @@ export interface MealPlanDetail {
   coverage: MealPlanCoverage;
   /** Per-day macros vs the household nutrition target. Null when no member set a goal. */
   nutrition_summary?: NutritionSummary | null;
+  /** What the plan applied for this household (favourites, rejections, diet, allergens). */
+  personalization?: PlanPersonalization | null;
   warnings: string[];
   explanations?: string[];
   grocery_summary?: Record<string, unknown>;
+}
+
+export interface PlanPersonalization {
+  favorites_included: number;
+  rejected_hidden: number;
+  /** Diet types honoured (e.g. "vegetariano"). */
+  diet_labels: string[];
+  /** Serious-allergen codes avoided (e.g. "gluten"). */
+  allergens_avoided: string[];
 }
 
 /** Light row for the plan history list (`GET /api/v1/plans`) — no meals/costing, see `MealPlanDetail`. */

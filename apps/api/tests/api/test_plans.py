@@ -614,3 +614,72 @@ def test_product_search_requires_membership(db_session: Session) -> None:
         params={"search": "tomate"},
     )
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Personalization summary (P4 slice 1): make visible what the engine applied
+# --------------------------------------------------------------------------- #
+def test_plan_exposes_personalization_summary(db_session: Session) -> None:
+    client = _plans_client(db_session)
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    hh = client.post("/api/v1/households", json={"name": "Casa"}, headers=csrf(token)).json()
+    # A second eater with a serious gluten allergy -> should surface as "avoided".
+    client.post(
+        f"/api/v1/households/{hh['id']}/members",
+        json={
+            "display_name": "Sam",
+            "allergies": [{"allergen_code": "gluten", "severity": "allergy"}],
+        },
+        headers=csrf(token),
+    )
+    _add_equipment(db_session, hh["id"])
+
+    start = date.today()
+    gen = client.post(
+        "/api/v1/plans/generate",
+        json={
+            "household_id": hh["id"],
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=1)).isoformat(),
+            "budget_amount": "500",
+            "requirements": [{"meal_type": "lunch", "requested_count": 2, "default_servings": 2}],
+        },
+        headers=csrf(token),
+    ).json()
+    meal_plan_id = gen["meal_plan_id"]
+    job = db_session.execute(
+        select(GenerationJob).order_by(GenerationJob.id.desc())
+    ).scalars().first()
+    assert job is not None
+    process_job(job, db_session)
+
+    plan = client.get(f"/api/v1/plans/{meal_plan_id}").json()
+    pers = plan["personalization"]
+    assert set(pers) == {
+        "favorites_included", "rejected_hidden", "diet_labels", "allergens_avoided"
+    }
+    # The serious allergy is surfaced; nothing invented (no diet was set).
+    assert pers["allergens_avoided"] == ["gluten"]
+    assert pers["diet_labels"] == []
+    assert pers["favorites_included"] == 0 and pers["rejected_hidden"] == 0
+
+    meals = plan["planned_meals"]
+    assert len(meals) == 2
+    fav_recipe, rej_recipe = meals[0]["recipe_id"], meals[1]["recipe_id"]
+
+    # Favourite one planned recipe, reject another -> the summary reflects both.
+    assert client.post(
+        f"/api/v1/plans/recipes/{fav_recipe}/favorite?household_id={hh['id']}",
+        headers=csrf(token),
+    ).status_code in (200, 201)
+    assert client.post(
+        f"/api/v1/plans/recipes/{rej_recipe}/feedback?household_id={hh['id']}",
+        json={"sentiment": "reject"},
+        headers=csrf(token),
+    ).status_code in (200, 201)
+
+    after = client.get(f"/api/v1/plans/{meal_plan_id}").json()["personalization"]
+    assert after["favorites_included"] == 1
+    assert after["rejected_hidden"] == 1

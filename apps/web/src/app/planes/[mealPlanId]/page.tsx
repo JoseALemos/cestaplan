@@ -16,6 +16,7 @@ import type { PlannedMeal } from "@/lib/api/types";
 
 import { MealCard } from "@/components/plan/MealCard";
 import { NutritionSummaryPanel } from "@/components/plan/NutritionSummaryPanel";
+import { PersonalizationSummary } from "@/components/plan/PersonalizationSummary";
 import { PlanHeader } from "@/components/plan/PlanHeader";
 import { SavingsVsHabitual } from "@/components/plan/SavingsVsHabitual";
 import { Alert } from "@/components/ui/Alert";
@@ -102,6 +103,10 @@ export default function PlanPage() {
           goToEstado(accepted.optimization_run_id);
         }}
       />
+
+      {plan.personalization ? (
+        <PersonalizationSummary personalization={plan.personalization} />
+      ) : null}
 
       <SavingsVsHabitual
         plan={plan}
