@@ -104,6 +104,54 @@ def to_decimal(value: object) -> Decimal | None:
 
 
 # --------------------------------------------------------------------------- #
+# Envase de huevos recuperado del nombre
+# --------------------------------------------------------------------------- #
+
+_DOZEN = Decimal("12")
+_HALF_DOZEN = Decimal("6")
+# Nombre que identifica un producto como HUEVOS (ancla al inicio para no confundir
+# "pasta al huevo", "licor de huevo", etc.; también un nombre tipo "Docena de huevos").
+_EGG_NAME_RE = re.compile(r"^\s*huevos?\b", re.IGNORECASE)
+_EGG_WORD_RE = re.compile(r"\bhuevos?\b", re.IGNORECASE)
+# Recuento explícito en el nombre.
+_DOCENA_RE = re.compile(r"\b(media\s+docena|docena)\b", re.IGNORECASE)
+_COUNT_RE = re.compile(r"\b(\d{1,3})\s*(?:ud|uds|u|unidad|unidades|huevos?)\b", re.IGNORECASE)
+
+
+def egg_pack_size(name: str | None) -> Decimal | None:
+    """Tamaño de pack (en unidades) de un producto de HUEVOS a partir de su nombre.
+
+    Los huevos se venden por recuento y muchos productos llegan sin envase estructurado; como el
+    motor compra PAQUETES ENTEROS, una docena sin dato de pack se costea como 12 cartones sueltos
+    (bug de los 19,80 €). Esta función recupera el pack del nombre:
+
+    - recuento EXPLÍCITO cuando el nombre lo trae (``docena``->12, ``media docena``->6,
+      ``N ud`` / ``N unidades`` / ``N huevos``->N);
+    - en su defecto, el estándar de venta en España: una **docena** (12).
+
+    Solo se aplica a productos cuyo nombre los identifica como huevos; para cualquier otro producto
+    devuelve ``None`` (no se inventa ningún tamaño). El default de docena es la ÚNICA asunción y
+    solo cubre huevos sin recuento explícito.
+    """
+    if not name:
+        return None
+    is_egg = bool(_EGG_NAME_RE.search(name)) or (
+        bool(_EGG_WORD_RE.search(name)) and bool(_DOCENA_RE.search(name))
+    )
+    if not is_egg:
+        return None
+    m = _DOCENA_RE.search(name)
+    if m:
+        return _HALF_DOZEN if m.group(1).lower().startswith("media") else _DOZEN
+    m = _COUNT_RE.search(name)
+    if m:
+        count = Decimal(m.group(1))
+        if count > 0:
+            return count
+    return _DOZEN  # huevos sin recuento explícito -> docena (estándar en España)
+
+
+# --------------------------------------------------------------------------- #
 # Product normalization
 # --------------------------------------------------------------------------- #
 

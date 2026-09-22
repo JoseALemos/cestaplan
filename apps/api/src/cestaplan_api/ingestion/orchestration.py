@@ -41,6 +41,7 @@ from cestaplan_api.ingestion.coverage import PriceCoverageService
 from cestaplan_api.ingestion.crawl_worker import JobOutcome
 from cestaplan_api.ingestion.current_price import CurrentPriceService
 from cestaplan_api.ingestion.http_fetcher import HttpFetchResult
+from cestaplan_api.ingestion.normalization import egg_pack_size
 from cestaplan_api.ingestion.price_history import record_observation
 from cestaplan_api.ingestion.run_service import CrawlRunService
 from cestaplan_api.models import (
@@ -428,6 +429,12 @@ def _describe(
     count_raw = package.get("count") if isinstance(package, dict) else None
     qty = _to_decimal(qty_raw)
     count = int(count_raw) if isinstance(count_raw, (int, str)) and str(count_raw).isdigit() else 1
+    if qty is None:
+        # Sin envase estructurado: recupera el pack de huevos (docena) del nombre para no
+        # crear la variante con envase nulo -> el motor la costearía por huevo/cartón.
+        egg_units = egg_pack_size(name)
+        if egg_units is not None:
+            qty, unit = egg_units, "unit"
     return name, brand, qty, unit, count
 
 

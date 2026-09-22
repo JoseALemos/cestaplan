@@ -28,6 +28,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
+from cestaplan_api.ingestion.normalization import egg_pack_size
 from cestaplan_api.models import (
     DataSource,
     PriceObservation,
@@ -218,6 +219,13 @@ class CurrentPriceService:
             "l",
         ):
             return variant.net_content_quantity, variant.net_content_unit
+        # Huevos sin envase estructurado: recupera el pack (docena) del nombre para que el motor
+        # no compre cada huevo como un cartón entero. Solo afecta a productos-huevo; ver
+        # ``normalization.egg_pack_size``. Cubre las dos rutas de ingesta (genérica y en vivo),
+        # que ambas dejan la variante sin envase.
+        egg_units = egg_pack_size(variant.display_name)
+        if egg_units is not None:
+            return egg_units, "unit"
         return Decimal("1"), "unit"
 
     # -- internals ------------------------------------------------------------ #
