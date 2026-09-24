@@ -33,8 +33,10 @@ def enum_col(*values: str, name: str) -> Enum:
     """A VARCHAR + CHECK enumeration (``native_enum=False``).
 
     Kept non-native to keep Postgres 12 migrations simple (no ``CREATE TYPE`` churn).
+    ``create_constraint=True`` declara el CHECK a nivel de BD (además de la validación del ORM):
+    las columnas existentes reciben el CHECK vía migración; ``create_all`` (tests) también lo emite.
     """
-    return Enum(*values, name=name, native_enum=False, validate_strings=True)
+    return Enum(*values, name=name, native_enum=False, validate_strings=True, create_constraint=True)
 
 
 class UUIDMixin:
