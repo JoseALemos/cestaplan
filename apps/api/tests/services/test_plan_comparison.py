@@ -28,7 +28,10 @@ from cestaplan_api.models import (
 from cestaplan_api.services.plan_comparison import compare_plan_across_chains
 from tests.fixtures.provider_scenarios import ensure_test_ingredient, seed_test_recipe
 
-_NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+# Los precios se observan "ahora" (relativo al reloj real): la comparación evalúa frescura contra
+# ``date.today()``, así que una fecha fija en el pasado caducaría y el coste dejaría de ser "known"
+# (bomba de reloj). Se usa un instante reciente para que el test sea independiente de la fecha.
+_NOW = datetime.now(UTC)
 
 
 def _chain(db: Session, slug: str, name: str) -> tuple[Retailer, Store]:

@@ -14,8 +14,8 @@ existente (tests/api) repuebla luego el catálogo demo como siempre. Ninguna mig
 de referencia duraderos (la única con INSERT es una transformación sobre datos preexistentes, no-op
 en BD vacía), así que no se pierde nada de lo que dependan los tests.
 
-BLINDADO a bases de datos LOCALES: si ``DATABASE_URL`` no apunta a localhost, la fixture es un no-op,
-de modo que NUNCA puede tocar una base compartida o de producción.
+BLINDADO a BD LOCALES: si ``DATABASE_URL`` no apunta a localhost, la fixture es un no-op, de modo
+que NUNCA puede tocar una base compartida o de producción.
 """
 
 from __future__ import annotations
@@ -23,10 +23,13 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.db import engine
+from cestaplan_api.models import Recipe
+from cestaplan_api.scripts.seed_demo import main as seed_demo_main
 
 # Hosts considerados locales; cualquier otro (p.ej. el host interno de Railway) desactiva el wipe.
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -59,3 +62,19 @@ def _pristine_local_db() -> None:
         if tables:
             joined = ", ".join(f'"{name}"' for name in tables)
             conn.execute(text(f"TRUNCATE TABLE {joined} RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_demo_seed(_pristine_local_db: None) -> None:
+    """Siembra el catálogo demo una vez por sesión — HEREDADO por TODOS los paquetes de tests.
+
+    Antes solo lo sembraban tests/api|cloud|worker, así que una ejecución PARCIAL de otro paquete
+    (``pytest tests/ingestion`` / ``tests/tools``, un IDE, o una futura paralelización) arrancaba
+    con el catálogo vacío (``ingredients_total=0``, ``canonical_name`` sin fila) y fallaba de forma
+    determinista. Al vivir en la raíz, cualquier paquete lo hereda. Depende de
+    ``_pristine_local_db`` para sembrar DESPUÉS del TRUNCATE. Idempotente: solo siembra si no hay
+    recetas, y el seed es committeado (persiste a través de los tests transaccionales)."""
+    with Session(bind=engine) as check:
+        count = check.scalar(select(func.count()).select_from(Recipe))
+    if not count:
+        seed_demo_main()
