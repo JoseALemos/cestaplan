@@ -38,6 +38,7 @@ def package(
     expires_at: date | None = date(2026, 8, 1),
     source_type: str = "demo",
     source_name: str = "DemoStore",
+    availability: str = "in_stock",
 ) -> PackageOptionDTO:
     return PackageOptionDTO(
         product_id=product_id,
@@ -45,7 +46,7 @@ def package(
         package_unit=unit,
         amount=D(price),
         unit_price=D("0"),
-        availability="in_stock",
+        availability=availability,
         source_type=source_type,
         source_name=source_name,
         observed_at=observed_at,

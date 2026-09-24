@@ -121,8 +121,12 @@ class PackageOptimizer:
             price = opt.amount
             result = compute_packages(pending, Decimal("0"), opt.package_quantity, price)
             score = w_waste * result.leftover + w_cost * result.total_cost
-            # Prefer known prices (0) over estimated (1); then lower score; then stable id.
+            # Prefer in-stock (0) over out-of-stock (1) — un formato agotado no se puede comprar,
+            # así que solo se elige si no hay alternativa; luego precio conocido sobre estimado;
+            # luego menor score; luego id estable (determinismo).
+            out_of_stock = opt.availability == "out_of_stock"
             key = (
+                1 if out_of_stock else 0,
                 0 if price_known else 1,
                 score,
                 opt.product_id,

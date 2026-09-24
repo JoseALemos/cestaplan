@@ -94,6 +94,25 @@ def test_optimizer_prefers_known_price_over_estimated():
     assert choice.option.amount == Decimal("4.00")
 
 
+def test_optimizer_prefers_in_stock_over_out_of_stock():
+    # C7: un formato agotado, aunque sea más barato, no se elige si hay uno disponible.
+    opt = PackageOptimizer()
+    cheap_oos = package("x", "500", "g", "2.00", availability="out_of_stock")
+    dearer_in = package("x", "500", "g", "3.00", availability="in_stock")
+    choice = opt.choose(Decimal("500"), [cheap_oos, dearer_in])
+    assert choice is not None
+    assert choice.option.availability == "in_stock"
+    assert choice.option.amount == Decimal("3.00")
+
+
+def test_optimizer_falls_back_to_out_of_stock_when_only_option():
+    # Si TODOS están agotados, se elige igualmente (mejor un coste con aviso que ninguno).
+    opt = PackageOptimizer()
+    oos = package("x", "500", "g", "2.00", availability="out_of_stock")
+    choice = opt.choose(Decimal("500"), [oos])
+    assert choice is not None and choice.option.amount == Decimal("2.00")
+
+
 def test_optimizer_flags_expired_price():
     opt = PackageOptimizer()
     stale = package(
