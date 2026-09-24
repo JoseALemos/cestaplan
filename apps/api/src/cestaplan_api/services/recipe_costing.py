@@ -38,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.ingestion.current_price import CurrentPriceService, FreshnessStatus
+from cestaplan_api.ingestion.normalization import egg_pack_size
 from cestaplan_api.ingestion.providers.contracts import ProductCostingMode
 from cestaplan_api.ingestion.providers.onboarding import classify_variant_costing_mode, get_entry
 from cestaplan_api.models import (
@@ -85,6 +86,20 @@ def _to_base(quantity: Decimal, unit: str) -> tuple[Decimal, str] | None:
     if dim is None:
         return None
     return quantity * _TO_BASE[unit], dim
+
+
+def _count_pack_units(v: ProductVariant) -> Decimal | None:
+    """Unidades por paquete comprable de una variante contada SIN contenido neto, o None.
+
+    Prefiere un package_quantity explícito (cuando se cuenta por unidades); en su defecto recupera
+    el pack de huevos (una docena) del nombre vía :func:`egg_pack_size`, en paridad con el carril de
+    planificación (``current_price._package_dims``), para que una docena NO se costee como cartones
+    sueltos en el carril de sombra. Devuelve None cuando no hay señal de pack (un artículo contado
+    suelto se queda en 1)."""
+    pq = v.package_quantity
+    if pq is not None and pq > 0 and (v.package_unit or "").lower() in ("unit", "ud", "uds", ""):
+        return pq
+    return egg_pack_size(v.display_name)
 
 
 @dataclass(slots=True)
@@ -248,10 +263,16 @@ def _cost_candidate(
     mode = cand.mode
     if mode in (ProductCostingMode.FIXED_PACKAGE, ProductCostingMode.DISCRETE_UNIT):
         if v.net_content_quantity is None or v.net_content_unit is None:
-            # A discrete unit with no net content is one buyable piece per unit.
+            # A discrete unit with no net content is one buyable piece per unit — UNLESS it is a
+            # count-pack (huevos por docena, un package_quantity explícito): entonces se compran
+            # PAQUETES ENTEROS para que una docena no se costee como 12 cartones sueltos (paridad
+            # con el carril de planificación).
             if mode is ProductCostingMode.DISCRETE_UNIT and required_dim == "count":
-                units = required_base.to_integral_value(rounding=ROUND_CEILING)
-                return units, units, (units * cand.price)
+                pack_units = _count_pack_units(v) or Decimal("1")
+                packages = (required_base / pack_units).to_integral_value(rounding=ROUND_CEILING)
+                if packages < 1:
+                    packages = Decimal("1")
+                return packages, packages * pack_units, (packages * cand.price)
             return None
         return fixed_package_cost(
             required_base, required_dim, v.net_content_quantity, v.net_content_unit, cand.price
@@ -322,6 +343,17 @@ def _best_candidate(
                 has_price=True,
                 provider_code=provider_code,
             )
+            # Rescate de count-pack: una variante contada por unidades SIN net_content (p.ej. huevos
+            # vendidos como 'package') queda UNRESOLVED en classify; si hay un pack derivable
+            # (docena / package_quantity) es costeable como paquete discreto (paridad con el carril
+            # de planificación, que la costea vía _package_dims).
+            if (
+                mode is ProductCostingMode.UNRESOLVED
+                and required_dim == "count"
+                and v.net_content_quantity is None
+                and _count_pack_units(v) is not None
+            ):
+                mode = ProductCostingMode.DISCRETE_UNIT
             if mode is ProductCostingMode.UNRESOLVED:
                 continue
             cand = _Candidate(
