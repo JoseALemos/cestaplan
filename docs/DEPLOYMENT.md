@@ -136,6 +136,16 @@ en [`infra/railway/`](../infra/railway/) (ver su `README.md` para el mapeo detal
   para evitar migraciones concurrentes.
 - El healthcheck `/health` de `api` retrasa el enrutado de tráfico hasta que la nueva
   versión responde correctamente.
+- **⚠️ Orden entre servicios en un deploy con cambio de esquema.** `worker`,
+  `ingestion-worker`, `ingestion-scheduler`, `open-prices-sync` y `db-backup` reutilizan la
+  **misma imagen de `api`** (mismo código de modelos) pero **no ejecutan migración** y Railway
+  despliega cada servicio de forma independiente. Si una migración añade/renombra columnas,
+  esos servicios (código nuevo) pueden arrancar contra el esquema viejo hasta que el pre-deploy
+  de `api` termine (columnas inexistentes → errores transitorios). Mitigado en los demonios por
+  `restartPolicyType: ON_FAILURE` (reintentan), **pero los cron con `restartPolicyType: NEVER`
+  no reintentan ese día**. Regla operativa: **desplegar y dejar migrar `api` PRIMERO**, y solo
+  después (o en paralelo tolerando el reintento) el resto; verificar con
+  `railway ssh --service api -- alembic current` antes de dar por bueno el deploy.
 
 ### 4.5 Seguridad del pipeline
 

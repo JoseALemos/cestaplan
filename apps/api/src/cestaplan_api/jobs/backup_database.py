@@ -58,6 +58,20 @@ def run() -> Path:
     backup_dir = Path(os.environ.get("BACKUP_DIR", "/backups"))
     retention_days = int(os.environ.get("BACKUP_RETENTION_DAYS", "14"))
     backup_dir.mkdir(parents=True, exist_ok=True)
+    # Un contenedor cron es efímero: si BACKUP_DIR no es un volumen montado, el volcado se escribe
+    # y DESAPARECE al terminar el contenedor (backup/DR ilusorio). No abortamos (Railway ofrece
+    # backups gestionados de Postgres como fuente primaria), pero avisamos ruidosamente salvo que
+    # el operador lo reconozca explícitamente con BACKUP_DIR_ACK_EPHEMERAL=true.
+    if (
+        not os.path.ismount(backup_dir)
+        and os.environ.get("BACKUP_DIR_ACK_EPHEMERAL") != "true"
+    ):
+        logger.warning(
+            "BACKUP_DIR %s no parece un volumen montado (posible filesystem EFÍMERO): los volcados "
+            "se perderían al reiniciar el contenedor. Monta un volumen persistente en BACKUP_DIR o "
+            "define BACKUP_DIR_ACK_EPHEMERAL=true si es intencionado.",
+            backup_dir,
+        )
 
     now = datetime.now(UTC)
     target = backup_dir / f"{_DUMP_PREFIX}{now:%Y%m%d-%H%M%S}{_DUMP_SUFFIX}"
