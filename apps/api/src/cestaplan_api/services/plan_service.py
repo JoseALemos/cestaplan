@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
@@ -40,6 +40,7 @@ from cestaplan_api.models import (
     Retailer,
     Store,
 )
+from cestaplan_api.services.planning_context import zone_store_ids
 from cestaplan_api.services.shopping_semantics import (
     PriceSourceKind,
     line_cost_breakdown,
@@ -717,6 +718,13 @@ def _latest_price_by_product(db: Session, retailer_id: int | None) -> dict[int, 
     stmt = select(ProductPrice)
     if retailer_id is not None:
         stmt = stmt.where(ProductPrice.retailer_id == retailer_id)
+        # Seguridad de zona (C2): restringe a las tiendas del CP configurado + precios nacionales
+        # (ver planning_context.zone_store_ids); si no hay zona resoluble, no filtra (previo).
+        zone = zone_store_ids(db, retailer_id)
+        if zone:
+            stmt = stmt.where(
+                or_(ProductPrice.store_id.in_(zone), ProductPrice.store_id.is_(None))
+            )
     else:
         stmt = stmt.where(ProductPrice.is_synthetic.is_(False))
     rows = (

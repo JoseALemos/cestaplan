@@ -20,7 +20,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import Settings, get_settings
@@ -36,6 +36,7 @@ from cestaplan_api.models import (
     ProductPrice,
     ProductVariant,
     RecipeFeedback,
+    Store,
 )
 from cestaplan_api.services.candidate_providers import (
     CandidateRequest,
@@ -305,6 +306,29 @@ def _build_requirements(meal_plan: MealPlan) -> list[MealRequirementDTO]:
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
+def zone_store_ids(db: Session, retailer_id: int) -> list[int]:
+    """Ids de tienda del retailer en la ZONA por defecto (CP configurado), o ``[]`` si no resuelve.
+
+    Un plan se costea a nivel de CADENA, pero los precios pueden estar ZONIFICADOS por tienda
+    (Mercadona: un store por código postal). Agregando todas las tiendas se podría costear con un
+    precio de OTRA zona (o mezclar zonas). Para evitarlo se restringe a las tiendas del CP
+    configurado (``settings.mercadona_postal_code``, la zona operativa de la app) + los precios
+    NACIONALES (``store_id IS NULL``). Si el retailer no tiene tienda en ese CP, devuelve ``[]`` y
+    el llamador NO filtra (comportamiento previo, para no romper una cadena sin zona configurada).
+    Extensión futura (no en este cambio): usar la zona del hogar/tienda del plan en vez del CP fijo.
+    """
+    postal = (get_settings().mercadona_postal_code or "").strip()
+    if not postal:
+        return []
+    return list(
+        db.execute(
+            select(Store.id).where(
+                Store.retailer_id == retailer_id, Store.postal_code == postal
+            )
+        ).scalars()
+    )
+
+
 def _latest_prices(db: Session, retailer_id: int | None) -> dict[int, ProductPrice]:
     """Most recent :class:`ProductPrice` per product WITHIN a single retailer (chain).
 
@@ -322,6 +346,13 @@ def _latest_prices(db: Session, retailer_id: int | None) -> dict[int, ProductPri
     if retailer_id is None:
         return {}
     stmt = select(ProductPrice).where(ProductPrice.retailer_id == retailer_id)
+    # Seguridad de zona (C2): no costear con un precio de otra zona. Restringe a las tiendas del CP
+    # configurado + los precios nacionales; si no hay zona resoluble, no filtra (previo).
+    zone = zone_store_ids(db, retailer_id)
+    if zone:
+        stmt = stmt.where(
+            or_(ProductPrice.store_id.in_(zone), ProductPrice.store_id.is_(None))
+        )
     rows = db.execute(
         stmt.order_by(
             ProductPrice.product_id,
