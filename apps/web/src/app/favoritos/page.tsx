@@ -118,7 +118,10 @@ export default function FavoritosPage() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    loading={favoriteMutation.isPending}
+                    loading={
+                      favoriteMutation.isPending &&
+                      favoriteMutation.variables?.recipeId === entry.recipe_id
+                    }
                     onClick={() => removeFavorite(entry.recipe_id, entry.title)}
                   >
                     Quitar
@@ -170,7 +173,10 @@ export default function FavoritosPage() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    loading={clearFeedbackMutation.isPending}
+                    loading={
+                      clearFeedbackMutation.isPending &&
+                      clearFeedbackMutation.variables === entry.recipe_id
+                    }
                     onClick={() => clearRejection(entry.recipe_id, entry.title)}
                   >
                     Quitar

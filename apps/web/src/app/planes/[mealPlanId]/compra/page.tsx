@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useSearchParams } from "next/navigation";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { addGroceryItem, substituteGroceryItem } from "@/lib/api/endpoints";
 import { useCurrentHouseholdId } from "@/lib/household/current-household";
@@ -34,6 +34,8 @@ export default function GroceryListPage() {
   const searchParams = useSearchParams();
   const mealPlanId = params.mealPlanId;
   const [currentHouseholdId] = useCurrentHouseholdId();
+  // Ítem con una sustitución en curso, para deshabilitar sus botones y evitar doble-envío.
+  const [substitutingId, setSubstitutingId] = useState<string | null>(null);
   const householdId = searchParams.get("householdId") ?? currentHouseholdId ?? "";
   const { showToast } = useToast();
   const queryClient = useQueryClient();
@@ -209,14 +211,17 @@ export default function GroceryListPage() {
                   currency={list.currency}
                   checked={checklist.effectiveChecked(item.id, item.is_checked)}
                   onToggle={() => void checklist.toggle(item.id, item.is_checked)}
-                  substituting={false}
+                  substituting={substitutingId === item.id}
                   onSubstitute={async (productId) => {
+                    setSubstitutingId(item.id);
                     try {
                       await substituteGroceryItem(mealPlanId, item.id, { product_id: productId });
                       await invalidateList();
                       showToast({ tone: "success", title: "Producto sustituido" });
                     } catch {
                       showToast({ tone: "error", title: "No se pudo sustituir el producto" });
+                    } finally {
+                      setSubstitutingId(null);
                     }
                   }}
                 />

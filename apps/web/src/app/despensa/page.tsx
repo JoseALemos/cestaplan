@@ -47,12 +47,19 @@ function AddPantryItemForm({ householdId }: { householdId: string }) {
   const addMutation = useAddPantryItemMutation(householdId);
 
   const [name, setName] = useState("");
+  const [debouncedName, setDebouncedName] = useState("");
   const [quantity, setQuantity] = useState("");
   const [unit, setUnit] = useState<string>("g");
   const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const suggestionsQuery = useIngredientsQuery(name);
+  // Debounce del autocompletado para no lanzar una petición por tecla (mismo patrón que /precios).
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedName(name.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [name]);
+
+  const suggestionsQuery = useIngredientsQuery(debouncedName);
   const suggestions = suggestionsQuery.data ?? [];
 
   const submit = async (event: React.FormEvent) => {
