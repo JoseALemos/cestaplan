@@ -7,6 +7,7 @@ is read from the environment and never baked into business logic (see docs/OPENA
 from __future__ import annotations
 
 import json
+import logging
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -41,8 +42,9 @@ class Settings(BaseSettings):
     # --- Deployment / AI mode ---
     deployment_mode: Literal["self_hosted", "cloud"] = "self_hosted"
     # Entorno de ejecución, INDEPENDIENTE de deployment_mode: un self_hosted en producción debe
-    # poner ENVIRONMENT=production para activar el fail-fast de seguridad (cookie/secreto/hosts),
-    # que antes solo cubría 'cloud'. En desarrollo local (por defecto) el guard no aplica.
+    # poner ENVIRONMENT=production para activar el fail-fast de seguridad (cookie Secure y
+    # SESSION_SECRET no-defecto; TRUSTED_HOSTS='*' solo avisa), que antes solo cubría 'cloud'. En
+    # desarrollo local (por defecto) el guard no aplica.
     environment: Literal["development", "production"] = "development"
     ai_billing_mode: Literal["platform", "byok", "disabled"] = "disabled"
 
@@ -320,9 +322,13 @@ class Settings(BaseSettings):
             )
         if not self.cookie_secure:
             problems.append("COOKIE_SECURE debe ser true (cookies de sesión sólo por HTTPS)")
+        # TRUSTED_HOSTS='*' es un endurecimiento pendiente (Host header), NO un fail-fast: hacerlo
+        # abortar tumbaría un despliegue de producción que hoy no fija TRUSTED_HOSTS. Se avisa y el
+        # owner lo fija a los dominios reales cuando pueda.
         if self.trusted_hosts_list == ["*"]:
-            problems.append(
-                "TRUSTED_HOSTS no debe ser '*' en producción (fijar los dominios reales)"
+            logging.getLogger("cestaplan.config").warning(
+                "TRUSTED_HOSTS='*' en producción: sin defensa frente a Host header; "
+                "fija TRUSTED_HOSTS a los dominios reales de web/api."
             )
         if problems:
             raise RuntimeError(

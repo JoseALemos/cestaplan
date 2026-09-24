@@ -40,14 +40,17 @@ def test_cloud_with_secure_config_passes() -> None:
     settings.validate_runtime_security()
 
 
-def test_cloud_with_wildcard_trusted_hosts_raises() -> None:
-    # SEC8: TRUSTED_HOSTS='*' (por defecto) no debe permitirse en producción.
+def test_cloud_with_wildcard_trusted_hosts_warns_but_does_not_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # SEC8: TRUSTED_HOSTS='*' se AVISA (no fail-fast): abortar tumbaría un despliegue de producción
+    # que hoy no fija TRUSTED_HOSTS. cookie/secret sí son hard-fail (aquí válidos).
     settings = Settings(
         deployment_mode="cloud", session_secret=_GOOD_SECRET, cookie_secure=True,
     )
-    with pytest.raises(RuntimeError) as exc:
-        settings.validate_runtime_security()
-    assert "TRUSTED_HOSTS" in str(exc.value)
+    with caplog.at_level("WARNING"):
+        settings.validate_runtime_security()  # no debe lanzar
+    assert any("TRUSTED_HOSTS" in r.message for r in caplog.records)
 
 
 def test_self_hosted_with_dev_defaults_never_raises() -> None:
