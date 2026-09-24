@@ -207,6 +207,7 @@ por entorno**. Tabla completa:
 | `WORKER_JOB_MAX_ATTEMPTS`      | worker         | Máximo de intentos por trabajo (`3`)                                    |
 | `WORKER_HEARTBEAT_SECONDS`     | worker         | Latido del worker sobre trabajos en curso (`15`)                        |
 | `NEXT_PUBLIC_API_BASE_URL`     | web            | URL base del API que consume el front (dominio público de `api`)        |
+| `API_UPSTREAM_URL`             | web (**build**)| **OBLIGATORIA** en el build de `web` (NODE_ENV=production): upstream server-only al que reenvía el proxy `/api-proxy`. En Railway = URL interna del servicio `api`; en docker-compose = `http://api:8000`. No es `NEXT_PUBLIC` (no se expone al navegador). Si falta, `next build` falla. |
 | `PORT`                         | web, api       | Inyectada por Railway; el `startCommand` la usa                         |
 
 Reglas:

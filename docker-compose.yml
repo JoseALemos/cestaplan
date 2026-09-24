@@ -53,9 +53,13 @@ services:
       args:
         # NEXT_PUBLIC_* is inlined into the client bundle at BUILD time, not runtime.
         NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        # API_UPSTREAM_URL is REQUIRED at build time (upstream.ts aborts in production if unset).
+        # Server-only upstream the Next proxy forwards to — the api service on the compose network.
+        API_UPSTREAM_URL: http://api:8000
     env_file: .env
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      API_UPSTREAM_URL: http://api:8000
     depends_on:
       - api
     ports:

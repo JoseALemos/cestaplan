@@ -125,6 +125,7 @@ archivos). La lista completa y su significado está en `.env.example` y en
 | `API_PUBLIC_URL`            | ✓   | ✓   |        | URL pública de `api`                                       |
 | `WEB_PUBLIC_URL`            | ✓   | ✓   |        | URL pública de `web`                                       |
 | `NEXT_PUBLIC_API_BASE_URL`  | ✓   |     |        | Debe apuntar al dominio público de `api`                   |
+| `API_UPSTREAM_URL`          | ✓   |     |        | **OBLIGATORIA en el BUILD de `web`** (build-time var): upstream server-only del proxy `/api-proxy` → URL interna del servicio `api`. No es `NEXT_PUBLIC`. Si falta, el build de `web` falla |
 | `OPENAI_API_KEY`            |     | ✓   | ✓      | Solo si `AI_BILLING_MODE != disabled`. Nunca en `web`      |
 | `OPENAI_MODEL`              |     | ✓   | ✓      | No hardcodear en código                                    |
 | `OPENAI_REASONING_EFFORT`   |     | ✓   | ✓      |                                                            |
