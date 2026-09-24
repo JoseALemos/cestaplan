@@ -45,6 +45,24 @@ def _norm_unit(unit: str) -> str:
     return unit.strip().lower()
 
 
+# Base canónica por dimensión: g (masa), ml (volumen), unidad (conteo).
+_DIMENSION_BASE: dict[str, str] = {"mass": "g", "volume": "ml", "count": "unit"}
+
+
+def to_base(quantity: Decimal, unit: str) -> tuple[Decimal, str] | None:
+    """``(quantity, unit)`` -> ``(cantidad_en_base, dimensión)`` o ``None`` si la unidad es
+    desconocida. Dimensión ∈ ``{'mass','volume','count'}``; base g/ml/unidad. Fuente ÚNICA de
+    unidades (masa/volumen culinarias incluidas) compartida por el motor y el costeo-sombra."""
+    u = _norm_unit(unit)
+    if u in _MASS_TO_G:
+        return quantity * _MASS_TO_G[u], "mass"
+    if u in _VOLUME_TO_ML:
+        return quantity * _VOLUME_TO_ML[u], "volume"
+    if u in _COUNT_UNITS:
+        return quantity, "count"
+    return None
+
+
 class UnitConverter:
     """Converts quantities between units, exactly, in :class:`Decimal`."""
 

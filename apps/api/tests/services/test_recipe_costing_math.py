@@ -21,7 +21,9 @@ def test_to_base_converts_and_tags_dimension() -> None:
     assert to_base(Decimal("1"), "l") == (Decimal("1000"), "volume")
     assert to_base(Decimal("80"), "g") == (Decimal("80"), "mass")
     assert to_base(Decimal("2"), "unit") == (Decimal("2"), "count")
-    assert to_base(Decimal("1"), "cucharada") is None  # unknown unit
+    # C8: unidades culinarias ahora reconocidas (tabla única del motor); antes daban None.
+    assert to_base(Decimal("1"), "cucharada") == (Decimal("15"), "volume")
+    assert to_base(Decimal("1"), "unidad-inventada") is None  # unidad realmente desconocida
 
 
 def test_fixed_package_ceils_to_whole_packages() -> None:

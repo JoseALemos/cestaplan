@@ -50,6 +50,7 @@ from cestaplan_api.models import (
     Retailer,
 )
 from cestaplan_api.services.price_scope import gated_current_price
+from cestaplan_engine.units import to_base as engine_to_base
 
 _CENT = Decimal("0.01")
 _QTY = Decimal("0.0001")
@@ -63,29 +64,14 @@ class PantryPolicy(StrEnum):
     PLAN_SHARED_INVENTORY = "plan_shared_inventory"  # leftovers may carry to later plan recipes
 
 
-# Canonical base unit per physical dimension (so a recipe's grams and a pack's kilograms compare).
-_DIMENSION: dict[str, str] = {
-    "g": "mass",
-    "kg": "mass",
-    "ml": "volume",
-    "l": "volume",
-    "unit": "count",
-}
-_TO_BASE: dict[str, Decimal] = {
-    "g": Decimal("1"),
-    "kg": Decimal("1000"),
-    "ml": Decimal("1"),
-    "l": Decimal("1000"),
-    "unit": Decimal("1"),
-}
-
-
 def _to_base(quantity: Decimal, unit: str) -> tuple[Decimal, str] | None:
-    """Convert ``(quantity, unit)`` to its canonical base amount + dimension, or None if unknown."""
-    dim = _DIMENSION.get(unit)
-    if dim is None:
-        return None
-    return quantity * _TO_BASE[unit], dim
+    """Convert ``(quantity, unit)`` to its canonical base amount + dimension, or None if unknown.
+
+    Delega en la ÚNICA tabla de unidades del motor (:func:`cestaplan_engine.units.to_base`) para no
+    divergir: así el carril de sombra reconoce las mismas unidades culinarias que el motor
+    (cucharada, cucharadita, cl, vaso, taza, pizca, mg…) y una receta medida en ellas deja de salir
+    'incosteable' en sombra cuando el plan sí la costea (C8)."""
+    return engine_to_base(quantity, unit)
 
 
 def _count_pack_units(v: ProductVariant) -> Decimal | None:

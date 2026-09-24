@@ -656,6 +656,8 @@ class _LineResolver:
         self._ingredient_id: dict[str, int] = {}
         # (canonical, unit, normalized_qty) -> (product_id, price_id, unit_price)
         self._by_package: dict[tuple[str, str, str], tuple[int, int | None, Decimal | None]] = {}
+        # product_id -> (product_id, price_id, unit_price): procedencia EXACTA del producto elegido.
+        self._by_product: dict[int, tuple[int, int | None, Decimal | None]] = {}
 
         latest = _latest_price_by_product(db, retailer_id)
         rows = db.execute(
@@ -669,17 +671,27 @@ class _LineResolver:
             price = latest.get(product.id)
             if price is None:
                 continue
+            provenance = (product.id, price.id, price.unit_price)
+            self._by_product.setdefault(product.id, provenance)
             key = (
                 ingredient.canonical_name,
                 price.package_unit,
                 _norm(price.package_quantity),
             )
-            self._by_package.setdefault(key, (product.id, price.id, price.unit_price))
+            self._by_package.setdefault(key, provenance)
 
     def ingredient_id(self, canonical_name: str) -> int | None:
         return self._ingredient_id.get(canonical_name)
 
     def resolve(self, line) -> tuple[int | None, int | None, Decimal | None]:
+        # Preferir el producto EXACTO que eligió el optimizador: dos productos del mismo ingrediente
+        # y mismo formato comparten la clave de formato, así que resolver por formato podría fijar
+        # una procedencia (product_id/price_id) distinta del producto realmente elegido (el coste es
+        # correcto, pero la procedencia mostrada, no).
+        if line.product_id is not None:
+            exact = self._by_product.get(int(line.product_id))
+            if exact is not None:
+                return exact
         if line.package_quantity is not None and line.package_unit is not None:
             key = (line.canonical_name, line.package_unit, _norm(line.package_quantity))
             hit = self._by_package.get(key)
