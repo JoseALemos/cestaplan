@@ -156,10 +156,15 @@ class CurrentPriceService:
         """
         variants = (
             db.execute(
-                select(ProductVariant).where(
+                select(ProductVariant)
+                .where(
                     ProductVariant.retailer_id == retailer_id,
                     ProductVariant.active.is_(True),
                 )
+                # Orden ESTABLE por id: si dos variantes del mismo producto comparten
+                # (store, observed_at), la dedupe de _price_exists deja pasar la primera; sin orden
+                # explícito, cuál "gana" sería no determinista (dependía del orden físico).
+                .order_by(ProductVariant.id)
             )
             .scalars()
             .all()
