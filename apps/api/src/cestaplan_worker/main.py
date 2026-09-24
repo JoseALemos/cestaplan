@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
 from cestaplan_api.db import SessionLocal
-from cestaplan_api.models import GenerationJob
+from cestaplan_api.models import GenerationJob, MealPlan, OptimizationRun
 from cestaplan_worker.processor import process_job
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,75 @@ def _maybe_refresh_prices(settings, now: datetime | None = None) -> None:
         logger.info("price refresh: triggered cadence-aware Mercadona sync subprocess")
     except Exception:
         logger.warning("price refresh: could not spawn sync subprocess", exc_info=True)
+
+
+# Estados NO terminales en los que un job puede quedar colgado si el worker muere (SIGKILL de
+# Railway tras el grace, OOM). Terminales: completed/failed/cancelled. queued lo retoma claim_job.
+_IN_PROGRESS_STATUSES = ("collecting_data", "generating_candidates", "validating", "optimizing")
+
+
+def _fail_linked(db: Session, job: GenerationJob, now: datetime) -> None:
+    """Sincroniza a 'failed' el run/plan enlazados de un job dead-lettered (para que la UI no quede
+    en 'en curso' para siempre). Espeja lo que hace processor._handle_failure al agotar intentos."""
+    if job.optimization_run_id is not None:
+        run = db.get(OptimizationRun, job.optimization_run_id)
+        if run is not None:
+            run.status = "failed"
+            run.finished_at = now
+    if job.meal_plan_id is not None:
+        plan = db.get(MealPlan, job.meal_plan_id)
+        if plan is not None:
+            plan.status = "failed"
+
+
+def recover_abandoned_jobs(
+    db: Session, *, now: datetime | None = None, timeout: timedelta | None = None
+) -> int:
+    """Re-encola (o dead-lettea) los GenerationJob abandonados por un worker muerto. Devuelve nº.
+
+    Un job en un estado no terminal con el heartbeat vencido pertenece a una instancia de worker
+    que ya no vive; ``claim_job`` solo mira ``queued``, así que nadie lo retomaría y quedaría
+    colgado para siempre (feature central: la generación de planes). Se llama al ARRANCAR el worker
+    (mismo patrón que ``crawl_worker.recover_abandoned``): en single-replica la instancia previa ya
+    está muerta, así que no hay riesgo de doble-procesamiento; el ``timeout`` generoso protege
+    además de un solape efímero durante un redeploy. Cada recuperación cuenta como un intento
+    (espeja ``_handle_failure``): si agota ``max_attempts`` se dead-lettea a ``failed``.
+    """
+    now = now or _now()
+    if timeout is None:
+        timeout = timedelta(seconds=max(get_settings().worker_heartbeat_seconds * 40, 600))
+    cutoff = now - timeout
+    jobs = (
+        db.execute(
+            select(GenerationJob)
+            .where(
+                GenerationJob.status.in_(_IN_PROGRESS_STATUSES),
+                or_(
+                    GenerationJob.heartbeat_at.is_(None),
+                    GenerationJob.heartbeat_at < cutoff,
+                ),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        .scalars()
+        .all()
+    )
+    for job in jobs:
+        job.attempts += 1
+        job.locked_at = None
+        job.locked_by = None
+        job.heartbeat_at = None
+        if job.attempts >= job.max_attempts:
+            job.status = "failed"
+            job.last_error = "reaped: el worker abandonó el job (heartbeat vencido)"
+            _fail_linked(db, job, now)
+        else:
+            job.status = "queued"
+            job.run_after = None
+    db.flush()
+    if jobs:
+        logger.warning("reaper: recuperados %d GenerationJob abandonados", len(jobs))
+    return len(jobs)
 
 
 def claim_job(
@@ -116,6 +185,17 @@ def run_worker(
 
     def _should_stop() -> bool:
         return bool(stop) and bool(getattr(stop, "is_set", lambda: False)())
+
+    # Al arrancar, recupera jobs que una instancia anterior dejó colgados (redeploy/OOM/SIGKILL).
+    db = SessionLocal()
+    try:
+        recover_abandoned_jobs(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("reaper: fallo recuperando jobs abandonados al arrancar", exc_info=True)
+    finally:
+        db.close()
 
     while not _should_stop():
         _maybe_refresh_prices(settings)
