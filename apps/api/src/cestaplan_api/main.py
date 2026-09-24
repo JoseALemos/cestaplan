@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 
@@ -42,6 +43,15 @@ settings.validate_runtime_security()
 
 _request_log = logging.getLogger("cestaplan.request")
 
+# El token de invitación viaja en la ruta (/invitations/{token}[/accept]); es un secreto de un solo
+# uso, así que se REDACTA antes de loguear la ruta para no filtrarlo a los logs (Railway/stdout).
+_REDACT_INVITATION_TOKEN = re.compile(r"(/invitations/)[^/]+")
+
+
+def _safe_path(path: str) -> str:
+    """Ruta apta para logging: redacta el token de invitación por ``:token``."""
+    return _REDACT_INVITATION_TOKEN.sub(r"\1:token", path)
+
 
 class RequestObservabilityMiddleware(BaseHTTPMiddleware):
     """Registra cada petición (método/ruta/estado/duración/request_id) y captura las excepciones
@@ -64,7 +74,7 @@ class RequestObservabilityMiddleware(BaseHTTPMiddleware):
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": _safe_path(request.url.path),
                     "duration_ms": duration_ms,
                 },
             )
@@ -76,7 +86,7 @@ class RequestObservabilityMiddleware(BaseHTTPMiddleware):
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": _safe_path(request.url.path),
                     "status": response.status_code,
                     "duration_ms": round((time.perf_counter() - start) * 1000, 1),
                 },

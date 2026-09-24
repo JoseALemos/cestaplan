@@ -40,6 +40,10 @@ class Settings(BaseSettings):
 
     # --- Deployment / AI mode ---
     deployment_mode: Literal["self_hosted", "cloud"] = "self_hosted"
+    # Entorno de ejecución, INDEPENDIENTE de deployment_mode: un self_hosted en producción debe
+    # poner ENVIRONMENT=production para activar el fail-fast de seguridad (cookie/secreto/hosts),
+    # que antes solo cubría 'cloud'. En desarrollo local (por defecto) el guard no aplica.
+    environment: Literal["development", "production"] = "development"
     ai_billing_mode: Literal["platform", "byok", "disabled"] = "disabled"
 
     # --- Database ---
@@ -300,10 +304,14 @@ class Settings(BaseSettings):
         Se invoca en el arranque real de la app (``main.py``), NO como ``model_validator``:
         numerosos tests construyen ``Settings(deployment_mode="cloud")`` con los valores por
         defecto para ejercitar otras funcionalidades, y no deben abortar. Sólo el arranque real
-        de la API valida y, si detecta un despliegue cloud con el secreto de sesión por defecto
-        o cookies sin ``Secure``, lanza para impedir que un despliegue inseguro llegue a servir.
+        de la API valida y, si detecta un despliegue de PRODUCCIÓN con el secreto de sesión por
+        defecto o cookies sin ``Secure``, lanza para impedir que un despliegue inseguro sirva.
+
+        Aplica a ``deployment_mode=cloud`` O a ``environment=production`` (self_hosted en prod),
+        para que un self_hosted por HTTPS no quede sin fail-fast. El desarrollo local por defecto
+        (``environment=development``, ``deployment_mode=self_hosted``) NO valida.
         """
-        if self.deployment_mode != "cloud":
+        if self.deployment_mode != "cloud" and self.environment != "production":
             return
         problems: list[str] = []
         if not self.session_secret.strip() or self.session_secret == DEV_SESSION_SECRET:
@@ -312,6 +320,10 @@ class Settings(BaseSettings):
             )
         if not self.cookie_secure:
             problems.append("COOKIE_SECURE debe ser true (cookies de sesión sólo por HTTPS)")
+        if self.trusted_hosts_list == ["*"]:
+            problems.append(
+                "TRUSTED_HOSTS no debe ser '*' en producción (fijar los dominios reales)"
+            )
         if problems:
             raise RuntimeError(
                 "Configuración de producción insegura con deployment_mode=cloud: "
