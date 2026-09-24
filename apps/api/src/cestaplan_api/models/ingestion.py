@@ -464,6 +464,9 @@ class PromotionRule(BaseModel):
     )
     required_quantity: Mapped[int | None] = mapped_column(Integer)
     charged_quantity: Mapped[int | None] = mapped_column(Integer)
+    # Descuento porcentual. Convención canónica: fracción [0,1] (0.20 = 20 %). El consumidor
+    # (basket_resolver._discount_fraction) normaliza de forma defensiva un porcentaje entero (20)
+    # a fracción, para que un valor fuera de rango nunca produzca coste negativo.
     percentage_discount: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
     fixed_discount: Mapped[Decimal | None] = mapped_column(money())
     loyalty_required: Mapped[bool] = mapped_column(

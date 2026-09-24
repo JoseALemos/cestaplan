@@ -160,6 +160,27 @@ class BasketResolution:
 # --------------------------------------------------------------------------- #
 # Promotion evaluation
 # --------------------------------------------------------------------------- #
+def _discount_fraction(pct: Decimal) -> Decimal:
+    """Normaliza un descuento porcentual a fracción [0,1].
+
+    ``percentage_discount`` puede llegar como fracción (``0.20``) o como porcentaje entero
+    (``20`` — la convención de la ingesta): un valor >1 se interpreta como porcentaje y se divide
+    entre 100. Se acota a [0,1] para que la línea NUNCA salga negativa (base·(1-pct) con pct=20
+    daba -19·base) ni gratis por un valor fuera de rango.
+    """
+    frac = pct / Decimal("100") if pct > Decimal("1") else pct
+    if frac < 0:
+        return Decimal("0")
+    if frac > 1:
+        return Decimal("1")
+    return frac
+
+
+def _fmt_pct(frac: Decimal) -> str:
+    """Fracción -> porcentaje legible sin notación científica ('0.20'->'20', '0.125'->'12.5')."""
+    return format((frac * 100).normalize(), "f")
+
+
 def apply_promotion(
     rule: PromotionRule | None, packages: int, package_price: Decimal
 ) -> tuple[Decimal, PromotionApplied | None]:
@@ -197,19 +218,19 @@ def apply_promotion(
         applied = _mk(f"{n}x{m}")
     elif ptype == "second_unit" and rule.percentage_discount is not None:
         n = rule.required_quantity or 2
-        pct = rule.percentage_discount
+        pct = _discount_fraction(rule.percentage_discount)
         discounted_units = packages // n
         full_units = packages - discounted_units
         cost = (
             Decimal(full_units) * package_price
             + Decimal(discounted_units) * package_price * (Decimal("1") - pct)
         )
-        applied = _mk(f"2ª unidad -{(pct * 100).normalize()}%")
+        applied = _mk(f"2ª unidad -{_fmt_pct(pct)}%")
     elif ptype in {"percentage", "min_quantity"} and rule.percentage_discount is not None:
         if rule.required_quantity is None or packages >= rule.required_quantity:
-            pct = rule.percentage_discount
+            pct = _discount_fraction(rule.percentage_discount)
             cost = base * (Decimal("1") - pct)
-            applied = _mk(f"-{(pct * 100).normalize()}%")
+            applied = _mk(f"-{_fmt_pct(pct)}%")
     elif ptype == "fixed" and rule.fixed_discount is not None:
         cost = base - rule.fixed_discount
         if cost < 0:
