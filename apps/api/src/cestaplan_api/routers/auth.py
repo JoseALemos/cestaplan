@@ -24,6 +24,7 @@ from cestaplan_api.deps import (
 )
 from cestaplan_api.models import User, UserSession
 from cestaplan_api.schemas.auth import (
+    AccountDeleteRequest,
     LoginRequest,
     LoginResponse,
     MessageResponse,
@@ -41,6 +42,7 @@ from cestaplan_api.security import (
     registration_rate_limiter,
     verify_password,
 )
+from cestaplan_api.services.account_deletion import anonymize_account
 from cestaplan_api.services.audit import record_audit
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -181,6 +183,36 @@ def logout(
 def me(user: CurrentUser) -> UserResponse:
     """Return the authenticated user."""
     return UserResponse.from_model(user)
+
+
+@router.post(
+    "/account/delete", response_model=MessageResponse, dependencies=[Depends(verify_csrf)]
+)
+def delete_account(
+    payload: AccountDeleteRequest,
+    request: Request,
+    response: Response,
+    user: CurrentUser,
+    db: DbSession,
+) -> MessageResponse:
+    """Supresión de cuenta (art. 17 RGPD) por anonimización irreversible.
+
+    Requiere confirmación explícita (repetir el email de la cuenta) además de la cookie de sesión
+    y el CSRF, para que un borrado tan destructivo nunca sea accidental. Anonimiza la cuenta,
+    revoca las sesiones y limpia las cookies (ver ``services.account_deletion``).
+    """
+    if payload.confirm_email.strip().lower() != user.email.strip().lower():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="La confirmación no coincide con el email de la cuenta.",
+        )
+    counts = anonymize_account(db, user)
+    record_audit(
+        db, action="account.deleted", actor_user_id=user.id, entity_type="user",
+        entity_public_id=user.public_id, metadata=counts, ip=_client_ip(request),
+    )
+    _clear_session_cookies(response)
+    return MessageResponse(detail="Cuenta eliminada")
 
 
 @router.post("/password-recovery", response_model=MessageResponse)

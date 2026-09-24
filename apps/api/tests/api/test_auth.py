@@ -41,6 +41,37 @@ def test_me_requires_authentication(client: TestClient) -> None:
     assert client.get("/api/v1/auth/me").status_code == 401
 
 
+def test_delete_account_requires_matching_email(client: TestClient) -> None:
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    r = client.post(
+        "/api/v1/auth/account/delete",
+        json={"confirm_email": "otro@example.com"},
+        headers=csrf(token),
+    )
+    assert r.status_code == 400
+    assert client.get("/api/v1/auth/me").status_code == 200  # la cuenta sigue viva
+
+
+def test_delete_account_anonymizes_and_ends_session(client: TestClient) -> None:
+    email = _email()
+    register(client, email)
+    token = login(client, email)
+    r = client.post(
+        "/api/v1/auth/account/delete", json={"confirm_email": email}, headers=csrf(token)
+    )
+    assert r.status_code == 200, r.text
+    # Sesión terminada.
+    assert client.get("/api/v1/auth/me").status_code == 401
+    # El email ya no existe (anonimizado): no se puede volver a entrar.
+    relog = client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "correct-horse-battery"},
+    )
+    assert relog.status_code == 401
+
+
 def test_duplicate_email_rejected(client: TestClient) -> None:
     email = _email()
     register(client, email)

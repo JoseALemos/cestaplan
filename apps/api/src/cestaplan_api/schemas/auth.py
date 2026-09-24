@@ -60,3 +60,9 @@ class LoginResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class AccountDeleteRequest(BaseModel):
+    """Confirmación explícita de supresión de cuenta (art. 17): repetir el email de la cuenta."""
+
+    confirm_email: EmailStr
