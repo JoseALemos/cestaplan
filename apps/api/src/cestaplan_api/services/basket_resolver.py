@@ -45,6 +45,13 @@ from cestaplan_engine.units import ConversionError, UnitConverter
 _ESTIMATED = "estimated"
 
 
+def _is_degraded(price_type: str, status: FreshnessStatus) -> bool:
+    """Un precio cuenta como ESTIMADO (no coste 'known') si su tipo ya es 'estimated' o si está
+    CADUCADO (expirado): el motor degrada caducado→estimado, así que la cesta no debe sumarlo como
+    coste conocido ni preferirlo frente a uno fresco."""
+    return price_type == _ESTIMATED or status is FreshnessStatus.EXPIRED
+
+
 # --------------------------------------------------------------------------- #
 # Requested item + result value objects
 # --------------------------------------------------------------------------- #
@@ -103,7 +110,7 @@ class ResolvedLine:
 
     @property
     def is_estimated(self) -> bool:
-        return self.price_type == _ESTIMATED
+        return _is_degraded(self.price_type, self.freshness)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,9 +415,9 @@ class BasketResolver:
 
     @staticmethod
     def _prefer(candidate: CurrentPrice, current: CurrentPrice) -> bool:
-        """Prefer a real (non-estimated) price, then the cheaper one."""
-        cand_est = candidate.price_type == _ESTIMATED
-        cur_est = current.price_type == _ESTIMATED
+        """Prefer a real (non-estimated, non-expired) price, then the cheaper one."""
+        cand_est = _is_degraded(candidate.price_type, candidate.status)
+        cur_est = _is_degraded(current.price_type, current.status)
         if cand_est != cur_est:
             return not cand_est
         return candidate.amount < current.amount

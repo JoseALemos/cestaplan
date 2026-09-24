@@ -70,8 +70,12 @@ def gated_current_price(
     price = prices.current(db, product_variant_id, store_id=store_id, as_of=as_of, staging=staging)
     if price is not None and scope_satisfies(price.price_scope, required_scope):
         return price
+    # Los precios nacionales se guardan con store_id=None (son store-agnósticos). El fallback debe
+    # consultarlos SIN store_id: filtrar por la tienda exacta descartaría la fila nacional (store_id
+    # NULL) y una variante con solo precio nacional saldría como "sin precio" en una cesta/plan de
+    # tienda exacta.
     national = prices.current(
-        db, product_variant_id, store_id=store_id, scope="national", as_of=as_of, staging=staging
+        db, product_variant_id, store_id=None, scope="national", as_of=as_of, staging=staging
     )
     if national is not None and scope_satisfies(national.price_scope, required_scope):
         return national

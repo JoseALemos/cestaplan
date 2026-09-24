@@ -163,6 +163,10 @@ class PriceCoverageService:
                 # Rolled-back and disputed rows are never a current/latest price (model contract).
                 PriceObservation.rolled_back_at.is_(None),
                 PriceObservation.verification_status != "disputed",
+                # Solo la vista de PRODUCCIÓN: las observaciones staging_only nunca las usa el
+                # planner de producción, así que contarlas inflaría la cobertura frente a lo real
+                # (alineado con CurrentPriceService._latest_valid).
+                PriceObservation.staging_only.is_(False),
             )
             .order_by(
                 PriceObservation.valid_until.is_(None).desc(),
