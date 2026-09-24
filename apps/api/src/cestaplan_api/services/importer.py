@@ -30,6 +30,7 @@ from cestaplan_api.adapters.files import CsvRetailerAdapter, JsonRetailerAdapter
 from cestaplan_api.models import (
     DataImport,
     DataSource,
+    GroceryListItem,
     Ingredient,
     IngredientProductMapping,
     Product,
@@ -823,17 +824,32 @@ def commit_import(
 def rollback_import(
     db: Session, data_import: DataImport, *, user_id: int | None = None, ip: str | None = None
 ) -> int:
-    """Logically roll back a committed import.
+    """Roll back a committed import (its prices only), sin dejar la operación a medias.
 
-    Deletes exactly the ``ProductPrice`` observations this batch created (matched by
-    ``import_id``) and sets the batch's status to ``rolled_back``. It does NOT delete the
-    products, stores, retailers or barcodes the import may have created — only the price
-    observations are removed. Returns the number of price rows deleted.
+    Deletes exactly the ``ProductPrice`` rows this batch created (matched by ``import_id``) and
+    sets the batch's status to ``rolled_back``. It does NOT delete the products, stores, retailers
+    or barcodes the import may have created — only the prices. Returns the number of price rows
+    deleted.
+
+    GUARDA DE INTEGRIDAD: si alguna línea de lista de la compra referencia un precio de esta
+    importación (``GroceryListItem.price_product_price_id``, FK ``NO ACTION``), se ABORTA con un
+    ``ValueError`` explícito (la ruta lo mapea a 409) ANTES de tocar nada — así el borrado nunca
+    falla a mitad con un ``IntegrityError`` no gestionado (500) ni deja la transacción envenenada.
     """
     if data_import.status != "committed":
         raise ValueError(
             f"sólo se puede revertir una importación 'committed' (estado actual: "
             f"'{data_import.status}')"
+        )
+    referenced = db.execute(
+        select(func.count(GroceryListItem.id))
+        .join(ProductPrice, GroceryListItem.price_product_price_id == ProductPrice.id)
+        .where(ProductPrice.import_id == data_import.id)
+    ).scalar_one()
+    if referenced:
+        raise ValueError(
+            f"no se puede revertir: {referenced} línea(s) de lista de la compra referencian "
+            f"precios de esta importación; elimina o re-costea esas listas antes de revertir"
         )
     deleted = db.execute(
         select(func.count(ProductPrice.id)).where(

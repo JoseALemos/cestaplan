@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.models import (
+    GroceryList,
+    GroceryListItem,
+    Household,
     Ingredient,
     IngredientProductMapping,
+    MealPlan,
     Product,
     ProductBarcode,
     ProductPrice,
     Retailer,
+    User,
 )
 from cestaplan_api.services import importer
 
@@ -212,6 +219,51 @@ def test_duplicate_within_batch_detected(db_session: Session) -> None:
 # --------------------------------------------------------------------------- #
 # Rollback
 # --------------------------------------------------------------------------- #
+def test_rollback_blocked_when_grocery_list_references_prices(db_session: Session) -> None:
+    # D2: si una línea de lista de la compra referencia un precio de la importación, el rollback
+    # se ABORTA con 409 (ValueError) ANTES de borrar — nunca un IntegrityError/500 no gestionado.
+    di = importer.create_import(db_session, content=_csv(_row()), fmt="csv", dry_run=False)
+    importer.commit_import(db_session, di)
+    db_session.flush()
+    price_id = db_session.execute(
+        select(ProductPrice.id).where(ProductPrice.import_id == di.id)
+    ).scalar_one()
+
+    user = User(email="d2@x.com", password_hash="x", display_name="D2")
+    db_session.add(user)
+    db_session.flush()
+    hh = Household(name="Hogar D2", owner_user_id=user.id, currency="EUR")
+    db_session.add(hh)
+    db_session.flush()
+    plan = MealPlan(
+        household_id=hh.id, start_date=date(2026, 7, 21), end_date=date(2026, 7, 27),
+        currency="EUR", status="ready",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    gl = GroceryList(meal_plan_id=plan.id, currency="EUR", coverage_status="partial")
+    db_session.add(gl)
+    db_session.flush()
+    db_session.add(
+        GroceryListItem(
+            grocery_list_id=gl.id, needed_quantity=Decimal("1"), pantry_quantity=Decimal("0"),
+            pending_quantity=Decimal("1"), price_status="known", price_product_price_id=price_id,
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(ValueError, match="lista de la compra"):
+        importer.rollback_import(db_session, di)
+    # No se borró nada ni cambió el estado.
+    assert di.status == "committed"
+    assert (
+        db_session.execute(
+            select(func.count(ProductPrice.id)).where(ProductPrice.import_id == di.id)
+        ).scalar_one()
+        == 1
+    )
+
+
 def test_rollback_removes_only_batch_prices_leaves_products(db_session: Session) -> None:
     di = importer.create_import(db_session, content=_csv(_row()), fmt="csv", dry_run=False)
     importer.commit_import(db_session, di)
