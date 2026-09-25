@@ -84,7 +84,7 @@ def test_changed_capture_stores_compressed_body_and_medium_retention(
     result = _changed_result()
     # captured_at FIJO fuera de frontera DST: +30 días (jun→jul) no cruza el cambio de hora, así
     # el delta es determinista todo el año. (En la BD local, tz Europe/Madrid + columnas naive, un
-    # captured_at cerca del cambio de octubre daba 30 d −1 h; en prod la sesión es UTC y no pasa.)
+    # captured_at cerca del cambio de octubre daba 30 d menos 1 h; en prod la sesión es UTC.)
     capture = _repo(db_session).store(
         result, retailer_id=variant.retailer_id, source_url=result.url,
         captured_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
