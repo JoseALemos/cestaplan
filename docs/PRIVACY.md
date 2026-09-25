@@ -47,15 +47,23 @@ se tratan como **datos sensibles de aplicación**, con protección reforzada:
 
 ## 3. Eliminación y anonimización de cuenta
 
-- Al eliminar la cuenta, se **borran** los datos personales directos: credenciales,
-  email, perfil dietético, alergias, restricciones, preferencias, favoritos, sesiones.
-- Cuando un dato forma parte de registros que deben conservarse por integridad o
-  auditoría (p. ej. entradas de `AuditLog` o agregados de consumo en `UsageLedger`), se
-  **anonimiza**: se disocia de la persona sustituyendo identificadores por valores no
-  reversibles, de modo que dejen de ser datos personales.
+- El usuario puede **suprimir su cuenta** (art. 17 RGPD) desde el endpoint autenticado
+  `POST /api/v1/auth/account/delete` (requiere confirmar repitiendo su email + CSRF). La
+  operación es **irreversible** y hace: revoca todas las sesiones; **anonimiza** la cuenta
+  (email/nombre/consentimiento sustituidos por marcadores, contraseña inutilizada,
+  `status='anonymized'`); elimina las membresías de hogar del usuario; hace **soft-delete**
+  de los hogares que posee y de los que es el único miembro; y **redacta el email** en sus
+  entradas de `AuditLog`.
+- La fila `user` se **conserva anonimizada** (no borrada) porque la auditoría y los datos de
+  hogar la referencian por id; al disociarla de la persona deja de ser dato personal.
+- **Caso a revisar (pendiente de decisión del responsable):** un hogar que el usuario posee
+  pero que tiene **otros miembros** se conserva (dato de terceros); no se fuerza la
+  transferencia de propiedad. Documentado para valorarlo con el asesor.
 - El **soft delete** se usa solo donde es imprescindible; no es un sustituto del borrado
   real de datos personales.
 - Los datos demo (`is_synthetic=true`) no son datos personales y no se ven afectados.
+- **Retención de auditoría:** el `audit_log` se purga por retención (`AUDIT_RETENTION_DAYS`,
+  por defecto 365 días; job `purge_audit_logs`). El responsable confirma el periodo.
 
 ---
 
@@ -134,6 +142,7 @@ según su jurisdicción y su relación con los usuarios.
 | Alergias / restricciones               | Seguridad alimentaria — restricción dura (dato sensible) | Consentimiento                      | Mientras exista la cuenta; borrado al eliminarla      |
 | Preferencias y favoritos               | Personalizar propuestas (dato sensible)                  | Consentimiento                      | Mientras exista la cuenta; borrado al eliminarla      |
 | Equipamiento del hogar                 | Filtrar recetas por equipo disponible                    | Ejecución del contrato              | Mientras exista la cuenta                             |
+| Dirección/CP del hogar (opcional)      | Coste de desplazamiento y geocerco de sede (ver §10)     | Consentimiento / contrato           | Mientras se declare; ⚠️ se envía a Nominatim/OSM (§10) |
 | Planes, listas y feedback              | Función principal del producto                           | Ejecución del contrato              | Mientras exista la cuenta; borrado al eliminarla      |
 | Contexto pseudonimizado a OpenAI       | Proponer recetas candidatas                              | Consentimiento específico (opt-in)  | No se conserva más allá de lo necesario; sin PII      |
 | Consumo de IA (`UsageLedger`, cloud)   | Cuotas y control de coste                                | Interés legítimo / contrato         | Agregado; se anonimiza al eliminar la cuenta          |
@@ -149,3 +158,30 @@ retirar el consentimiento de IA y **eliminar su cuenta** (borrado real o anonimi
 En despliegues sujetos al RGPD u otras normativas, el operador debe atender además los
 derechos aplicables (oposición, limitación, portabilidad) según su rol de responsable
 del tratamiento.
+
+---
+
+## 10. Geocodificación de direcciones (tercero: Nominatim / OpenStreetMap)
+
+> ⚠️ Divulgación factual del flujo de datos, **pendiente de validación por el asesor** antes de
+> publicarse como declaración legal.
+
+Cuando el hogar declara una **dirección/código postal** (opcional, para el coste de desplazamiento
+y el geocerco de sede), CestaPlan la **envía a un tercero** para obtener coordenadas:
+
+- **Nominatim (OpenStreetMap Foundation)** — `nominatim.openstreetmap.org`: recibe el texto de la
+  dirección, el código postal y la ciudad para geocodificarlos.
+- **Overpass (OpenStreetMap)** — recibe **coordenadas** (no la dirección) para localizar tiendas
+  cercanas.
+
+Notas:
+- La dirección postal es un **dato personal**; su envío a la OSM Foundation es una comunicación a un
+  tercero que debe informarse aquí y, según el caso, valorarse como **transferencia**.
+- El destino es un **host fijo por configuración** (no lo controla el usuario): no es un SSRF.
+- La función es **desactivable** por configuración (`GEO_ENABLED`) y solo actúa si el hogar declara
+  dirección. Se cumple la *usage policy* de Nominatim (cabeceras User-Agent/From).
+- **Alternativa** para máxima minimización: auto-hospedar el geocoder (Nominatim propio) para no
+  enviar direcciones a un tercero.
+
+Acciones pendientes del responsable: confirmar base jurídica, informar este flujo en el aviso de
+privacidad público y decidir si se ofrece como opt-in explícito o se auto-hospeda el geocoder.
