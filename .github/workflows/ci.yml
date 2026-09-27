@@ -123,8 +123,9 @@ jobs:
       - name: Typecheck (tsc)
         run: pnpm --filter @cestaplan/web typecheck
 
-      - name: Test (node --test, native TS)
-        # Pure display/format helpers; run on Node's built-in test runner (no extra framework).
+      - name: Test (node --test + vitest component tests)
+        # `*.test.ts` (helpers puros) en el runner nativo de Node; `*.test.tsx` (componentes React)
+        # en Vitest + Testing Library sobre jsdom (T3). El script `test` encadena ambos.
         run: pnpm --filter @cestaplan/web test
 
       - name: Build (next, standalone)

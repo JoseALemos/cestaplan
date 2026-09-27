@@ -2,14 +2,14 @@
   "name": "@cestaplan/web",
   "version": "0.2.0",
   "private": true,
-  "description": "CestaPlan \u2014 PWA mobile-first de planificaci\u00f3n de comidas consciente del presupuesto y de la tienda.",
+  "description": "CestaPlan — PWA mobile-first de planificación de comidas consciente del presupuesto y de la tienda.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
-    "test": "node --test 'src/**/*.test.ts'"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.vitest.json",
+    "test": "node --test 'src/**/*.test.ts' && vitest run"
   },
   "dependencies": {
     "@hookform/resolvers": "5.4.0",
@@ -24,13 +24,20 @@
     "@eslint/js": "^9.39.1",
     "@tailwindcss/postcss": "4.3.3",
     "@tanstack/react-query-devtools": "5.101.4",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^22.15.0",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
     "eslint": "9.39.5",
     "eslint-config-next": "16.2.11",
+    "jsdom": "^25.0.1",
     "tailwindcss": "4.3.3",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^3.2.7"
   },
   "engines": {
     "node": ">=22"

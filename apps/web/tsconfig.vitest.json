@@ -1,0 +1,9 @@
+{
+  "// note": "Type-checks the React component tests (*.test.tsx) run by Vitest. Kept separate so the app's `tsc --noEmit` and `next build` never process test files (excluded in tsconfig.json). Inherits the app's full strictness.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["vitest.setup.ts", "vitest.config.ts", "src/**/*.test.tsx"],
+  "exclude": ["node_modules"]
+}
