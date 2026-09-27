@@ -171,6 +171,28 @@ def claim_job(
     return job
 
 
+def _purge_audit_logs_startup() -> None:
+    """Purga los AuditLog anteriores a la retención al arrancar el worker (RGPD, best-effort).
+
+    Idempotente (solo borra filas más antiguas que ``AUDIT_RETENTION_DAYS``) y no bloqueante:
+    cualquier fallo se registra y se ignora. El worker es un daemon siempre activo que se reinicia
+    con cada deploy, así que ejecutarla al arrancar basta para un horizonte de ~1 año sin un cron
+    aparte (ver también ``infra/railway/audit-purge.json`` para un cron dedicado opcional)."""
+    try:
+        from cestaplan_api.jobs.purge_audit_logs import _retention_days
+        from cestaplan_api.jobs.purge_audit_logs import run as purge_run
+
+        db = SessionLocal()
+        try:
+            purged = purge_run(db, retention_days=_retention_days(), commit=True)
+            if purged:
+                logger.info("audit purge: %d filas de auditoría borradas (retención)", purged)
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("audit purge: fallo al arrancar (ignorado)", exc_info=True)
+
+
 def run_worker(
     worker_id: str | None = None,
     *,
@@ -196,6 +218,9 @@ def run_worker(
         logger.warning("reaper: fallo recuperando jobs abandonados al arrancar", exc_info=True)
     finally:
         db.close()
+
+    # Purga de retención de auditoría (RGPD, best-effort, idempotente).
+    _purge_audit_logs_startup()
 
     while not _should_stop():
         _maybe_refresh_prices(settings)

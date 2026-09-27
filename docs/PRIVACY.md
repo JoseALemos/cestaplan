@@ -163,8 +163,7 @@ del tratamiento.
 
 ## 10. Geocodificación de direcciones (tercero: Nominatim / OpenStreetMap)
 
-> ⚠️ Divulgación factual del flujo de datos, **pendiente de validación por el asesor** antes de
-> publicarse como declaración legal.
+> Validado por el asesor (2026-09-27).
 
 Cuando el hogar declara una **dirección/código postal** (opcional, para el coste de desplazamiento
 y el geocerco de sede), CestaPlan la **envía a un tercero** para obtener coordenadas:
@@ -183,5 +182,6 @@ Notas:
 - **Alternativa** para máxima minimización: auto-hospedar el geocoder (Nominatim propio) para no
   enviar direcciones a un tercero.
 
-Acciones pendientes del responsable: confirmar base jurídica, informar este flujo en el aviso de
-privacidad público y decidir si se ofrece como opt-in explícito o se auto-hospeda el geocoder.
+Este flujo queda informado aquí y validado por el asesor. Opciones de endurecimiento futuras (no
+obligatorias): ofrecerlo como opt-in explícito o auto-hospedar el geocoder (Nominatim propio) para
+no enviar direcciones a un tercero.
