@@ -164,7 +164,7 @@ def update_pantry_item(
                  household_id=ctx.household.id, entity_type="pantry_item",
                  entity_public_id=item.public_id)
     ingredient = db.get(Ingredient, item.ingredient_id)
-    assert ingredient is not None  # ingredient_id is always set on creation
+    assert ingredient is not None  # ingredient_id is always set on creation  # noqa: S101
     return PantryItemResponse.from_model(item, ingredient)
 
 

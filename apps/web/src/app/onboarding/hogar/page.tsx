@@ -6,10 +6,12 @@ import { useForm } from "react-hook-form";
 
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 import { type HouseholdFormValues, householdSchema } from "@/lib/onboarding/schemas";
+import { CURRENCY_OPTIONS } from "@/lib/constants/currencies";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 
 export default function HogarPage() {
   const router = useRouter();
@@ -48,11 +50,9 @@ export default function HogarPage() {
             error={errors.name?.message}
             {...register("name")}
           />
-          <Input
+          <Select
             label="Moneda"
-            placeholder="EUR"
-            hint="Código ISO de 3 letras."
-            maxLength={3}
+            options={CURRENCY_OPTIONS}
             required
             error={errors.currency?.message}
             {...register("currency")}

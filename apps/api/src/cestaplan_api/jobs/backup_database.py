@@ -84,7 +84,7 @@ def run() -> Path:
         ["pg_dump", "--no-owner", "--no-privileges", "--format=plain", _libpq_url(database_url)],
         stdout=subprocess.PIPE,
     )
-    assert proc.stdout is not None
+    assert proc.stdout is not None  # noqa: S101
     with gzip.open(tmp, "wb") as gz:
         shutil.copyfileobj(proc.stdout, gz)
     code = proc.wait()

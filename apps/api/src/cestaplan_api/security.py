@@ -158,8 +158,17 @@ class LoginRateLimiter(RateLimiter):
 
 
 # Module-level singletons. In-memory / per-process (see :class:`RateLimiter`), correcto a
-# numReplicas=1. Login se limita por ``(email, ip)``; el resto por IP.
+# numReplicas=1. Login se limita en dos ejes COMPLEMENTARIOS (ver ``auth.login``):
+#   - ``login_rate_limiter`` por ``(email, ip)``: corta la fuerza bruta desde una IP concreta.
+#   - ``login_account_rate_limiter`` por ``email`` (independiente de IP): frena el
+#     credential-stuffing DISTRIBUIDO (una misma cuenta atacada desde muchas IPs, que evadía el
+#     tope (email,ip)). Umbral ALTO y ventana corta a propósito: un usuario legítimo no acumula
+#     20 fallos en 15 min, así que no hay lockout-DoS práctico por accidente; un ataque sostenido
+#     queda acotado y su bloqueo se auto-cura al expirar la ventana.
+# ⚠️ Estado EN MEMORIA: al escalar a varias réplicas hay que mover TODO esto a un almacén
+# compartido (Redis) para que los topes sean globales y no por proceso.
 login_rate_limiter = LoginRateLimiter()
+login_account_rate_limiter = LoginRateLimiter(max_attempts=20, window_seconds=900)
 # Registro de cuentas: barrera anti-abuso por IP (creación masiva de cuentas).
 registration_rate_limiter = RateLimiter(max_attempts=10, window_seconds=3600)
 # Generación de planes: endpoint caro (encola trabajo del worker); barrera por IP.

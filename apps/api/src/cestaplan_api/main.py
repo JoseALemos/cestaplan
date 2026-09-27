@@ -95,7 +95,7 @@ class RequestObservabilityMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(
     title="CestaPlan API",
-    version="0.0.0",
+    version="0.2.0",
     summary="Planes de alimentación por tienda, presupuesto y preferencias.",
 )
 

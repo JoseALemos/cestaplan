@@ -21,7 +21,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from cestaplan_api.config import get_settings
@@ -36,30 +36,65 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-# The always-on generation worker doubles as the trigger for the monthly Mercadona price
-# refresh (there is no separate cron service). Once a day it fires a cadence-aware, ISOLATED
-# subprocess that self-skips (via --min-age-days) unless a refresh is actually due, so plan
-# generation is never blocked and a crawl failure can never crash this loop.
-_PRICE_REFRESH_CHECK_INTERVAL = timedelta(hours=24)
+# El worker siempre-activo también dispara el refresco mensual de precios de Mercadona. La CADENCIA
+# es DURABLE: se decide contra la antigüedad del precio de PRODUCCIÓN de Mercadona más reciente en
+# la BD (``imported_at``), NO contra estado en memoria que se perdía en cada reinicio. Existen crons
+# dedicados para otras ingestas (``ingestion-scheduler`` / ``open-prices-sync``); este disparo vive
+# aquí a propósito para no exigir un servicio cron extra solo para Mercadona.
+#
+# El estado en memoria de abajo NO es la cadencia: es solo un limitador de la frecuencia de la
+# CONSULTA a BD (para no comprobarla en cada iteración del bucle). Que se reinicie es inofensivo —
+# tras un reinicio se hace UNA comprobación extra — porque el spawn lo decide la BD: nunca se
+# re-dispara un refresco que no toque por cadencia (esto corrige el defecto A6 del audit).
+_PRICE_REFRESH_DB_CHECK_INTERVAL = timedelta(hours=24)
 _PRICE_REFRESH_MIN_AGE_DAYS = 28
-_price_refresh_state: dict[str, datetime | None] = {"last_check": None}
+_price_refresh_state: dict[str, datetime | None] = {"last_db_check": None}
+
+
+def _mercadona_refresh_due(db: Session, now: datetime, *, min_age_days: int) -> bool:
+    """True si NO hay precio de producción de Mercadona o el más reciente tiene ≥ ``min_age_days``.
+
+    Ancla DURABLE de la cadencia (sobrevive a reinicios): ``imported_at`` de la observación de
+    precio de producción (``staging_only=False``) más reciente del retailer ``mercadona``.
+    """
+    from cestaplan_api.models import PriceObservation, Retailer
+
+    newest = db.execute(
+        select(func.max(PriceObservation.imported_at))
+        .join(Retailer, Retailer.id == PriceObservation.retailer_id)
+        .where(Retailer.slug == "mercadona", PriceObservation.staging_only.is_(False))
+    ).scalar_one_or_none()
+    if newest is None:
+        return True
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=UTC)
+    return (now - newest) >= timedelta(days=min_age_days)
 
 
 def _maybe_refresh_prices(settings, now: datetime | None = None) -> None:
-    """Once a day, trigger the cadence-aware Mercadona price refresh in a detached subprocess.
+    """Dispara el refresco de precios de Mercadona en un subproceso aislado SOLO si toca (cadencia).
 
-    Best-effort maintenance: any failure is logged and swallowed so the job loop is unaffected.
-    The subprocess itself enforces the monthly cadence and the production activation gate.
+    Best-effort: cualquier fallo se registra y se ignora para no afectar al bucle de generación de
+    planes. El subproceso reafirma la cadencia y la activación de producción con ``--min-age-days``.
     """
     now = now or _now()
     if not getattr(settings, "mercadona_connector_enabled", False):
         return
-    last = _price_refresh_state["last_check"]
-    if last is not None and (now - last) < _PRICE_REFRESH_CHECK_INTERVAL:
+    # Limitador de frecuencia de la CONSULTA (no de la cadencia): no consultamos la BD cada vuelta.
+    last = _price_refresh_state["last_db_check"]
+    if last is not None and (now - last) < _PRICE_REFRESH_DB_CHECK_INTERVAL:
         return
-    _price_refresh_state["last_check"] = now
+    _price_refresh_state["last_db_check"] = now
     try:
-        subprocess.Popen(
+        with SessionLocal() as db:
+            due = _mercadona_refresh_due(db, now, min_age_days=_PRICE_REFRESH_MIN_AGE_DAYS)
+    except Exception:
+        logger.warning("price refresh: no se pudo comprobar la cadencia en BD", exc_info=True)
+        return
+    if not due:
+        return
+    try:
+        subprocess.Popen(  # noqa: S603
             [
                 sys.executable, "-m", "cestaplan_api.jobs.sync_price_provider",
                 "--provider", "apify-mercadona", "--retailer", "mercadona",
@@ -67,7 +102,7 @@ def _maybe_refresh_prices(settings, now: datetime | None = None) -> None:
             ],
             start_new_session=True,  # detached: survives a worker restart, never blocks the loop
         )
-        logger.info("price refresh: triggered cadence-aware Mercadona sync subprocess")
+        logger.info("price refresh: cadencia vencida en BD, lanzado el sync de Mercadona")
     except Exception:
         logger.warning("price refresh: could not spawn sync subprocess", exc_info=True)
 

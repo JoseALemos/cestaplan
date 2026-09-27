@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from cestaplan_api.db import engine
 from cestaplan_api.security import (
+    login_account_rate_limiter,
     login_rate_limiter,
     plan_generation_rate_limiter,
     registration_rate_limiter,
@@ -26,6 +27,7 @@ from cestaplan_api.security import (
 def _reset_rate_limiter() -> Iterator[None]:
     for limiter in (
         login_rate_limiter,
+        login_account_rate_limiter,
         registration_rate_limiter,
         plan_generation_rate_limiter,
     ):
@@ -33,6 +35,7 @@ def _reset_rate_limiter() -> Iterator[None]:
     yield
     for limiter in (
         login_rate_limiter,
+        login_account_rate_limiter,
         registration_rate_limiter,
         plan_generation_rate_limiter,
     ):

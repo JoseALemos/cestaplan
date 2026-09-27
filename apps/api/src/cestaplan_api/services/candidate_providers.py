@@ -311,7 +311,7 @@ class OpenAICandidateProvider:
         self._settings = settings
         self._client = client
         self._sleep = sleep
-        self._rng = random.Random(0)
+        self._rng = random.Random(0)  # noqa: S311
 
     # -- public API ------------------------------------------------------- #
     def get_candidates(self, db: Session, request: CandidateRequest) -> CandidateBundle:
@@ -347,7 +347,7 @@ class OpenAICandidateProvider:
                     break
                 delay = min(_BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt))
                 self._sleep(delay + self._rng.uniform(0, _BACKOFF_BASE_SECONDS))
-        assert last_exc is not None
+        assert last_exc is not None  # noqa: S101
         raise last_exc
 
     def _call_openai(self, db: Session, request: CandidateRequest) -> str:

@@ -205,6 +205,34 @@ def test_competing_candidate_is_visible_and_approvable(
     assert row.mapping_status == "manually_approved"
 
 
+def test_candidates_pagination_total_and_pages(
+    client: TestClient, db_session: Session
+) -> None:
+    """D4: limit/offset paginan en SQL SIN romper el orden por impacto; ``total`` es el recuento
+    completo (no el tamaño de página) y las páginas no se solapan."""
+    key = "tomate-d4pag"
+    rows = [_competing(db_session, key, f"D4-{i}") for i in range(3)]
+    db_session.commit()
+    all_ids = {r.id for r in rows}
+    register(client, "admin@x.com")
+    login(client, "admin@x.com")
+    promote_to_admin(db_session, "admin@x.com")
+
+    params = {"provider_code": "parsebot-alcampo", "canonical_ingredient_key": key}
+    page1 = client.get(f"{_BASE}/candidates", params={**params, "limit": 2, "offset": 0})
+    page2 = client.get(f"{_BASE}/candidates", params={**params, "limit": 2, "offset": 2})
+    assert page1.status_code == 200 and page2.status_code == 200
+    assert page1.json()["total"] == 3 and page2.json()["total"] == 3
+    ids1 = [i["mapping_id"] for i in page1.json()["items"]]
+    ids2 = [i["mapping_id"] for i in page2.json()["items"]]
+    assert len(ids1) == 2 and len(ids2) == 1
+    assert set(ids1) & set(ids2) == set()  # sin solape entre páginas
+    assert set(ids1) | set(ids2) == all_ids  # cubren exactamente el conjunto
+    # A igual impacto y confianza el desempate es estable (id ascendente): las páginas
+    # concatenadas reproducen el orden global, prueba de que el LIMIT/OFFSET no lo rompe.
+    assert ids1 + ids2 == sorted(all_ids)
+
+
 def test_summary_carries_two_layer_price_metrics(client: TestClient, db_session: Session) -> None:
     _competing(db_session, "tomate", "SUM-1")
     register(client, "adm-sum@x.com")

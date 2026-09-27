@@ -24,6 +24,7 @@ from cestaplan_api.db import engine, get_db
 from cestaplan_api.deps import CSRF_HEADER_NAME
 from cestaplan_api.routers import auth, catalog, households, invitations, pantry, prices
 from cestaplan_api.security import (
+    login_account_rate_limiter,
     login_rate_limiter,
     plan_generation_rate_limiter,
     registration_rate_limiter,
@@ -42,6 +43,7 @@ def _reset_rate_limiter() -> Iterator[None]:
     """
     for limiter in (
         login_rate_limiter,
+        login_account_rate_limiter,
         registration_rate_limiter,
         plan_generation_rate_limiter,
     ):
@@ -49,6 +51,7 @@ def _reset_rate_limiter() -> Iterator[None]:
     yield
     for limiter in (
         login_rate_limiter,
+        login_account_rate_limiter,
         registration_rate_limiter,
         plan_generation_rate_limiter,
     ):

@@ -9,7 +9,7 @@ Keyed by internal product id (unambiguous; this is a prod-maintenance tool run a
 database). Dry-run by default.
 
     python -m cestaplan_api.tools.set_product_packaging --product-ids 684,679 --package-quantity 12
-    python -m cestaplan_api.tools.set_product_packaging --product-ids 684 --package-quantity 12 --commit
+    # añade --commit para persistir (por defecto es dry-run)
 """
 
 from __future__ import annotations

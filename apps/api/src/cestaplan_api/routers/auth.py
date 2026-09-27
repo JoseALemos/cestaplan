@@ -36,6 +36,7 @@ from cestaplan_api.security import (
     hash_ip,
     hash_password,
     hash_token,
+    login_account_rate_limiter,
     login_rate_limiter,
     new_csrf_token,
     new_session_token,
@@ -116,7 +117,9 @@ def login(
     ip = _client_ip(request)
     rate_key = f"{email}|{ip or '-'}"
 
-    if login_rate_limiter.is_limited(rate_key):
+    # Dos ejes: (email,ip) frena la fuerza bruta desde una IP; el tope por cuenta (email, sin IP)
+    # frena el credential-stuffing distribuido de una misma cuenta desde muchas IPs.
+    if login_rate_limiter.is_limited(rate_key) or login_account_rate_limiter.is_limited(email):
         record_audit(db, action="auth.login.rate_limited", entity_type="user", ip=ip,
                      metadata={"email": email})
         raise HTTPException(
@@ -128,6 +131,7 @@ def login(
     # Uniform failure whether the user is missing or the password is wrong.
     if user is None or not verify_password(user.password_hash, payload.password):
         login_rate_limiter.record_failure(rate_key)
+        login_account_rate_limiter.record_failure(email)
         record_audit(db, action="auth.login.failed", entity_type="user", ip=ip,
                      metadata={"email": email})
         raise HTTPException(
@@ -139,6 +143,7 @@ def login(
         )
 
     login_rate_limiter.reset(rate_key)
+    login_account_rate_limiter.reset(email)
 
     now = datetime.now(UTC)
     raw_token, token_hash = new_session_token()

@@ -359,7 +359,7 @@ def backoff_delay(
     exponent = max(0, attempts - 1)
     seconds = float(min(cap, base * (2**exponent)))
     if jitter:
-        seconds += random.uniform(0, base)
+        seconds += random.uniform(0, base)  # noqa: S311
         seconds = min(seconds, cap + base)
     return timedelta(seconds=seconds)
 

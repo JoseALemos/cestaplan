@@ -42,7 +42,7 @@ def path_is_safe(output_path: str, *, allow_versioned: bool) -> tuple[bool, str]
     p = output_path.replace("\\", "/")
     if allow_versioned:
         return True, "explicitly allowed via --allow-sanitized-fixture-export"
-    if p.startswith("/tmp") or any(frag in p for frag in _SAFE_FRAGMENTS):
+    if p.startswith("/tmp") or any(frag in p for frag in _SAFE_FRAGMENTS):  # noqa: S108
         return True, "git-ignored capture path"
     if any(frag in p for frag in _VERSIONED_FRAGMENTS):
         return False, "refusing to write a raw capture into a versioned path"

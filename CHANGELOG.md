@@ -7,6 +7,45 @@ proyecto se adhiere a [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+Remediación de la auditoría QA integral (6 lentes) y contenido de recetas. Los manifiestos de
+versión (`package.json`, `pyproject.toml`, FastAPI) se alinean a la versión publicada.
+
+### Added
+
+- Pasos de elaboración en las 100 recetas del catálogo (revisión humana; registro idempotente).
+- Endpoint de supresión de cuenta por anonimización (`POST /api/v1/auth/account/delete`), derecho
+  de supresión del art. 17 RGPD (SEC5).
+- Purga de retención de los registros de auditoría al arrancar el worker + cron dedicado opcional
+  (SEC10).
+- Regla de lint de seguridad `ruff S` (bandit) sobre `src` y `tests` (T6).
+
+### Changed
+
+- Unificación de los tres carriles de costeo (planificación / cobertura-cesta / sombra) en zona,
+  frescura y envase (C1–C6): promoción por % sin coste negativo, `price_scope` en planificación,
+  pack de huevos también en el costeo-sombra, caducados degradados a estimado, cobertura sin staging.
+- El panel de revisión de mappings pagina en SQL sin traer todo el ORM en cada request (D4).
+- La cadencia del refresco de precios de Mercadona es durable en BD (antigüedad del precio), no en
+  memoria (A6).
+- Tope de login por cuenta (email, independiente de IP) además del tope por `(email, ip)`, para
+  frenar el credential-stuffing distribuido (SEC9).
+
+### Fixed
+
+- `CHECK` a nivel de BD en las 44 columnas enum (D1) y rollback lógico del histórico de precios en
+  vez de borrado físico (D2).
+- Reaper de `GenerationJob` colgados tras muerte dura del worker (A2).
+- Suite de tests hermética (siembra demo centralizada en el conftest raíz), sin falsos rojos en
+  ejecución parcial (T1); saneadas bombas de reloj de fechas fijas (T5, captura DST).
+- Documentación de despliegue: `API_UPSTREAM_URL` (obligatoria en el build de web) y orden de
+  migración entre servicios (A1, D3).
+
+### Security
+
+- Token de invitación redactado en los logs de acceso (SEC3); guard de arranque de cookie/secreto
+  también en producción self-hosted (SEC2); `docker-compose` no inyecta el `.env` completo al
+  servicio web (mínimo privilegio, SEC6).
+
 ## [0.2.0] — 2026-07-23
 
 **Subsistema de precios (ingesta).** Framework responsable de ingesta de precios,

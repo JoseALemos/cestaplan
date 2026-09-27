@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -103,6 +104,32 @@ def test_login_rate_limit_trips(client: TestClient) -> None:
     register(client, email)
     # Limiter is 5 failures / window; the 6th attempt is throttled.
     for _ in range(5):
+        r = client.post(
+            "/api/v1/auth/login", json={"email": email, "password": "bad-password-x"}
+        )
+        assert r.status_code == 401
+    throttled = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": "bad-password-x"}
+    )
+    assert throttled.status_code == 429
+
+
+def test_login_account_rate_limit_blocks_distributed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEC9: el tope por CUENTA (email, independiente de IP) corta el credential-stuffing
+    distribuido aunque el tope (email,ip) no llegue a saltar.
+
+    TestClient presenta siempre la misma IP, así que subimos el tope (email,ip) fuera de rango
+    para AISLAR el eje de cuenta y bajamos el de cuenta a 3; el 4º fallo debe cortarse con 429.
+    """
+    from cestaplan_api.security import login_account_rate_limiter, login_rate_limiter
+
+    monkeypatch.setattr(login_rate_limiter, "max_attempts", 10_000)
+    monkeypatch.setattr(login_account_rate_limiter, "max_attempts", 3)
+    email = _email()
+    register(client, email)
+    for _ in range(3):
         r = client.post(
             "/api/v1/auth/login", json={"email": email, "password": "bad-password-x"}
         )

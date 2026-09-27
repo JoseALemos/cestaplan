@@ -670,15 +670,17 @@ def test_plan_exposes_personalization_summary(db_session: Session) -> None:
     fav_recipe, rej_recipe = meals[0]["recipe_id"], meals[1]["recipe_id"]
 
     # Favourite one planned recipe, reject another -> the summary reflects both.
+    # Códigos exactos por endpoint: favorite se declara 201 CREATED (idempotente, siempre 201);
+    # feedback usa el 200 por defecto.
     assert client.post(
         f"/api/v1/plans/recipes/{fav_recipe}/favorite?household_id={hh['id']}",
         headers=csrf(token),
-    ).status_code in (200, 201)
+    ).status_code == 201
     assert client.post(
         f"/api/v1/plans/recipes/{rej_recipe}/feedback?household_id={hh['id']}",
         json={"sentiment": "reject"},
         headers=csrf(token),
-    ).status_code in (200, 201)
+    ).status_code == 200
 
     after_plan = client.get(f"/api/v1/plans/{meal_plan_id}").json()
     assert after_plan["personalization"]["favorites_included"] == 1

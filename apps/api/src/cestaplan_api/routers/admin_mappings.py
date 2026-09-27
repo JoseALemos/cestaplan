@@ -189,8 +189,14 @@ def list_candidates(
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     """List review candidates, ordered by potential recipe-unlock impact, then confidence."""
-    stmt = mr._filtered(
-        select(ProviderIngredientMapping),
+    # El orden es por IMPACTO (recetas potencialmente desbloqueadas), un valor que NO es una columna
+    # y se calcula en Python, así que un LIMIT/OFFSET directo en SQL cambiaría la semántica. Para
+    # que el endpoint escale sin traer todo el ORM en cada request, proyectamos SOLO las columnas
+    # necesarias para ordenar (id/provider/ingredient/confidence), ordenamos, y luego hidratamos el
+    # ORM completo (+ _serialize, que consulta por fila) ÚNICAMENTE para la página pedida.
+    M = ProviderIngredientMapping
+    key_stmt = mr._filtered(
+        select(M.id, M.provider_code, M.ingredient_id, M.confidence_score),
         provider_code=provider_code,
         retailer_slug=retailer_slug,
         ingredient_id=ingredient_id,
@@ -203,21 +209,34 @@ def list_candidates(
         minimum_confidence=None if minimum_confidence is None else Decimal(str(minimum_confidence)),
         maximum_confidence=None if maximum_confidence is None else Decimal(str(maximum_confidence)),
     )
-    rows = list(db.execute(stmt).scalars())  # type: ignore[arg-type]
+    key_rows = db.execute(key_stmt).all()
     now = datetime.now(UTC)
     unlock_by_provider: dict[str, dict[int, int]] = {}
-    for prov in {r.provider_code for r in rows}:
+    for prov in {r.provider_code for r in key_rows}:
         unlock_by_provider[prov] = mr._impact(db, prov, now).unlock_map
 
-    def _u(r: ProviderIngredientMapping) -> int:
-        return unlock_by_provider.get(r.provider_code, {}).get(r.ingredient_id, 0)
+    def _u_key(provider_code: str, ingredient_id: int) -> int:
+        return unlock_by_provider.get(provider_code, {}).get(ingredient_id, 0)
 
-    rows.sort(key=lambda r: (_u(r), float(r.confidence_score or 0), -r.id), reverse=True)
-    page = rows[offset : offset + limit]
+    key_rows.sort(
+        key=lambda r: (
+            _u_key(r.provider_code, r.ingredient_id),
+            float(r.confidence_score or 0),
+            -r.id,
+        ),
+        reverse=True,
+    )
+    total = len(key_rows)
+    page_ids = [r.id for r in key_rows[offset : offset + limit]]
+    full_by_id = {
+        row.id: row
+        for row in db.execute(select(M).where(M.id.in_(page_ids))).scalars()
+    } if page_ids else {}
+    page = [full_by_id[i] for i in page_ids if i in full_by_id]
     return {
-        "total": len(rows),
+        "total": total,
         "review_notice": _REVIEW_NOTICE,
-        "items": [_serialize(db, r, _u(r)) for r in page],
+        "items": [_serialize(db, r, _u_key(r.provider_code, r.ingredient_id)) for r in page],
     }
 
 

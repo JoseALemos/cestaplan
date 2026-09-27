@@ -249,7 +249,7 @@ def build_record(row: RawRow, index: int = 0) -> RowValidation:
     if errors:
         return RowValidation(errors=errors)
 
-    assert amount is not None and package_quantity is not None and observed_at is not None
+    assert amount is not None and package_quantity is not None and observed_at is not None  # noqa: S101
     record = NormalizedRecord(
         retailer_slug=row["retailer_slug"],
         store_external_code=row["store_external_code"],
@@ -675,7 +675,7 @@ def create_import(
             error_rows += 1
             continue
         record = validation.record
-        assert record is not None
+        assert record is not None  # noqa: S101
         key = _obs_key(record)
         if key in seen_obs:
             errors.append(

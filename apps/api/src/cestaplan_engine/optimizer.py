@@ -61,7 +61,7 @@ class PlanOptimizer:
         self._favorites = favorites
         self._rejected = rejected_recipe_ids
         self._soft = soft_penalty
-        self._rng = random.Random(seed)
+        self._rng = random.Random(seed)  # noqa: S311
         self._max_passes = max_passes
         # Nutrition fitting is inert unless a target is set: with ``nutrition_target``
         # None the extra term is 0 and the search is byte-identical to before.
@@ -238,7 +238,7 @@ class PlanOptimizer:
                 if best_key is None or key < best_key:
                     best_key = key
                     best_recipe = recipe
-            assert best_recipe is not None
+            assert best_recipe is not None  # noqa: S101
             chosen.append(best_recipe)
         return chosen
 

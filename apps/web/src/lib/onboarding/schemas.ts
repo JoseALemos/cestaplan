@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { EQUIPMENT_CODES } from "@/lib/api/types";
+import { SUPPORTED_CURRENCY_CODES } from "@/lib/constants/currencies";
 
 const decimalString = z
   .string()
@@ -9,9 +10,15 @@ const decimalString = z
   .regex(/^\d+([.,]\d{1,2})?$/, "Usa un número, p. ej. 45.50")
   .transform((value) => value.replace(",", "."));
 
+// F5: moneda restringida a la lista soportada (evita códigos ISO inválidos por texto libre).
+const currencyField = z
+  .string()
+  .length(3, "Código de 3 letras, p. ej. EUR")
+  .refine((c) => SUPPORTED_CURRENCY_CODES.includes(c), "Moneda no soportada");
+
 export const householdSchema = z.object({
   name: z.string().trim().min(1, "Dale un nombre a tu hogar").max(200),
-  currency: z.string().length(3, "Código de 3 letras, p. ej. EUR"),
+  currency: currencyField,
 });
 export type HouseholdFormValues = z.infer<typeof householdSchema>;
 
@@ -61,7 +68,7 @@ export type EquipmentFormValues = z.infer<typeof equipmentSchema>;
 
 export const budgetSchema = z.object({
   amount: decimalString,
-  currency: z.string().length(3),
+  currency: currencyField,
   mode: z.enum(["strict", "flexible"]),
   marginPercent: z.coerce.number().min(0).max(50),
   priority: z.enum(["waste", "price", "nutrition"]),

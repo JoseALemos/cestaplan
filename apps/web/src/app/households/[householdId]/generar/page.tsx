@@ -13,6 +13,7 @@ import { useHouseholdQuery, useMembersQuery } from "@/lib/query/hooks/use-househ
 import { useRetailersQuery, useStoresQuery } from "@/lib/query/hooks/use-catalog";
 import { useGeneratePlanMutation } from "@/lib/query/hooks/use-plans";
 import { budgetSchema, mealRequirementFormSchema } from "@/lib/onboarding/schemas";
+import { CURRENCY_OPTIONS } from "@/lib/constants/currencies";
 import { addDaysIso, todayIso } from "@/lib/utils/format";
 import type { MealRequirementIn } from "@/lib/api/types";
 
@@ -216,9 +217,9 @@ export default function GenerarPlanPage() {
                 error={errors.budget?.amount?.message}
                 {...register("budget.amount")}
               />
-              <Input
+              <Select
                 label="Moneda"
-                maxLength={3}
+                options={CURRENCY_OPTIONS}
                 required
                 error={errors.budget?.currency?.message}
                 {...register("budget.currency")}

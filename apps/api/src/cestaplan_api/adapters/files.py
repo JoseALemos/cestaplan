@@ -178,7 +178,7 @@ class ManualRetailerAdapter(RetailerAdapter):
             raise ValueError(
                 "; ".join(f"{e.field}: {e.message}" for e in record.errors)
             )
-        assert record.record is not None
+        assert record.record is not None  # noqa: S101
         return record.record
 
     def build_record_from_values(

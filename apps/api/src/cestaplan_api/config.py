@@ -28,7 +28,7 @@ _REPO_ROOT = _CONFIG_PARENTS[4] if len(_CONFIG_PARENTS) > 4 else _CONFIG_PARENTS
 
 # Valor por defecto INSEGURO del secreto de sesión: sólo válido en desarrollo. El guard de
 # arranque (``Settings.validate_runtime_security``) aborta si este valor sigue puesto en cloud.
-DEV_SESSION_SECRET = "dev-only-insecure-secret-change-me"
+DEV_SESSION_SECRET = "dev-only-insecure-secret-change-me"  # noqa: S105
 
 
 class Settings(BaseSettings):
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
         return value
 
     # --- API / web ---
-    api_host: str = "0.0.0.0"
+    api_host: str = "0.0.0.0"  # noqa: S104
     api_port: int = 8000
     api_public_url: str = "http://localhost:8000"
     web_public_url: str = "http://localhost:3000"

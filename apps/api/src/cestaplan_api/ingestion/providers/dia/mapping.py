@@ -90,7 +90,7 @@ _MEASURE_UNIT_ALIASES = {
     "ud": "unit",
 }
 
-_UNIT_TOKEN = "l|ml|g|gr|kg|litros?|mililitros?|gramos?|kilos?|kilogramos?"
+_UNIT_TOKEN = "l|ml|g|gr|kg|litros?|mililitros?|gramos?|kilos?|kilogramos?"  # noqa: S105
 # "pack 6 x 1 L" / "6 x 1 L" / "6x1L" -> count x per-quantity + unit (total = count * per).
 _PACK_RE = re.compile(
     rf"(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*({_UNIT_TOKEN})\b",  # noqa: RUF001 (U+00D7 intended)

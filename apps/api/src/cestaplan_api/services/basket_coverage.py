@@ -106,7 +106,7 @@ def evaluate_basket_coverage(lines: list[BasketLine]) -> BasketCoverageReport:
         if not _priced(line):
             report.unresolved_lines += 1
             continue
-        assert res is not None and res.selected_price is not None
+        assert res is not None and res.selected_price is not None  # noqa: S101
         cost = line.line_cost if line.line_cost is not None else res.selected_price * line.quantity
         if res.price_type == "estimated":
             est_used = True

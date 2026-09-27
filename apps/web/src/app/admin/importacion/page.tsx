@@ -39,8 +39,16 @@ export default function ImportacionPage() {
   const [preview, setPreview] = useState<AdminImportRecord | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingMapping, setPendingMapping] = useState<string | undefined>(undefined);
+  // F6: confirmación inline (sistema de diseño) en vez del window.confirm nativo.
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
 
   const errorCount = preview?.errors?.length ?? 0;
+
+  function resetPreview() {
+    setPreview(null);
+    setPendingFile(null);
+    setAwaitingConfirm(false);
+  }
 
   async function handlePreview(file: File, columnMapping: string | undefined) {
     setPreview(null);
@@ -54,14 +62,19 @@ export default function ImportacionPage() {
     }
   }
 
-  async function handleConfirm() {
+  function handleConfirm() {
     if (!pendingFile) return;
+    // Con errores, pedimos confirmación inline (diálogo propio) antes de importar solo lo válido.
     if (errorCount > 0) {
-      const proceed = window.confirm(
-        `La vista previa encontró ${errorCount} error(es). ¿Importar igualmente los datos válidos?`,
-      );
-      if (!proceed) return;
+      setAwaitingConfirm(true);
+      return;
     }
+    void runImport();
+  }
+
+  async function runImport() {
+    if (!pendingFile) return;
+    setAwaitingConfirm(false);
     try {
       const committed = await confirmMutation.mutateAsync({ file: pendingFile, column_mapping: pendingMapping });
       showToast({ tone: "success", title: "Importación aplicada" });
@@ -113,21 +126,35 @@ export default function ImportacionPage() {
                 volver a subirlo, o confirmar para importar únicamente las filas válidas.
               </Alert>
             ) : null}
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" loading={confirmMutation.isPending} onClick={handleConfirm}>
-                Confirmar e importar
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setPreview(null);
-                  setPendingFile(null);
-                }}
-              >
-                Descartar vista previa
-              </Button>
-            </div>
+            {awaitingConfirm ? (
+              <div className="flex flex-col gap-3" role="group" aria-label="Confirmar importación con errores">
+                <Alert tone="warning">
+                  La vista previa encontró {errorCount} error(es). Si continúas se importarán solo
+                  las filas válidas y las erróneas se omitirán. ¿Quieres continuar?
+                </Alert>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    loading={confirmMutation.isPending}
+                    onClick={() => void runImport()}
+                  >
+                    Importar solo las válidas
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={() => setAwaitingConfirm(false)}>
+                    Cancelar
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" loading={confirmMutation.isPending} onClick={handleConfirm}>
+                  Confirmar e importar
+                </Button>
+                <Button type="button" variant="ghost" onClick={resetPreview}>
+                  Descartar vista previa
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       ) : null}

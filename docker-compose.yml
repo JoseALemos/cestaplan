@@ -56,7 +56,8 @@ services:
         # API_UPSTREAM_URL is REQUIRED at build time (upstream.ts aborts in production if unset).
         # Server-only upstream the Next proxy forwards to — the api service on the compose network.
         API_UPSTREAM_URL: http://api:8000
-    env_file: .env
+    # SEC6: web NO recibe el `.env` completo (mínimo privilegio). El servidor Next solo necesita
+    # NEXT_PUBLIC_* (público) y API_UPSTREAM_URL; nunca OPENAI_API_KEY/SESSION_SECRET/DATABASE_URL.
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
       API_UPSTREAM_URL: http://api:8000

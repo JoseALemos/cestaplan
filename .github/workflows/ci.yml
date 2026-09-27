@@ -82,8 +82,12 @@ jobs:
         # must be applied BEFORE pytest (the drift check stays after).
         run: uv run alembic upgrade head
 
-      - name: Run tests (pytest)
-        run: uv run pytest
+      - name: Run tests (pytest + coverage)
+        # Cobertura con suelo (fail_under en pyproject [tool.coverage.report]); el build falla si baja.
+        run: >-
+          uv run pytest
+          --cov=cestaplan_api --cov=cestaplan_engine --cov=cestaplan_worker
+          --cov-report=term-missing
 
       - name: Migration validation (drift check)
         # Assert models and migrations are in sync; `alembic check` exits non-zero if

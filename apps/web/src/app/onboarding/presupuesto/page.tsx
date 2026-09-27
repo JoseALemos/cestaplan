@@ -7,6 +7,7 @@ import type { z } from "zod";
 
 import { useOnboarding } from "@/lib/onboarding/onboarding-context";
 import { budgetSchema } from "@/lib/onboarding/schemas";
+import { CURRENCY_OPTIONS } from "@/lib/constants/currencies";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -58,9 +59,9 @@ export default function PresupuestoPage() {
               error={errors.amount?.message}
               {...register("amount")}
             />
-            <Input
+            <Select
               label="Moneda"
-              maxLength={3}
+              options={CURRENCY_OPTIONS}
               required
               error={errors.currency?.message}
               {...register("currency")}

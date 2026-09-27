@@ -49,6 +49,11 @@ test: ## Run all tests
 	uv run --project apps/api pytest
 	pnpm test
 
+coverage: ## Run backend tests with coverage (enforces the fail_under floor)
+	cd apps/api && uv run pytest \
+		--cov=cestaplan_api --cov=cestaplan_engine --cov=cestaplan_worker \
+		--cov-report=term-missing
+
 fmt: ## Format code
 	uv run --project apps/api ruff format .
 	pnpm prettier --write .

@@ -1,3 +1,5 @@
+# El worker de generación de planes NO es un paquete aparte: vive en
+# apps/api/src/cestaplan_worker (comparte imagen y modelos con la API). Los contratos web (zod) y
+# api (pydantic) se mantienen a mano en cada app; no hay `packages/*` compartidos por ahora.
 packages:
   - "apps/web"
-  - "packages/*"

@@ -197,7 +197,7 @@ def _build_result(
     converter: UnitConverter,
     warnings: list[str],
 ) -> PlanResult:
-    assert outcome.provision is not None
+    assert outcome.provision is not None  # noqa: S101
     prov = outcome.provision
     participants = [m.alias for m in plan_input.members]
 

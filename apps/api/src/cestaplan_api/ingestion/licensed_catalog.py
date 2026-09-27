@@ -242,8 +242,8 @@ def resolve_record(
     if errors:
         return None, errors
 
-    assert external_id is not None and product_name is not None
-    assert amount is not None and currency is not None
+    assert external_id is not None and product_name is not None  # noqa: S101
+    assert amount is not None and currency is not None  # noqa: S101
 
     record = LicensedRecord(
         external_id=external_id,

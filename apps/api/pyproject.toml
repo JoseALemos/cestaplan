@@ -1,6 +1,6 @@
 [project]
 name = "cestaplan-api"
-version = "0.0.0"
+version = "0.2.0"
 description = "CestaPlan backend: FastAPI + deterministic meal-planning engine + Postgres-backed worker."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
     "ruff>=0.7",
     "pyright>=1.1.386",
 ]
@@ -41,11 +42,27 @@ target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+# 'S' (bandit) activo: detecta secretos hardcodeados, crypto débil, shell injection, etc. Los
+# asserts existentes en src (invariantes internas) van con `# noqa: S101` explícito, de modo que un
+# assert NUEVO sí se marque y el autor decida conscientemente.
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-# Alembic autogenerates these; long op.create_* lines are expected and not hand-edited.
-"migrations/versions/*" = ["E501", "I001"]
+# Alembic: líneas op.create_* largas y SQL crudo (op.execute con f-strings) son propios de las
+# migraciones escritas a mano; no son patrones de producción.
+"migrations/versions/*" = ["E501", "I001", "S"]
+# Tests: assert es el mecanismo de aserción; secretos/aleatoriedad/temp/subprocess/SQL crudo/chmod
+# son artefactos de fixture y de escenarios controlados, no patrones de producción.
+"tests/**" = [
+    "S101", "S103", "S105", "S106", "S107", "S108", "S311", "S603", "S607", "S608",
+]
+# Scripts de demo y herramientas de desarrollo: aleatoriedad no criptográfica y subprocess con
+# argumentos fijos y controlados.
+"src/cestaplan_api/scripts/*" = ["S311"]
+"src/cestaplan_api/tools/*" = ["S311", "S603"]
+# Provenance/backup: subprocess a git/pg_dump con argumentos fijos (sin entrada no confiable).
+"src/cestaplan_api/provenance/*" = ["S603", "S607"]
+"src/cestaplan_api/jobs/backup_database.py" = ["S603", "S607"]
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -58,3 +75,15 @@ venv = ".venv"
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# `--cov` NO va aquí a propósito: mediría cobertura en cada `pytest <fichero>` local y dispararía el
+# suelo con una sola prueba. La cobertura se activa en CI y en `make coverage` (ver T2).
+
+[tool.coverage.run]
+source = ["cestaplan_api", "cestaplan_engine", "cestaplan_worker"]
+omit = ["*/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true
+# Suelo de cobertura: la medición actual es ~86%; fijamos 80% con margen para no volver el CI
+# frágil. Súbelo a medida que crezca la cobertura (T2).
+fail_under = 80
